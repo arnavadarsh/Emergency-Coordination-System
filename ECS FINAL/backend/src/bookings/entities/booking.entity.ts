@@ -1,0 +1,80 @@
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
+  Index,
+} from 'typeorm';
+import { BookingStatus, SeverityLevel } from '../../common/enums';
+import { User } from '../../users/entities/user.entity';
+
+/**
+ * Booking entity
+ * Generic structure for emergency bookings
+ * Business logic will be added in later phases
+ */
+@Entity('bookings')
+@Index(['userId'])
+@Index(['status'])
+@Index(['createdAt'])
+export class Booking {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column({ type: 'uuid', name: 'user_id' })
+  userId: string;
+
+  @ManyToOne(() => User)
+  @JoinColumn({ name: 'user_id' })
+  user: User;
+
+  @Column({
+    type: 'enum',
+    enum: BookingStatus,
+    default: BookingStatus.CREATED,
+  })
+  status: BookingStatus;
+
+  @Column({
+    type: 'enum',
+    enum: SeverityLevel,
+    nullable: true,
+  })
+  severity: SeverityLevel;
+
+  @Column({ type: 'text', nullable: true })
+  description: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 7, name: 'pickup_latitude' })
+  pickupLatitude: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 7, name: 'pickup_longitude' })
+  pickupLongitude: number;
+
+  @Column({ type: 'text', nullable: true, name: 'pickup_address' })
+  pickupAddress: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 7, nullable: true, name: 'destination_latitude' })
+  destinationLatitude: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 7, nullable: true, name: 'destination_longitude' })
+  destinationLongitude: number;
+
+  @Column({ type: 'text', nullable: true, name: 'destination_address' })
+  destinationAddress: string;
+
+  @Column({ type: 'timestamp', nullable: true, name: 'completed_at' })
+  completedAt: Date;
+
+  @Column({ type: 'timestamp', nullable: true, name: 'cancelled_at' })
+  cancelledAt: Date;
+
+  @CreateDateColumn({ name: 'created_at' })
+  createdAt: Date;
+
+  @UpdateDateColumn({ name: 'updated_at' })
+  updatedAt: Date;
+}
