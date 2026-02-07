@@ -1,0 +1,282 @@
+.landing-container {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 20px;
+}
+
+.landing-container.hospital {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+}
+
+.landing-container.driver {
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+.landing-container.admin {
+  background: linear-gradient(135deg, #4a00e0 0%, #8e2de2 100%);
+}
+
+.landing-card {
+  background: white;
+  border-radius: 20px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  width: 100%;
+  max-width: 500px;
+  overflow: hidden;
+}
+
+.landing-header {
+  text-align: center;
+  padding: 40px 30px 20px;
+  background: linear-gradient(135deg, #f5f7fa 0%, #e4e8eb 100%);
+}
+
+.landing-header.hospital {
+  background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
+}
+
+.landing-header.driver {
+  background: linear-gradient(135deg, #fce4ec 0%, #f8bbd9 100%);
+}
+
+.landing-header.admin {
+  background: linear-gradient(135deg, #ede7f6 0%, #d1c4e9 100%);
+}
+
+.landing-icon {
+  font-size: 60px;
+  margin-bottom: 15px;
+}
+
+.landing-header h1 {
+  font-size: 28px;
+  color: #333;
+  margin: 0;
+}
+
+.landing-header p {
+  color: #666;
+  margin: 5px 0 0;
+}
+
+.mode-tabs {
+  display: flex;
+  border-bottom: 2px solid #eee;
+}
+
+.mode-tabs .tab {
+  flex: 1;
+  padding: 15px;
+  border: none;
+  background: none;
+  font-size: 16px;
+  font-weight: 600;
+  color: #888;
+  cursor: pointer;
+  transition: all 0.3s;
+  position: relative;
+}
+
+.mode-tabs .tab.active {
+  color: #11998e;
+}
+
+.mode-tabs .tab.active::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+}
+
+.landing-form {
+  padding: 30px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #333;
+  font-size: 14px;
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 14px 16px;
+  border: 2px solid #e0e0e0;
+  border-radius: 10px;
+  font-size: 16px;
+  transition: all 0.3s;
+  box-sizing: border-box;
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  border-color: #11998e;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(17, 153, 142, 0.1);
+}
+
+.error-message {
+  background: #fee;
+  color: #c00;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+
+.success-message {
+  background: #efe;
+  color: #060;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 20px;
+  font-size: 14px;
+}
+
+.submit-button {
+  width: 100%;
+  padding: 16px;
+  border: none;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  color: white;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  cursor: pointer;
+  transition: all 0.3s;
+}
+
+.submit-button.hospital {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+}
+
+.submit-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 5px 20px rgba(17, 153, 142, 0.4);
+}
+
+.submit-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Hospital Info Box */
+.info-box.hospital {
+  background: linear-gradient(135deg, #f5f7fa 0%, #e8f5e9 100%);
+  border: none;
+  margin: 0;
+  padding: 30px;
+  text-align: left;
+}
+
+.info-box .info-icon {
+  font-size: 48px;
+  display: block;
+  text-align: center;
+  margin-bottom: 15px;
+}
+
+.info-box h3 {
+  text-align: center;
+  color: #333;
+  margin: 0 0 15px;
+  font-size: 22px;
+}
+
+.info-box > p {
+  color: #555;
+  margin: 0 0 25px;
+  font-size: 15px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.contact-info {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.contact-item {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 12px 0;
+  border-bottom: 1px solid #eee;
+}
+
+.contact-item:last-child {
+  border-bottom: none;
+}
+
+.contact-icon {
+  font-size: 24px;
+}
+
+.contact-item div {
+  display: flex;
+  flex-direction: column;
+}
+
+.contact-item strong {
+  font-size: 12px;
+  color: #888;
+  text-transform: uppercase;
+}
+
+.contact-item a,
+.contact-item span {
+  color: #333;
+  font-size: 15px;
+  text-decoration: none;
+}
+
+.contact-item a:hover {
+  color: #11998e;
+}
+
+.requirements-list {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.requirements-list h4 {
+  color: #333;
+  margin: 0 0 15px;
+  font-size: 16px;
+}
+
+.requirements-list ul {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.requirements-list li {
+  color: #555;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+@media (max-width: 500px) {
+  .landing-card {
+    border-radius: 0;
+    max-width: 100%;
+  }
+}
