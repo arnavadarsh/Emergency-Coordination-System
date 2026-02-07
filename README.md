@@ -1,88 +1,95 @@
 # Emergency Coordination System (ECS)
 
-## Phase 0: Foundations & Environment Setup ✅
-
-Production-grade emergency coordination platform with multi-role architecture.
+A production-grade emergency ambulance coordination platform with multi-role architecture, real-time dispatch, triage assessment, and hospital ranking — built with NestJS, React, TypeScript, and PostgreSQL.
 
 ---
 
-## 🏗️ Project Structure
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| **Backend** | NestJS 10, TypeORM, PostgreSQL, Socket.IO |
+| **Frontend** | React 18, TypeScript, Vite 5, React Router 6 |
+| **Auth** | JWT (passport-jwt), bcrypt |
+| **Maps** | Leaflet (user, driver, admin dashboards) |
+| **Validation** | class-validator, class-transformer |
+
+---
+
+## Project Structure
 
 ```
-ECS FINAL/
-├── backend/                    # NestJS Backend
-│   ├── src/
-│   │   ├── auth/              # JWT Authentication
-│   │   ├── users/             # User Management
-│   │   ├── hospitals/         # Hospital Data
-│   │   ├── ambulances/        # Ambulance Fleet
-│   │   ├── bookings/          # Booking Foundation
-│   │   ├── dispatch/          # Dispatch Foundation
-│   │   ├── triage/            # Triage Placeholder
-│   │   ├── realtime/          # WebSocket Gateway
-│   │   ├── audit/             # Audit Logging
-│   │   ├── common/            # Shared Code
-│   │   ├── config/            # Configuration
-│   │   └── migrations/        # Database Migrations
-│   └── README.md
-│
-├── mobile/
-│   ├── user_app/              # Flutter User App
-│   └── driver_app/            # Flutter Driver App
+├── backend/                        # NestJS API server
+│   └── src/
+│       ├── auth/                   # JWT authentication & RBAC
+│       ├── users/                  # User management & profiles
+│       ├── hospitals/              # Hospital data & capabilities
+│       ├── ambulances/             # Ambulance fleet management
+│       ├── bookings/               # Emergency & scheduled bookings
+│       ├── dispatch/               # Dispatch lifecycle management
+│       ├── triage/                 # AI-driven triage assessment
+│       ├── dashboard/              # Analytics & statistics
+│       ├── realtime/               # WebSocket gateway (Socket.IO)
+│       ├── audit/                  # Audit logging
+│       ├── common/                 # Shared decorators & enums
+│       ├── config/                 # App, DB, JWT configuration
+│       └── migrations/             # TypeORM database migrations
 │
 ├── web/
-│   ├── hospital-dashboard/    # React Hospital Dashboard
-│   └── admin-dashboard/       # React Admin Dashboard
+│   ├── user-dashboard/             # Patient/User dashboard (port 3004)
+│   ├── driver-dashboard/           # Ambulance driver dashboard (port 3003)
+│   ├── hospital-dashboard/         # Hospital staff dashboard (port 3001)
+│   └── admin-dashboard/            # System admin dashboard (port 3002)
 │
-└── README.md                  # This file
+├── DATABASE_SCHEMA.txt             # Full database schema reference
+└── README.md
 ```
 
 ---
 
-## 🎯 Phase 0 Deliverables
+## Features
 
-### ✅ Backend (NestJS)
-- JWT-based authentication
-- Role-Based Access Control (RBAC): USER, DRIVER, HOSPITAL, ADMIN
-- PostgreSQL database with migrations
-- TypeORM entities for all core tables
-- WebSocket foundation with JWT auth
-- RESTful API endpoints for all modules
-- Clean architecture with modular design
+### Backend
+- JWT-based authentication with role-based access control (RBAC)
+- 4 user roles: **USER**, **DRIVER**, **HOSPITAL**, **ADMIN**
+- PostgreSQL database with TypeORM migrations
+- WebSocket gateway with JWT-authenticated connections
+- RESTful API with global validation pipe (`/api` prefix)
+- 10 feature modules: Auth, Users, Hospitals, Ambulances, Bookings, Dispatch, Triage, Dashboard, Realtime, Audit
+- CORS enabled for cross-origin dashboard access
 
-### ✅ Database (PostgreSQL)
-- Users & User Profiles
-- Hospitals & Hospital Capabilities
-- Ambulances with driver assignment
-- Bookings with status tracking
-- Dispatches linking bookings, ambulances, hospitals
-- Audit Logs for system-wide tracking
+### Web Dashboards
+- **User Dashboard** — Book ambulances, view booking status, map integration (Leaflet)
+- **Driver Dashboard** — View dispatch assignments, real-time location, map integration
+- **Hospital Dashboard** — Manage incoming patients, view bookings
+- **Admin Dashboard** — System-wide management, all entities, map overview
+- All dashboards: Landing page → JWT-protected dashboard routing
 
-### ✅ Mobile Apps (Flutter)
-- **User App**: Login, role-based redirect, placeholder home
-- **Driver App**: Login, role-based redirect, placeholder home
-
-### ✅ Web Dashboards (React + TypeScript)
-- **Hospital Dashboard**: Login, role validation, placeholder dashboard
-- **Admin Dashboard**: Login, role validation, placeholder dashboard
+### Database (13 tables, 9 domains)
+- Users & profiles with role-based access
+- Hospitals with capability tracking (ER, ICU, CARDIAC, TRAUMA, NEURO, OB)
+- Ambulance fleet (BASIC, ADVANCED, CRITICAL_CARE) with GPS location logging
+- Emergency & scheduled bookings with full status lifecycle
+- AI-driven triage with severity scoring and confidence levels
+- Dispatch lifecycle: DISPATCHED → EN_ROUTE_PICKUP → AT_PICKUP → EN_ROUTE_HOSPITAL → AT_HOSPITAL → COMPLETED
+- Hospital ranking snapshots (distance, ETA, capability match, availability)
+- Rerouting events (HOSPITAL_DIVERT, TRAFFIC, CLOSER, CAPACITY_FULL, PATIENT_CONDITION)
+- Audit logs and system notifications
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
 - Node.js 18+
 - PostgreSQL 14+
-- Flutter SDK 3.0+ (for mobile apps)
-- npm/yarn
+- npm
 
 ### 1. Backend Setup
 
 ```bash
 cd backend
-
-# Install dependencies
 npm install
 
 # Configure environment
@@ -99,275 +106,235 @@ npm run migration:run
 npm run start:dev
 ```
 
-Backend runs on `http://localhost:3000`
+Backend API runs on **http://localhost:3000/api**
 
-### 2. Mobile Apps Setup
+### 2. Web Dashboards
 
-**User App:**
+Each dashboard is an independent Vite + React app:
+
 ```bash
-cd mobile/user_app
-flutter pub get
-# Update lib/config/api_config.dart with backend URL
-flutter run
-```
+# User Dashboard (port 3004)
+cd web/user-dashboard
+npm install
+npm run dev
 
-**Driver App:**
-```bash
-cd mobile/driver_app
-flutter pub get
-# Update lib/config/api_config.dart with backend URL
-flutter run
-```
+# Driver Dashboard (port 3003)
+cd web/driver-dashboard
+npm install
+npm run dev
 
-### 3. Web Dashboards Setup
-
-**Hospital Dashboard:**
-```bash
+# Hospital Dashboard (port 3001)
 cd web/hospital-dashboard
 npm install
 npm run dev
-```
-Runs on `http://localhost:3001`
 
-**Admin Dashboard:**
-```bash
+# Admin Dashboard (port 3002)
 cd web/admin-dashboard
 npm install
 npm run dev
 ```
-Runs on `http://localhost:3002`
+
+### Port Summary
+
+| Service | Port |
+|---------|------|
+| Backend API | `3000` |
+| Hospital Dashboard | `3001` |
+| Admin Dashboard | `3002` |
+| Driver Dashboard | `3003` |
+| User Dashboard | `3004` |
 
 ---
 
-## 👥 User Roles
+## Environment Variables
 
-| Role | Description | Access |
-|------|-------------|--------|
-| **USER** | End users requesting ambulances | User App, Booking endpoints |
-| **DRIVER** | Ambulance drivers | Driver App, Dispatch endpoints |
-| **HOSPITAL** | Hospital staff | Hospital Dashboard, Hospital/Booking endpoints |
-| **ADMIN** | System administrators | Admin Dashboard, All endpoints |
+Copy `backend/.env.example` to `backend/.env` and configure:
 
----
-
-## 🔐 Authentication Flow
-
-1. User logs in via respective app/dashboard
-2. Backend validates credentials and checks role
-3. JWT token issued with user ID, email, and role
-4. Token stored securely (Flutter Secure Storage / localStorage)
-5. All API requests include token in Authorization header
-6. Backend validates token and enforces role-based access
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NODE_ENV` | `development` | Environment mode |
+| `PORT` | `3000` | Backend server port |
+| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_USERNAME` | `postgres` | Database user |
+| `DB_PASSWORD` | `postgres` | Database password |
+| `DB_DATABASE` | `ecs_db` | Database name |
+| `JWT_SECRET` | — | JWT signing secret (change in production) |
+| `JWT_EXPIRES_IN` | `7d` | Token expiration |
+| `WS_PORT` | `3001` | WebSocket port |
 
 ---
 
-## 📡 API Documentation
+## User Roles
+
+| Role | Dashboard | Access |
+|------|-----------|--------|
+| **USER** | User Dashboard | Book ambulances, view own bookings |
+| **DRIVER** | Driver Dashboard | View dispatches, update location |
+| **HOSPITAL** | Hospital Dashboard | Manage patients, view bookings |
+| **ADMIN** | Admin Dashboard | Full system access, all endpoints |
+
+---
+
+## API Endpoints
+
+All endpoints are prefixed with `/api`.
 
 ### Authentication
-- `POST /api/auth/login` - Login
-- `POST /api/auth/register` - Register
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/register` | Register a new user |
+| POST | `/api/auth/login` | Login and receive JWT |
 
 ### Users
-- `GET /api/users/me` - Get current user
-- `GET /api/users` - Get all users (admin)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/users/me` | Get current user profile |
+| GET | `/api/users` | List all users (admin) |
 
 ### Hospitals
-- `GET /api/hospitals` - List hospitals
-- `GET /api/hospitals/:id` - Get hospital details
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/hospitals` | List hospitals |
+| GET | `/api/hospitals/:id` | Get hospital details |
 
 ### Ambulances
-- `GET /api/ambulances` - List ambulances (admin/hospital)
-- `GET /api/ambulances/available` - Available ambulances
-- `GET /api/ambulances/:id` - Get ambulance details
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/ambulances` | List ambulances (admin/hospital) |
+| GET | `/api/ambulances/available` | Available ambulances |
+| GET | `/api/ambulances/:id` | Get ambulance details |
 
 ### Bookings
-- `GET /api/bookings` - List bookings (admin/hospital)
-- `GET /api/bookings/my-bookings` - User's bookings
-- `GET /api/bookings/:id` - Get booking details
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/bookings` | List bookings (admin/hospital) |
+| GET | `/api/bookings/my-bookings` | Current user's bookings |
+| GET | `/api/bookings/:id` | Get booking details |
 
 ### Dispatch
-- `GET /api/dispatch` - List dispatches (admin/hospital)
-- `GET /api/dispatch/:id` - Get dispatch details
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/dispatch` | List dispatches (admin/hospital) |
+| GET | `/api/dispatch/:id` | Get dispatch details |
 
 ### Audit
-- `GET /api/audit` - Audit logs (admin only)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/audit` | Audit logs (admin only) |
 
 ---
 
-## 🌐 WebSocket Events
+## WebSocket
 
-Connect with JWT token:
+Connect with JWT authentication:
+
 ```javascript
+import { io } from 'socket.io-client';
+
 const socket = io('http://localhost:3000', {
   auth: { token: 'your-jwt-token' }
 });
+
+socket.on('heartbeat', (data) => console.log(data));
+socket.emit('location:update', { lat: 28.6139, lng: 77.2090 });
 ```
 
-### Events (Phase 0)
-- `heartbeat` - Connection keepalive
-- `location:update` - Location updates (placeholder)
+---
+
+## Database Schema
+
+### Tables (13)
+
+| Domain | Tables |
+|--------|--------|
+| **Users** | `users`, `user_profiles` |
+| **Hospitals** | `hospitals`, `hospital_capabilities`, `hospital_status_history` |
+| **Ambulances** | `ambulances`, `ambulance_assignments`, `ambulance_location_logs` |
+| **Bookings** | `bookings`, `scheduled_requirements` |
+| **Triage** | `emergency_triage`, `triage_questions`, `triage_answers` |
+| **Dispatch** | `dispatches` |
+| **Ranking** | `hospital_ranking_snapshots` |
+| **Rerouting** | `reroute_events`, `reroute_blocks` |
+| **Audit** | `audit_logs`, `system_notifications` |
+
+### Key Enums
+
+| Enum | Values |
+|------|--------|
+| `user_role` | USER, DRIVER, HOSPITAL, ADMIN |
+| `booking_status` | CREATED, ASSIGNED, IN_PROGRESS, COMPLETED, CANCELLED |
+| `severity_level` | LOW, MEDIUM, HIGH, CRITICAL |
+| `ambulance_status` | AVAILABLE, BUSY, MAINTENANCE, OFFLINE |
+| `dispatch_status` | DISPATCHED, EN_ROUTE_PICKUP, AT_PICKUP, EN_ROUTE_HOSPITAL, AT_HOSPITAL, COMPLETED |
+| `capability_type` | ER, ICU, CARDIAC, TRAUMA, NEURO, OB |
+| `reroute_reason` | HOSPITAL_DIVERT, TRAFFIC, CLOSER, CAPACITY_FULL, PATIENT_CONDITION |
+
+See [DATABASE_SCHEMA.txt](DATABASE_SCHEMA.txt) for the full schema reference.
 
 ---
 
-## 🗄️ Database Schema
-
-### Core Tables
-- **users** - User authentication and roles
-- **user_profiles** - Extended user information
-- **hospitals** - Hospital information
-- **hospital_capabilities** - Hospital specializations (ER, ICU, CARDIAC, etc.)
-- **ambulances** - Ambulance fleet and driver assignment
-- **bookings** - Emergency booking requests
-- **dispatches** - Booking-ambulance-hospital linkage
-- **audit_logs** - System-wide change tracking
-
-### Enums
-- `UserRole`: USER, DRIVER, HOSPITAL, ADMIN
-- `BookingStatus`: CREATED, ASSIGNED, IN_PROGRESS, COMPLETED, CANCELLED
-- `HospitalStatus`: ACTIVE, INACTIVE, MAINTENANCE
-- `HospitalCapability`: ER, ICU, CARDIAC, TRAUMA, NEURO, OB
-- `SeverityLevel`: LOW, MEDIUM, HIGH, CRITICAL
-- `AmbulanceStatus`: AVAILABLE, BUSY, MAINTENANCE, OFFLINE
-
----
-
-## ⚠️ Phase 0 Limitations
-
-**NOT IMPLEMENTED:**
-- ❌ Emergency triage logic
-- ❌ Hospital ranking/selection algorithms
-- ❌ Ambulance routing
-- ❌ ETA calculations
-- ❌ Maps integration
-- ❌ Real-time tracking logic
-- ❌ Booking creation UI
-- ❌ Dispatch management UI
-
-These features are **intentionally excluded** from Phase 0 and will be added in subsequent phases.
-
----
-
-## 🧪 Testing
+## Testing
 
 ### Create Test Users
 
 ```bash
-# Register a USER
+# Register users for each role
 curl -X POST http://localhost:3000/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{
-    "email": "user@test.com",
-    "password": "password123",
-    "firstName": "Test",
-    "lastName": "User",
-    "role": "USER"
-  }'
+  -d '{"email":"user@test.com","password":"password123","firstName":"Test","lastName":"User","role":"USER"}'
 
-# Register a DRIVER
 curl -X POST http://localhost:3000/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{
-    "email": "driver@test.com",
-    "password": "password123",
-    "firstName": "Test",
-    "lastName": "Driver",
-    "role": "DRIVER"
-  }'
+  -d '{"email":"driver@test.com","password":"password123","firstName":"Test","lastName":"Driver","role":"DRIVER"}'
 
-# Register a HOSPITAL
 curl -X POST http://localhost:3000/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{
-    "email": "hospital@test.com",
-    "password": "password123",
-    "firstName": "Test",
-    "lastName": "Hospital",
-    "role": "HOSPITAL"
-  }'
+  -d '{"email":"hospital@test.com","password":"password123","firstName":"Test","lastName":"Hospital","role":"HOSPITAL"}'
 
-# Register an ADMIN
 curl -X POST http://localhost:3000/api/auth/register \
   -H "Content-Type: application/json" \
-  -d '{
-    "email": "admin@test.com",
-    "password": "password123",
-    "firstName": "Test",
-    "lastName": "Admin",
-    "role": "ADMIN"
-  }'
+  -d '{"email":"admin@test.com","password":"password123","firstName":"Test","lastName":"Admin","role":"ADMIN"}'
 ```
 
----
+### Run Backend Tests
 
-## 📋 Development Guidelines
-
-### Code Quality
-- ESLint + Prettier for backend
-- TypeScript strict mode
-- Clean architecture principles
-- Meaningful variable/function names
-- Comments explain WHY, not WHAT
-
-### Git Workflow
 ```bash
-# Feature branches
-git checkout -b feature/your-feature-name
-
-# Commit messages
-git commit -m "feat: add hospital capability filtering"
-git commit -m "fix: resolve JWT token validation bug"
-git commit -m "docs: update API documentation"
+cd backend
+npm run test          # Unit tests
+npm run test:e2e      # End-to-end tests
+npm run test:cov      # Coverage report
 ```
 
-### Environment Variables
-- Never commit `.env` files
-- Use `.env.example` as template
-- Document all environment variables
+---
+
+## Backend Scripts
+
+```bash
+npm run start:dev       # Development with hot reload
+npm run start:prod      # Production mode
+npm run build           # Compile TypeScript
+npm run lint            # ESLint check
+npm run format          # Prettier formatting
+npm run migration:run   # Run pending migrations
+npm run migration:revert # Revert last migration
+npm run migration:generate -- -n MigrationName  # Generate migration
+```
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
-### Backend won't start
-- Check PostgreSQL is running
-- Verify database credentials in `.env`
-- Ensure migrations have run: `npm run migration:run`
-
-### Mobile app can't connect
-- For Android emulator: Use `http://10.0.2.2:3000/api`
-- For iOS simulator: Use `http://localhost:3000/api`
-- Check backend is running
-
-### Database migration errors
-- Ensure database exists: `createdb ecs_db`
-- Drop and recreate if needed (dev only)
-- Check PostgreSQL version (14+)
+| Problem | Solution |
+|---------|----------|
+| Backend won't start | Check PostgreSQL is running, verify `.env` credentials |
+| Migration errors | Ensure database exists: `createdb ecs_db` |
+| Dashboard can't connect to API | Verify backend is running on port 3000 |
+| CORS errors | Backend CORS is enabled for all origins in development |
+| JWT token expired | Default expiry is 7 days; re-login to get a new token |
 
 ---
 
-## 📚 Next Steps (Phase 1+)
-
-1. **Phase 1**: Implement triage logic and hospital selection
-2. **Phase 2**: Add maps integration and routing
-3. **Phase 3**: Real-time tracking and dispatch management
-4. **Phase 4**: Analytics and reporting
-5. **Phase 5**: Testing and optimization
-
----
-
-## 📄 License
+## License
 
 MIT
-
----
-
-## 👨‍💻 Development
-
-This is a Phase 0 foundation. All business logic is intentionally minimal to establish:
-- Clean architecture
-- Authentication & authorization
-- Database schema
-- API structure
-- Frontend-backend integration
-
-Build upon this foundation in subsequent phases.
