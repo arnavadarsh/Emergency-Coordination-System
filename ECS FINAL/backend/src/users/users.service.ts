@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { User } from './entities';
+import { User, SavedLocation } from './entities';
 
 /**
  * Users Service
@@ -12,6 +12,8 @@ export class UsersService {
   constructor(
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    @InjectRepository(SavedLocation)
+    private savedLocationRepository: Repository<SavedLocation>,
   ) {}
 
   /**
@@ -82,6 +84,69 @@ export class UsersService {
   }
 
   /**
+   * Find users with pagination and filters (admin only)
+   */
+  async findWithFilters(options: {
+    page?: number;
+    limit?: number;
+    search?: string;
+    role?: any;
+    status?: 'active' | 'inactive';
+    sortBy?: string;
+    sortOrder?: 'ASC' | 'DESC';
+  }): Promise<{
+    data: User[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const page = options.page || 1;
+    const limit = options.limit || 10;
+    const sortBy = options.sortBy || 'createdAt';
+    const sortOrder = options.sortOrder || 'DESC';
+
+    const query = this.userRepository.createQueryBuilder('user');
+
+    // Search filter
+    if (options.search) {
+      query.andWhere(
+        '(user.firstName LIKE :search OR user.lastName LIKE :search OR user.email LIKE :search OR user.phoneNumber LIKE :search)',
+        { search: `%${options.search}%` }
+      );
+    }
+
+    // Role filter
+    if (options.role) {
+      query.andWhere('user.role = :role', { role: options.role });
+    }
+
+    // Status filter
+    if (options.status) {
+      const isActive = options.status === 'active';
+      query.andWhere('user.isActive = :isActive', { isActive });
+    }
+
+    // Get total count
+    const total = await query.getCount();
+
+    // Apply sorting and pagination
+    query.orderBy(`user.${sortBy}`, sortOrder);
+    query.skip((page - 1) * limit);
+    query.take(limit);
+
+    const data = await query.getMany();
+
+    return {
+      data,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  /**
    * Update user active status
    */
   async updateActiveStatus(userId: string, isActive: boolean): Promise<User> {
@@ -125,6 +190,8 @@ export class UsersService {
     address?: string;
     emergencyContact?: string;
     dateOfBirth?: string;
+    bloodType?: string;
+    medicalNotes?: string;
   }): Promise<User> {
     const user = await this.findById(userId);
     if (!user) {
@@ -138,6 +205,8 @@ export class UsersService {
     if (profileData.address !== undefined) updateData.address = profileData.address;
     if (profileData.emergencyContact !== undefined) updateData.emergencyContact = profileData.emergencyContact;
     if (profileData.dateOfBirth !== undefined) updateData.dateOfBirth = new Date(profileData.dateOfBirth);
+    if (profileData.bloodType !== undefined) updateData.bloodType = profileData.bloodType;
+    if (profileData.medicalNotes !== undefined) updateData.medicalNotes = profileData.medicalNotes;
 
     await this.userRepository.update(userId, updateData);
 
@@ -145,6 +214,232 @@ export class UsersService {
     if (!updatedUser) {
       throw new Error('Failed to retrieve updated user');
     }
+    return updatedUser;
+  }
+
+  /**
+   * Get medical records for a user
+   */
+  async getMedicalRecords(userId: string): Promise<{
+    bloodType?: string;
+    medicalNotes?: string;
+    emergencyContact?: string;
+  }> {
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    return {
+      bloodType: user.bloodType,
+      medicalNotes: user.medicalNotes,
+      emergencyContact: user.emergencyContact,
+    };
+  }
+
+  /**
+   * Update medical records
+   */
+  async updateMedicalRecords(userId: string, data: {
+    bloodType?: string;
+    medicalNotes?: string;
+    emergencyContact?: string;
+  }): Promise<User> {
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const updateData: any = {};
+    if (data.bloodType !== undefined) updateData.bloodType = data.bloodType;
+    if (data.medicalNotes !== undefined) updateData.medicalNotes = data.medicalNotes;
+    if (data.emergencyContact !== undefined) updateData.emergencyContact = data.emergencyContact;
+
+    await this.userRepository.update(userId, updateData);
+    
+    const updatedUser = await this.findById(userId);
+    if (!updatedUser) {
+      throw new Error('Failed to retrieve updated user');
+    }
+    return updatedUser;
+  }
+
+  /**
+   * Find users by role
+   */
+  async findByRole(role: any): Promise<User[]> {
+    return this.userRepository.find({
+      where: { role },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  /**
+   * Get user statistics
+   */
+  async getUserStats(): Promise<{
+    totalUsers: number;
+    activeUsers: number;
+    inactiveUsers: number;
+    usersByRole: Record<string, number>;
+  }> {
+    const allUsers = await this.userRepository.find();
+    
+    const totalUsers = allUsers.length;
+    const activeUsers = allUsers.filter(u => u.isActive).length;
+    const inactiveUsers = totalUsers - activeUsers;
+    
+    const usersByRole: Record<string, number> = {};
+    allUsers.forEach(user => {
+      const role = user.role || 'USER';
+      usersByRole[role] = (usersByRole[role] || 0) + 1;
+    });
+
+    return {
+      totalUsers,
+      activeUsers,
+      inactiveUsers,
+      usersByRole,
+    };
+  }
+
+  /**
+   * Get user's saved locations
+   */
+  async getSavedLocations(userId: string): Promise<SavedLocation[]> {
+    return this.savedLocationRepository.find({
+      where: { userId },
+      order: { isDefault: 'DESC', createdAt: 'DESC' },
+    });
+  }
+
+  /**
+   * Create a new saved location
+   */
+  async createSavedLocation(userId: string, data: {
+    label: string;
+    address: string;
+    latitude: number;
+    longitude: number;
+    isDefault?: boolean;
+  }): Promise<SavedLocation> {
+    // If setting as default, unset other defaults
+    if (data.isDefault) {
+      await this.savedLocationRepository.update(
+        { userId },
+        { isDefault: false }
+      );
+    }
+
+    const savedLocation = this.savedLocationRepository.create({
+      userId,
+      ...data,
+    });
+
+    return await this.savedLocationRepository.save(savedLocation);
+  }
+
+  /**
+   * Update a saved location
+   */
+  async updateSavedLocation(
+    userId: string,
+    locationId: string,
+    data: {
+      label?: string;
+      address?: string;
+      latitude?: number;
+      longitude?: number;
+      isDefault?: boolean;
+    }
+  ): Promise<SavedLocation> {
+    const location = await this.savedLocationRepository.findOne({
+      where: { id: locationId, userId },
+    });
+
+    if (!location) {
+      throw new NotFoundException('Saved location not found');
+    }
+
+    // If setting as default, unset other defaults
+    if (data.isDefault) {
+      await this.savedLocationRepository.update(
+        { userId },
+        { isDefault: false }
+      );
+    }
+
+    await this.savedLocationRepository.update(locationId, data);
+
+    const updated = await this.savedLocationRepository.findOne({
+      where: { id: locationId },
+    });
+
+    if (!updated) {
+      throw new Error('Failed to retrieve updated location');
+    }
+
+    return updated;
+  }
+
+  /**
+   * Delete a saved location
+   */
+  async deleteSavedLocation(userId: string, locationId: string): Promise<void> {
+    const location = await this.savedLocationRepository.findOne({
+      where: { id: locationId, userId },
+    });
+
+    if (!location) {
+      throw new NotFoundException('Saved location not found');
+    }
+
+    await this.savedLocationRepository.delete(locationId);
+  }
+
+  /**
+   * Get notification preferences
+   */
+  async getNotificationPreferences(userId: string): Promise<{
+    emailNotifications: boolean;
+    smsNotifications: boolean;
+    pushNotifications: boolean;
+  }> {
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    return {
+      emailNotifications: user.emailNotifications ?? true,
+      smsNotifications: user.smsNotifications ?? true,
+      pushNotifications: user.pushNotifications ?? true,
+    };
+  }
+
+  /**
+   * Update notification preferences
+   */
+  async updateNotificationPreferences(
+    userId: string,
+    data: {
+      emailNotifications?: boolean;
+      smsNotifications?: boolean;
+      pushNotifications?: boolean;
+    }
+  ): Promise<User> {
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    await this.userRepository.update(userId, data);
+
+    const updatedUser = await this.findById(userId);
+    if (!updatedUser) {
+      throw new Error('Failed to retrieve updated user');
+    }
+
     return updatedUser;
   }
 }

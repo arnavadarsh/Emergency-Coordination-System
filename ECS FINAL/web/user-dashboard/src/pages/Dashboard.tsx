@@ -5,6 +5,8 @@ import { tokenStorage } from '../utils/tokenStorage';
 import '../styles/Dashboard.css';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { SavedLocationsTab } from '../components/SavedLocationsTab';
+import { NotificationPreferencesSection } from '../components/NotificationPreferencesSection';
 
 const API_BASE_URL = 'http://localhost:3000/api';
 
@@ -85,7 +87,7 @@ interface UserProfile {
   dateOfBirth?: string;
 }
 
-type TabType = 'bookings' | 'profile';
+type TabType = 'bookings' | 'profile' | 'locations';
 
 function Dashboard() {
   const navigate = useNavigate();
@@ -604,10 +606,21 @@ function Dashboard() {
 
   const handleCreateBooking = async () => {
     try {
+      // Validate required fields
+      if (!pickupLocation && !pickupCoords) {
+        alert('Please select a pickup location');
+        return;
+      }
+
+      if (bookingType === 'SCHEDULED' && (!dropoffLocation || !scheduledTime)) {
+        alert('Please provide dropoff location and scheduled time for scheduled transport');
+        return;
+      }
+
       const token = tokenStorage.getToken();
       const bookingData: any = {
-        pickupLocation,
-        pickupAddress: pickupLocation,
+        pickupLocation: pickupLocation || 'Current Location',
+        pickupAddress: pickupLocation || 'Current Location',
         pickupLatitude: pickupCoords?.lat || 28.6139,
         pickupLongitude: pickupCoords?.lng || 77.2090,
         bookingType,
@@ -622,13 +635,19 @@ function Dashboard() {
         bookingData.ambulanceFacilities = ambulanceFacilities;
       } else {
         bookingData.triageData = triageData;
+        bookingData.severity = triageData.severity;
+        bookingData.description = triageData.chiefComplaint;
       }
 
-      await axios.post(
+      console.log('Creating booking with data:', bookingData);
+
+      const response = await axios.post(
         `${API_BASE_URL}/bookings`,
         bookingData,
         { headers: { Authorization: `Bearer ${token}` } }
       );
+
+      console.log('Booking created successfully:', response.data);
 
       // Reset form
       setShowBookingForm(false);
@@ -656,9 +675,10 @@ function Dashboard() {
 
       await fetchDashboardData();
       alert('Booking created successfully! An ambulance will be assigned shortly.');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to create booking:', err);
-      alert('Failed to create booking');
+      const errorMessage = err.response?.data?.message || err.message || 'Failed to create booking';
+      alert(`Error: ${errorMessage}`);
     }
   };
 
@@ -897,6 +917,12 @@ function Dashboard() {
             </svg>
             <span>Profile</span>
           </a>
+          <a href="#" className={`nav-item ${activeTab === 'locations' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('locations'); setShowBookingForm(false); }}>
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="currentColor"/>
+            </svg>
+            <span>Saved Locations</span>
+          </a>
         </nav>
 
         <button onClick={handleLogout} className="logout-btn">
@@ -910,8 +936,8 @@ function Dashboard() {
       <main className="main-content">
         <header className="dashboard-header">
           <div>
-            <h1>{activeTab === 'bookings' ? 'My Bookings' : 'My Profile'}</h1>
-            <p>{activeTab === 'bookings' ? 'Book ambulance services and track your requests' : 'Manage your personal information'}</p>
+            <h1>{activeTab === 'bookings' ? 'My Bookings' : activeTab === 'profile' ? 'My Profile' : 'Saved Locations'}</h1>
+            <p>{activeTab === 'bookings' ? 'Book ambulance services and track your requests' : activeTab === 'profile' ? 'Manage your personal information' : 'Manage your frequently used locations'}</p>
           </div>
           {userProfile && activeTab === 'bookings' && (
             <div className="user-info-card">
@@ -1308,6 +1334,15 @@ function Dashboard() {
                 </>
               )}
             </div>
+            
+            {/* Notification Preferences Section */}
+            <div style={{ marginTop: '32px' }}>
+              <NotificationPreferencesSection token={tokenStorage.getToken() || ''} />
+            </div>
+          </div>
+        ) : activeTab === 'locations' ? (
+          <div style={{ padding: '24px' }}>
+            <SavedLocationsTab token={tokenStorage.getToken() || ''} />
           </div>
         ) : !showBookingForm ? (
           <>

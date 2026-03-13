@@ -110,6 +110,13 @@ export class DashboardService {
     const totalHospitals = await this.hospitalRepository.count();
     const totalAmbulances = await this.ambulanceRepository.count();
 
+    // Get users by role
+    const adminUsers = await this.userRepository.count({ where: { role: UserRole.ADMIN } });
+    const hospitalUsers = await this.userRepository.count({ where: { role: UserRole.HOSPITAL } });
+    const driverUsers = await this.userRepository.count({ where: { role: UserRole.DRIVER } });
+    const regularUsers = await this.userRepository.count({ where: { role: UserRole.USER } });
+    const activeUsers = await this.userRepository.count({ where: { isActive: true } });
+
     // Get bookings
     const allBookings = await this.bookingRepository.find();
     const activeBookings = allBookings.filter(b => 
@@ -122,9 +129,41 @@ export class DashboardService {
       new Date(b.completedAt) >= today
     ).length;
 
+    const completedTotal = allBookings.filter(b => b.status === BookingStatus.COMPLETED).length;
+    const cancelledTotal = allBookings.filter(b => b.status === BookingStatus.CANCELLED).length;
+
     const emergenciesHandled = allBookings.filter(b => 
       b.severity === 'HIGH' || b.severity === 'CRITICAL'
     ).length;
+
+    // Calculate average response time (seconds)
+    const completedBookings = allBookings.filter(b => b.status === BookingStatus.COMPLETED);
+    let avgResponseTime = 0;
+    if (completedBookings.length > 0) {
+      const totalTime = completedBookings.reduce((sum, b) => {
+        if (b.completedAt && b.createdAt) {
+          return sum + (new Date(b.completedAt).getTime() - new Date(b.createdAt).getTime());
+        }
+        return sum;
+      }, 0);
+      avgResponseTime = Math.round((totalTime / completedBookings.length) / 1000); // Convert to seconds
+    }
+
+    // Get ambulance stats
+    const ambulances = await this.ambulanceRepository.find();
+    const availableAmbulances = ambulances.filter(a => a.status === 'AVAILABLE').length;
+    const busyAmbulances = ambulances.filter(a => a.status === 'BUSY').length;
+    const maintenanceAmbulances = ambulances.filter(a => a.status === 'MAINTENANCE').length;
+    const verifiedAmbulances = ambulances.filter(a => a.status !== 'PENDING').length;
+
+    // Get hospital capacity overview
+    const hospitals = await this.hospitalRepository.find({
+      relations: ['capabilities'],
+    });
+    const totalBeds = hospitals.reduce((sum, h) => sum + (h.totalBeds || 0), 0);
+    const availableBeds = hospitals.reduce((sum, h) => sum + (h.availableBeds || 0), 0);
+    const occupiedBeds = totalBeds - availableBeds;
+    const capacityUtilization = totalBeds > 0 ? ((occupiedBeds / totalBeds) * 100).toFixed(1) : '0';
 
     // Get recent audit logs
     const auditLogs = await this.auditRepository.find({
@@ -137,14 +176,6 @@ export class DashboardService {
       order: { createdAt: 'DESC' },
     });
 
-    // Get all hospitals
-    const hospitals = await this.hospitalRepository.find({
-      relations: ['capabilities'],
-    });
-
-    // Get all ambulances
-    const ambulances = await this.ambulanceRepository.find();
-
     return {
       stats: {
         totalUsers,
@@ -153,6 +184,39 @@ export class DashboardService {
         activeBookings,
         completedToday,
         emergenciesHandled,
+        avgResponseTime, // in seconds
+        usersByRole: {
+          admin: adminUsers,
+          hospital: hospitalUsers,
+          driver: driverUsers,
+          user: regularUsers,
+        },
+        activeUsers,
+        bookingStats: {
+          total: allBookings.length,
+          active: activeBookings,
+          completed: completedTotal,
+          cancelled: cancelledTotal,
+          completionRate: allBookings.length > 0 
+            ? ((completedTotal / allBookings.length) * 100).toFixed(1) 
+            : '0',
+        },
+        ambulanceStats: {
+          total: totalAmbulances,
+          available: availableAmbulances,
+          busy: busyAmbulances,
+          maintenance: maintenanceAmbulances,
+          verified: verifiedAmbulances,
+          utilization: totalAmbulances > 0 
+            ? ((busyAmbulances / totalAmbulances) * 100).toFixed(1) 
+            : '0',
+        },
+        hospitalCapacity: {
+          totalBeds,
+          availableBeds,
+          occupiedBeds,
+          utilization: capacityUtilization,
+        },
       },
       recentAudit: auditLogs.map(log => ({
         id: log.id,
@@ -187,7 +251,6 @@ export class DashboardService {
     // Get driver user info
     const driver = await this.userRepository.findOne({
       where: { id: driverId },
-      relations: ['profile'],
     });
 
     // Get dispatches - for now get all dispatches

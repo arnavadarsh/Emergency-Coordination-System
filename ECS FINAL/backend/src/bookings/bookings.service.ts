@@ -63,6 +63,7 @@ export class BookingsService {
     destinationAddress?: string;
     severity?: SeverityLevel;
     description?: string;
+    bookingType?: string;
   }): Promise<Booking> {
     const booking = this.bookingRepository.create({
       userId,
@@ -75,6 +76,7 @@ export class BookingsService {
       severity: data.severity || SeverityLevel.MEDIUM,
       description: data.description,
       status: BookingStatus.CREATED,
+      bookingType: data.bookingType || 'EMERGENCY',
     });
     const savedBooking = await this.bookingRepository.save(booking);
 
@@ -217,5 +219,112 @@ export class BookingsService {
     booking.status = BookingStatus.CANCELLED;
     booking.cancelledAt = new Date();
     return this.bookingRepository.save(booking);
+  }
+
+  /**
+   * Get booking tracking information
+   */
+  async getTrackingInfo(id: string): Promise<any> {
+    const booking = await this.bookingRepository.findOne({
+      where: { id },
+      relations: ['user'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    // Get dispatch information
+    const dispatch = await this.dispatchRepository.findOne({
+      where: { bookingId: id },
+      relations: ['ambulance'],
+      order: { createdAt: 'DESC' },
+    });
+
+    return {
+      booking: {
+        id: booking.id,
+        status: booking.status,
+        severity: booking.severity,
+        pickupLocation: {
+          latitude: booking.pickupLatitude,
+          longitude: booking.pickupLongitude,
+          address: booking.pickupAddress,
+        },
+        destinationLocation: booking.destinationLatitude ? {
+          latitude: booking.destinationLatitude,
+          longitude: booking.destinationLongitude,
+          address: booking.destinationAddress,
+        } : null,
+        createdAt: booking.createdAt,
+        completedAt: booking.completedAt,
+      },
+      dispatch: dispatch ? {
+        id: dispatch.id,
+        status: dispatch.status,
+        dispatchedAt: dispatch.dispatchedAt,
+        arrivedAtPickup: dispatch.arrivedAtPickup,
+        completedAt: dispatch.completedAt,
+        estimatedPickupTime: dispatch.estimatedPickupTime,
+        ambulance: dispatch.ambulance ? {
+          id: dispatch.ambulance.id,
+          vehicleNumber: dispatch.ambulance.vehicleNumber,
+          vehicleType: dispatch.ambulance.vehicleType,
+          currentLocation: {
+            latitude: dispatch.ambulance.currentLatitude,
+            longitude: dispatch.ambulance.currentLongitude,
+          },
+          status: dispatch.ambulance.status,
+        } : null,
+      } : null,
+    };
+  }
+
+  /**
+   * Get booking statistics for admin
+   */
+  async getBookingStats(): Promise<any> {
+    const totalBookings = await this.bookingRepository.count();
+    const completedBookings = await this.bookingRepository.count({
+      where: { status: BookingStatus.COMPLETED },
+    });
+    const cancelledBookings = await this.bookingRepository.count({
+      where: { status: BookingStatus.CANCELLED },
+    });
+    const activeBookings = await this.bookingRepository.count({
+      where: [
+        { status: BookingStatus.CREATED },
+        { status: BookingStatus.ASSIGNED },
+        { status: BookingStatus.IN_PROGRESS },
+      ],
+    });
+
+    // Get bookings by severity
+    const criticalBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.CRITICAL },
+    });
+    const highBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.HIGH },
+    });
+    const mediumBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.MEDIUM },
+    });
+    const lowBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.LOW },
+    });
+
+    return {
+      total: totalBookings,
+      completed: completedBookings,
+      cancelled: cancelledBookings,
+      active: activeBookings,
+      completionRate: totalBookings > 0 ? ((completedBookings / totalBookings) * 100).toFixed(2) : 0,
+      bySeverity: {
+        critical: criticalBookings,
+        high: highBookings,
+        medium: mediumBookings,
+        low: lowBookings,
+      },
+    };
   }
 }

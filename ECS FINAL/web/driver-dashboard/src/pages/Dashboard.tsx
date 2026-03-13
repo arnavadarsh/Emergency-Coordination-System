@@ -2,6 +2,8 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { tokenStorage } from '../utils/tokenStorage';
+import { AmbulanceTracker } from '../components/AmbulanceTracker';
+import { EquipmentChecklist } from '../components/EquipmentChecklist';
 import '../styles/Dashboard.css';
 
 const API_BASE_URL = 'http://localhost:3000/api';
@@ -593,6 +595,22 @@ function Dashboard() {
               )}
             </div>
           </div>
+
+          {/* Ambulance Status & Location Tracking */}
+          {driverProfile?.ambulanceId && (
+            <AmbulanceTracker 
+              ambulanceId={driverProfile.ambulanceId}
+              currentStatus={driverProfile.ambulance?.status || 'AVAILABLE'}
+            />
+          )}
+
+          {/* Equipment Checklist */}
+          {driverProfile?.ambulanceId && (
+            <EquipmentChecklist 
+              ambulanceId={driverProfile.ambulanceId}
+              initialEquipment={driverProfile.ambulance}
+            />
+          )}
         </div>
         )}
       </main>

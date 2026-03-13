@@ -53,7 +53,7 @@ export class Dispatch {
   @Column({ type: 'varchar', length: 30, default: 'DISPATCHED' })
   status: string;
 
-  @Column({ type: 'timestamp', default: () => 'NOW()', name: 'dispatched_at' })
+  @Column({ type: 'timestamp', nullable: true, default: () => 'NOW()', name: 'dispatched_at' })
   dispatchedAt: Date;
 
   @Column({ type: 'timestamp', nullable: true, name: 'arrived_at_pickup' })

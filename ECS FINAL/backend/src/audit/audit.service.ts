@@ -51,4 +51,48 @@ export class AuditService {
       take: limit,
     });
   }
+
+  /**
+   * Get audit statistics
+   */
+  async getStats(): Promise<any> {
+    const totalLogs = await this.auditLogRepository.count();
+    
+    // Get logs by action type
+    const createActions = await this.auditLogRepository
+      .createQueryBuilder('audit')
+      .where("audit.action LIKE '%CREATE%'")
+      .getCount();
+    
+    const updateActions = await this.auditLogRepository
+      .createQueryBuilder('audit')
+      .where("audit.action LIKE '%UPDATE%'")
+      .getCount();
+    
+    const deleteActions = await this.auditLogRepository
+      .createQueryBuilder('audit')
+      .where("audit.action LIKE '%DELETE%'")
+      .getCount();
+    
+    // Get logs by entity type
+    const entityTypes = await this.auditLogRepository
+      .createQueryBuilder('audit')
+      .select('audit.entityType', 'entityType')
+      .addSelect('COUNT(*)', 'count')
+      .groupBy('audit.entityType')
+      .getRawMany();
+
+    return {
+      total: totalLogs,
+      byAction: {
+        create: createActions,
+        update: updateActions,
+        delete: deleteActions,
+      },
+      byEntityType: entityTypes.reduce((acc, item) => {
+        acc[item.entityType] = parseInt(item.count);
+        return acc;
+      }, {}),
+    };
+  }
 }

@@ -40,6 +40,16 @@ web/admin-dashboard/dist/
 web/admin-dashboard/.env
 web/admin-dashboard/.env.local
 
+web/user-dashboard/node_modules/
+web/user-dashboard/dist/
+web/user-dashboard/.env
+web/user-dashboard/.env.local
+
+web/driver-dashboard/node_modules/
+web/driver-dashboard/dist/
+web/driver-dashboard/.env
+web/driver-dashboard/.env.local
+
 # OS
 .DS_Store
 Thumbs.db

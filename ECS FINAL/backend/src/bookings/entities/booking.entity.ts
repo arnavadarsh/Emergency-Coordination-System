@@ -39,6 +39,14 @@ export class Booking {
   status: BookingStatus;
 
   @Column({
+    type: 'varchar',
+    length: 20,
+    name: 'booking_type',
+    default: 'EMERGENCY',
+  })
+  bookingType: string;
+
+  @Column({
     type: 'enum',
     enum: SeverityLevel,
     nullable: true,

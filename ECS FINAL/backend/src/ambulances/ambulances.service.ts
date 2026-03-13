@@ -137,4 +137,53 @@ export class AmbulancesService {
     ambulance.lastLocationUpdate = new Date();
     return this.ambulanceRepository.save(ambulance);
   }
+
+  /**
+   * Update ambulance equipment list
+   */
+  async updateEquipment(id: string, equipmentList: any): Promise<Ambulance> {
+    const ambulance = await this.findById(id);
+    if (!ambulance) {
+      throw new NotFoundException('Ambulance not found');
+    }
+
+    ambulance.equipmentList = equipmentList;
+    return this.ambulanceRepository.save(ambulance);
+  }
+
+  /**
+   * Find nearby ambulances using Haversine formula
+   */
+  async findNearby(latitude: number, longitude: number, radiusKm: number = 10): Promise<Ambulance[]> {
+    // Using raw SQL for Haversine distance calculation
+    const ambulances = await this.ambulanceRepository
+      .createQueryBuilder('ambulance')
+      .where('ambulance.status = :status', { status: AmbulanceStatus.AVAILABLE })
+      .andWhere('ambulance.currentLatitude IS NOT NULL')
+      .andWhere('ambulance.currentLongitude IS NOT NULL')
+      .andWhere(
+        `(6371 * acos(
+          cos(radians(:latitude)) * 
+          cos(radians(ambulance.currentLatitude)) * 
+          cos(radians(ambulance.currentLongitude) - radians(:longitude)) + 
+          sin(radians(:latitude)) * 
+          sin(radians(ambulance.currentLatitude))
+        )) <= :radius`,
+        { latitude, longitude, radius: radiusKm }
+      )
+      .orderBy(
+        `(6371 * acos(
+          cos(radians(:latitude)) * 
+          cos(radians(ambulance.currentLatitude)) * 
+          cos(radians(ambulance.currentLongitude) - radians(:longitude)) + 
+          sin(radians(:latitude)) * 
+          sin(radians(ambulance.currentLatitude))
+        ))`,
+        'ASC'
+      )
+      .setParameters({ latitude, longitude })
+      .getMany();
+
+    return ambulances;
+  }
 }

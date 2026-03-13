@@ -187,12 +187,33 @@ const Dashboard = () => {
   };
 
   const handleCapabilityStatusChange = async (capabilityType: string, newStatus: string) => {
-    // For now, update local state. Backend capability update can be added later
-    setCapabilities(prev => 
-      prev.map(cap => 
-        cap.type === capabilityType ? { ...cap, status: newStatus } : cap
-      )
-    );
+    try {
+      const token = TokenStorage.getToken();
+      const userResponse = await axios.get(`${API_BASE_URL}/users/me`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const hospitalId = userResponse.data.hospitalId;
+      
+      if (!hospitalId) {
+        alert('Hospital ID not found');
+        return;
+      }
+      
+      await axios.patch(
+        `${API_BASE_URL}/hospitals/${hospitalId}/capability`,
+        { capabilityType, status: newStatus },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      
+      setCapabilities(prev => 
+        prev.map(cap => 
+          cap.type === capabilityType ? { ...cap, status: newStatus } : cap
+        )
+      );
+    } catch (err) {
+      console.error('Failed to update capability status:', err);
+      alert('Failed to update capability status');
+    }
   };
   
   const handleUpdateBeds = async (availableBeds: number) => {
@@ -304,22 +325,22 @@ const Dashboard = () => {
           <div className="top-bar-right">
             <div className="status-buttons">
               <button 
-                className={`status-btn ${hospitalInfo.status === 'ACCEPTING' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('ACCEPTING')}
+                className={`status-btn ${hospitalInfo.status === 'ACTIVE' ? 'active' : ''}`}
+                onClick={() => handleStatusChange('ACTIVE')}
               >
-                Accepting
+                Active
               </button>
               <button 
-                className={`status-btn ${hospitalInfo.status === 'LIMITED' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('LIMITED')}
+                className={`status-btn ${hospitalInfo.status === 'INACTIVE' ? 'active' : ''}`}
+                onClick={() => handleStatusChange('INACTIVE')}
               >
-                Limited
+                Inactive
               </button>
               <button 
-                className={`status-btn ${hospitalInfo.status === 'DIVERT' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('DIVERT')}
+                className={`status-btn ${hospitalInfo.status === 'MAINTENANCE' ? 'active' : ''}`}
+                onClick={() => handleStatusChange('MAINTENANCE')}
               >
-                Divert
+                Maintenance
               </button>
             </div>
           </div>

@@ -29,23 +29,37 @@ import { DashboardModule } from './dashboard/dashboard.module';
       load: [appConfig, databaseConfig, jwtConfig],
     }),
 
-    // Database
+    // Database - supports both SQLite (local) and PostgreSQL (Supabase)
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (configService: ConfigService) => ({
-        type: 'postgres',
-        host: configService.get('database.host'),
-        port: configService.get('database.port'),
-        username: configService.get('database.username'),
-        password: configService.get('database.password'),
-        database: configService.get('database.database'),
-        entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: false, // Use existing database schema
-        logging: configService.get('app.nodeEnv') === 'development',
-        ssl: {
-          rejectUnauthorized: false, // Required for Supabase
-        },
-      }),
+      useFactory: (configService: ConfigService) => {
+        const useSqlite = process.env.USE_SQLITE === 'true';
+
+        if (useSqlite) {
+          console.log('Using local SQLite database');
+          return {
+            type: 'better-sqlite3' as any,
+            database: __dirname + '/../ecs_local.db',
+            entities: [__dirname + '/**/*.entity{.ts,.js}'],
+            synchronize: true,
+            logging: false,
+          };
+        }
+
+        return {
+          type: 'postgres',
+          host: configService.get('database.host'),
+          port: configService.get('database.port'),
+          username: configService.get('database.username'),
+          password: configService.get('database.password'),
+          database: configService.get('database.database'),
+          entities: [__dirname + '/**/*.entity{.ts,.js}'],
+          synchronize: false,
+          logging: configService.get('app.nodeEnv') === 'development',
+          ssl: { rejectUnauthorized: false },
+          extra: { connectionTimeoutMillis: 15000 },
+        };
+      },
       inject: [ConfigService],
     }),
 

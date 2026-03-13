@@ -1,30 +1,10 @@
-import { Controller, Get, Post, Patch, Param, Body, UseGuards, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards, BadRequestException } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, CurrentUser } from '../common/decorators';
 import { UserRole, BookingStatus, SeverityLevel } from '../common/enums';
-
-interface CreateBookingDto {
-  // Location can be provided as coordinates or address
-  pickupLatitude?: number;
-  pickupLongitude?: number;
-  pickupAddress?: string;
-  pickupLocation?: string; // Frontend sends this
-  destinationLatitude?: number;
-  destinationLongitude?: number;
-  destinationAddress?: string;
-  dropoffLocation?: string; // Frontend sends this
-  severity?: SeverityLevel;
-  description?: string;
-  bookingType?: string;
-  triageData?: any;
-}
-
-interface UpdateBookingDto {
-  status?: BookingStatus;
-  description?: string;
-}
+import { CreateBookingDto, UpdateBookingDto } from './dto';
 
 /**
  * Bookings Controller
@@ -107,5 +87,16 @@ export class BookingsController {
   @Roles(UserRole.USER, UserRole.ADMIN)
   async cancel(@Param('id') id: string, @CurrentUser() user: any) {
     return this.bookingsService.cancel(id, user);
+  }
+
+  @Get(':id/tracking')
+  async getTracking(@Param('id') id: string) {
+    return this.bookingsService.getTrackingInfo(id);
+  }
+
+  @Get('stats/overview')
+  @Roles(UserRole.ADMIN)
+  async getBookingStats() {
+    return this.bookingsService.getBookingStats();
   }
 }
