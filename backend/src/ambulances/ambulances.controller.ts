@@ -1,9 +1,10 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards, Query } from '@nestjs/common';
 import { AmbulancesService } from './ambulances.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../common/decorators';
-import { UserRole, AmbulanceStatus } from '../common/enums';
+import { UserRole } from '../common/enums';
+import { RegisterAmbulanceDto, UpdateStatusDto, UpdateLocationDto, UpdateEquipmentDto } from './dto';
 
 /**
  * Ambulances Controller
@@ -17,17 +18,8 @@ export class AmbulancesController {
    * Register new ambulance (public - pending verification)
    */
   @Post('register')
-  async register(@Body() data: {
-    vehicleNumber: string;
-    vehicleType: string;
-    driverName: string;
-    driverPhone: string;
-    driverLicense: string;
-    currentLatitude?: number;
-    currentLongitude?: number;
-    equipmentList?: any;
-  }) {
-    return this.ambulancesService.create(data);
+  async register(@Body() registerAmbulanceDto: RegisterAmbulanceDto) {
+    return this.ambulancesService.create(registerAmbulanceDto);
   }
 
   @Get()
@@ -85,9 +77,9 @@ export class AmbulancesController {
   @Roles(UserRole.ADMIN, UserRole.DRIVER)
   async updateStatus(
     @Param('id') id: string,
-    @Body('status') status: AmbulanceStatus,
+    @Body() updateStatusDto: UpdateStatusDto,
   ) {
-    return this.ambulancesService.updateStatus(id, status);
+    return this.ambulancesService.updateStatus(id, updateStatusDto.status);
   }
 
   @Patch(':id/location')
@@ -95,8 +87,30 @@ export class AmbulancesController {
   @Roles(UserRole.DRIVER)
   async updateLocation(
     @Param('id') id: string,
-    @Body() data: { latitude: number; longitude: number },
+    @Body() updateLocationDto: UpdateLocationDto,
   ) {
-    return this.ambulancesService.updateLocation(id, data.latitude, data.longitude);
+    return this.ambulancesService.updateLocation(id, updateLocationDto.latitude, updateLocationDto.longitude);
+  }
+
+  @Patch(':id/equipment')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.DRIVER)
+  async updateEquipment(
+    @Param('id') id: string,
+    @Body() updateEquipmentDto: UpdateEquipmentDto,
+  ) {
+    return this.ambulancesService.updateEquipment(id, updateEquipmentDto.equipmentList);
+  }
+
+  @Get('nearby')
+  async findNearby(
+    @Query('latitude') latitude: string,
+    @Query('longitude') longitude: string,
+    @Query('radius') radius?: string,
+  ) {
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+    const radiusKm = radius ? parseFloat(radius) : 10;
+    return this.ambulancesService.findNearby(lat, lng, radiusKm);
   }
 }

@@ -1,10 +1,17 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Booking } from './entities';
+import { Repository, DataSource } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Booking } from './entities/booking.entity';
 import { Dispatch } from '../dispatch/entities/dispatch.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
+import { Hospital } from '../hospitals/entities/hospital.entity';
+import { TriageReport, EmergencyType } from '../triage/entities/triage.entity';
+import { User } from '../users/entities/user.entity';
 import { BookingStatus, SeverityLevel, UserRole, AmbulanceStatus } from '../common/enums';
+import { FindBookingsDto } from './dto/find-bookings.dto';
+import { CreateEmergencyBookingDto } from './dto/create-emergency-booking.dto';
+import { RealtimeGateway } from '../realtime/realtime.gateway';
 
 /**
  * Bookings Service
@@ -12,6 +19,8 @@ import { BookingStatus, SeverityLevel, UserRole, AmbulanceStatus } from '../comm
  */
 @Injectable()
 export class BookingsService {
+  private readonly logger = new Logger(BookingsService.name);
+
   constructor(
     @InjectRepository(Booking)
     private bookingRepository: Repository<Booking>,
@@ -19,13 +28,72 @@ export class BookingsService {
     private dispatchRepository: Repository<Dispatch>,
     @InjectRepository(Ambulance)
     private ambulanceRepository: Repository<Ambulance>,
+    @InjectRepository(Hospital)
+    private hospitalRepository: Repository<Hospital>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+    private readonly dataSource: DataSource,
+    private readonly realtimeGateway: RealtimeGateway,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
+
+  async createEmergencyBooking(createBookingDto: CreateEmergencyBookingDto): Promise<{ bookingId: string; status: BookingStatus }> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const { userId, location, emergencyType, answers } = createBookingDto;
+
+      const user = await this.userRepository.findOneBy({ id: userId });
+      if (!user) {
+        throw new NotFoundException('User not found');
+      }
+
+      const triageReport = new TriageReport();
+      triageReport.emergencyType = emergencyType as EmergencyType;
+      triageReport.breathing = answers.breathing === 'true';
+      triageReport.bleeding = answers.bleeding === 'true';
+      triageReport.conscious = answers.conscious === 'true';
+      triageReport.painLevel = answers.painLevel;
+      triageReport.pregnancy = answers.pregnancy || false;
+
+      const savedTriageReport = await queryRunner.manager.save(triageReport);
+
+      const booking = new Booking();
+      booking.userId = userId;
+      booking.pickupLatitude = location.lat;
+      booking.pickupLongitude = location.lng;
+      booking.status = BookingStatus.PENDING;
+      booking.triageReport = savedTriageReport;
+
+      const savedBooking = await queryRunner.manager.save(booking);
+
+      await queryRunner.commitTransaction();
+
+      this.logger.log(`New emergency booking created: ${savedBooking.id}`);
+      this.realtimeGateway.server.emit('booking_created', savedBooking);
+      this.eventEmitter.emit('booking.created', savedBooking.id);
+
+      return {
+        bookingId: savedBooking.id,
+        status: savedBooking.status,
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error('Failed to create emergency booking', error.stack);
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
 
   /**
    * Find all bookings
    */
-  async findAll(): Promise<Booking[]> {
+  findAll(findBookingsDto: FindBookingsDto): Promise<Booking[]> {
     return this.bookingRepository.find({
+      where: findBookingsDto,
       relations: ['user'],
       order: { createdAt: 'DESC' },
     });
@@ -63,6 +131,7 @@ export class BookingsService {
     destinationAddress?: string;
     severity?: SeverityLevel;
     description?: string;
+    bookingType?: string;
   }): Promise<Booking> {
     const booking = this.bookingRepository.create({
       userId,
@@ -75,6 +144,7 @@ export class BookingsService {
       severity: data.severity || SeverityLevel.MEDIUM,
       description: data.description,
       status: BookingStatus.CREATED,
+      bookingType: data.bookingType || 'EMERGENCY',
     });
     const savedBooking = await this.bookingRepository.save(booking);
 
@@ -122,10 +192,37 @@ export class BookingsService {
       }
     }
 
+    // Find nearest active hospital with available beds.
+    const hospitals = await this.hospitalRepository.find();
+
+    let selectedHospital: Hospital | null = null;
+    let minHospitalDistance = Number.MAX_VALUE;
+
+    for (const hospital of hospitals) {
+      if ((hospital.availableBeds || 0) <= 0) continue;
+      const distance = this.calculateDistance(
+        booking.pickupLatitude,
+        booking.pickupLongitude,
+        Number(hospital.latitude),
+        Number(hospital.longitude),
+      );
+      if (distance < minHospitalDistance) {
+        minHospitalDistance = distance;
+        selectedHospital = hospital;
+      }
+    }
+
+    if (selectedHospital) {
+      booking.destinationLatitude = Number(selectedHospital.latitude);
+      booking.destinationLongitude = Number(selectedHospital.longitude);
+      booking.destinationAddress = selectedHospital.name;
+    }
+
     // Create dispatch
     const dispatch = this.dispatchRepository.create({
       bookingId: booking.id,
       ambulanceId: nearestAmbulance.id,
+      hospitalId: selectedHospital?.id,
       status: 'DISPATCHED',
       dispatchedAt: new Date(),
       estimatedPickupTime: Math.round(minDistance * 3), // Rough ETA: 3 min per km
@@ -139,6 +236,17 @@ export class BookingsService {
     // Update booking status
     booking.status = BookingStatus.ASSIGNED;
     await this.bookingRepository.save(booking);
+
+    // Notify connected dashboards (driver/admin/hospital) immediately
+    this.realtimeGateway.server.emit('dispatch_assigned', {
+      dispatchId: dispatch.id,
+      bookingId: booking.id,
+      ambulanceId: nearestAmbulance.id,
+      hospitalId: selectedHospital?.id,
+      hospitalName: selectedHospital?.name,
+      status: dispatch.status,
+      assignedAt: dispatch.dispatchedAt,
+    });
 
     console.log(`Dispatched ambulance ${nearestAmbulance.vehicleNumber} to booking ${booking.id}`);
   }
@@ -210,12 +318,146 @@ export class BookingsService {
     }
 
     // Can only cancel if not completed or already cancelled
-    if (booking.status === BookingStatus.COMPLETED || booking.status === BookingStatus.CANCELLED) {
-      throw new ForbiddenException('Cannot cancel a completed or already cancelled booking');
+    if (booking.status === BookingStatus.COMPLETED) {
+      throw new ForbiddenException('Cannot cancel a completed booking');
+    }
+
+    // Idempotent cancel: return current state instead of throwing when already cancelled.
+    if (booking.status === BookingStatus.CANCELLED) {
+      return booking;
     }
 
     booking.status = BookingStatus.CANCELLED;
     booking.cancelledAt = new Date();
-    return this.bookingRepository.save(booking);
+    const savedBooking = await this.bookingRepository.save(booking);
+
+    const dispatch = await this.dispatchRepository.findOne({
+      where: { bookingId: id },
+      order: { createdAt: 'DESC' },
+    });
+
+    if (dispatch && dispatch.status !== 'CANCELLED') {
+      dispatch.status = 'CANCELLED';
+      await this.dispatchRepository.save(dispatch);
+    }
+
+    if (dispatch?.ambulanceId) {
+      const ambulance = await this.ambulanceRepository.findOne({
+        where: { id: dispatch.ambulanceId },
+      });
+      if (ambulance && ambulance.status !== AmbulanceStatus.AVAILABLE) {
+        ambulance.status = AmbulanceStatus.AVAILABLE;
+        await this.ambulanceRepository.save(ambulance);
+      }
+    }
+
+    return savedBooking;
+  }
+
+  /**
+   * Get booking tracking information
+   */
+  async getTrackingInfo(id: string): Promise<any> {
+    const booking = await this.bookingRepository.findOne({
+      where: { id },
+      relations: ['user'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    // Get dispatch information
+    const dispatch = await this.dispatchRepository.findOne({
+      where: { bookingId: id },
+      relations: ['ambulance'],
+      order: { createdAt: 'DESC' },
+    });
+
+    return {
+      booking: {
+        id: booking.id,
+        status: booking.status,
+        severity: booking.severity,
+        pickupLocation: {
+          latitude: booking.pickupLatitude,
+          longitude: booking.pickupLongitude,
+          address: booking.pickupAddress,
+        },
+        destinationLocation: booking.destinationLatitude ? {
+          latitude: booking.destinationLatitude,
+          longitude: booking.destinationLongitude,
+          address: booking.destinationAddress,
+        } : null,
+        createdAt: booking.createdAt,
+        completedAt: booking.completedAt,
+      },
+      dispatch: dispatch ? {
+        id: dispatch.id,
+        status: dispatch.status,
+        dispatchedAt: dispatch.dispatchedAt,
+        arrivedAtPickup: dispatch.arrivedAtPickup,
+        completedAt: dispatch.completedAt,
+        estimatedPickupTime: dispatch.estimatedPickupTime,
+        ambulance: dispatch.ambulance ? {
+          id: dispatch.ambulance.id,
+          vehicleNumber: dispatch.ambulance.vehicleNumber,
+          vehicleType: dispatch.ambulance.vehicleType,
+          currentLocation: {
+            latitude: dispatch.ambulance.currentLatitude,
+            longitude: dispatch.ambulance.currentLongitude,
+          },
+          status: dispatch.ambulance.status,
+        } : null,
+      } : null,
+    };
+  }
+
+  /**
+   * Get booking statistics for admin
+   */
+  async getBookingStats(): Promise<any> {
+    const totalBookings = await this.bookingRepository.count();
+    const completedBookings = await this.bookingRepository.count({
+      where: { status: BookingStatus.COMPLETED },
+    });
+    const cancelledBookings = await this.bookingRepository.count({
+      where: { status: BookingStatus.CANCELLED },
+    });
+    const activeBookings = await this.bookingRepository.count({
+      where: [
+        { status: BookingStatus.CREATED },
+        { status: BookingStatus.ASSIGNED },
+        { status: BookingStatus.IN_PROGRESS },
+      ],
+    });
+
+    // Get bookings by severity
+    const criticalBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.CRITICAL },
+    });
+    const highBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.HIGH },
+    });
+    const mediumBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.MEDIUM },
+    });
+    const lowBookings = await this.bookingRepository.count({
+      where: { severity: SeverityLevel.LOW },
+    });
+
+    return {
+      total: totalBookings,
+      completed: completedBookings,
+      cancelled: cancelledBookings,
+      active: activeBookings,
+      completionRate: totalBookings > 0 ? ((completedBookings / totalBookings) * 100).toFixed(2) : 0,
+      bySeverity: {
+        critical: criticalBookings,
+        high: highBookings,
+        medium: mediumBookings,
+        low: lowBookings,
+      },
+    };
   }
 }

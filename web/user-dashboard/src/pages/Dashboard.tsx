@@ -1,12 +1,29 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { io } from 'socket.io-client';
 import { tokenStorage } from '../utils/tokenStorage';
 import '../styles/Dashboard.css';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { SavedLocationsTab } from '../components/SavedLocationsTab';
+import { NotificationPreferencesSection } from '../components/NotificationPreferencesSection';
+import { LiveRouteMap } from '../components/LiveRouteMap';
+import BookingCard, { ACTIVE_STATUSES } from '../components/BookingCard';
+import BookingTabs from '../components/BookingTabs';
+import TriageChat from '../components/TriageChat';
+import type { TriageResult } from '../services/triageEngine';
 
 const API_BASE_URL = 'http://localhost:3000/api';
+
+interface LiveEtaResponse {
+  source: 'google' | 'fallback';
+  etaMinutes: number;
+  etaText: string;
+  expectedArrivalIso: string;
+  distanceText?: string;
+  distanceKm?: number;
+}
 
 // Fix Leaflet default marker icons
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -56,6 +73,10 @@ interface Booking {
   userId: string;
   hospitalId: string;
   pickupLocation: string;
+  pickupLatitude?: number;
+  pickupLongitude?: number;
+  destinationLatitude?: number;
+  destinationLongitude?: number;
   bookingType: 'EMERGENCY' | 'SCHEDULED';
   severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
   status: string;
@@ -64,9 +85,18 @@ interface Booking {
   hospital?: Hospital;
   dispatch?: {
     status: string;
+    hospital?: {
+      id: string;
+      name: string;
+      address?: string;
+      latitude?: number;
+      longitude?: number;
+    };
     ambulance?: {
       vehicleNumber: string;
       type: string;
+      currentLatitude?: number;
+      currentLongitude?: number;
     };
   };
 }
@@ -85,7 +115,27 @@ interface UserProfile {
   dateOfBirth?: string;
 }
 
-type TabType = 'bookings' | 'profile';
+type TabType = 'bookings' | 'profile' | 'locations';
+
+const EARTH_RADIUS_KM = 6371;
+
+const toRadians = (degrees: number) => (degrees * Math.PI) / 180;
+
+const calculateDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: number) => {
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return EARTH_RADIUS_KM * c;
+};
+
+const formatExpectedTime = (etaMinutes: number) => {
+  const now = new Date();
+  now.setMinutes(now.getMinutes() + etaMinutes);
+  return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
 
 function Dashboard() {
   const navigate = useNavigate();
@@ -96,12 +146,12 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('bookings');
+  const [bookingSubTab, setBookingSubTab] = useState<'current' | 'history'>('current');
   const [editingProfile, setEditingProfile] = useState(false);
   const [showSOSConfirm, setShowSOSConfirm] = useState(false);
   const [sosActivating, setSosActivating] = useState(false);
   const [trackingBooking, setTrackingBooking] = useState<Booking | null>(null);
-  const [ambulanceLocation, setAmbulanceLocation] = useState<{lat: number; lng: number} | null>(null);
-  const [eta, setEta] = useState<string | null>(null);
+  const [liveEta, setLiveEta] = useState<LiveEtaResponse | null>(null);
   const [profileForm, setProfileForm] = useState({
     firstName: '',
     lastName: '',
@@ -131,6 +181,8 @@ function Dashboard() {
     hasChestPain: false,
     hasSevereBleeding: false,
   });
+  const [triageCompleted, setTriageCompleted] = useState(false);
+  const [, setTriageResultData] = useState<TriageResult | null>(null);
 
   // Map states
   const [gettingLocation, setGettingLocation] = useState(false);
@@ -147,10 +199,6 @@ function Dashboard() {
   const pickupMarkerRef = useRef<L.Marker | null>(null);
   const dropoffMarkerRef = useRef<L.Marker | null>(null);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const trackingMapRef = useRef<HTMLDivElement>(null);
-  const trackingMapInstanceRef = useRef<L.Map | null>(null);
-  const ambulanceMarkerRef = useRef<L.Marker | null>(null);
-  const routeLayerRef = useRef<L.Polyline | null>(null);
 
   // No need to fetch hospitals for emergency pickup-only bookings
 
@@ -250,97 +298,136 @@ function Dashboard() {
     }
   }, [showBookingForm]);
 
-  // Initialize tracking map
-  useEffect(() => {
-    if (trackingBooking && trackingMapRef.current && !trackingMapInstanceRef.current) {
-      const pickupLat = trackingBooking.pickupLatitude || 28.6139;
-      const pickupLng = trackingBooking.pickupLongitude || 77.2090;
-      
-      trackingMapInstanceRef.current = L.map(trackingMapRef.current).setView([pickupLat, pickupLng], 13);
-      
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors'
-      }).addTo(trackingMapInstanceRef.current);
-
-      // Add pickup marker
-      const blueIcon = L.icon({
-        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
-        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-        popupAnchor: [1, -34],
-        shadowSize: [41, 41]
-      });
-
-      L.marker([pickupLat, pickupLng], { icon: blueIcon })
-        .bindPopup('📍 Pickup Location')
-        .addTo(trackingMapInstanceRef.current);
-
-      // Add ambulance marker
-      const ambulanceIcon = L.icon({
-        iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
-        iconSize: [25, 41],
-        iconAnchor: [12, 41],
-        popupAnchor: [1, -34],
-        shadowSize: [41, 41]
-      });
-
-      ambulanceMarkerRef.current = L.marker([pickupLat - 0.05, pickupLng + 0.05], { icon: ambulanceIcon })
-        .bindPopup('🚑 Ambulance')
-        .addTo(trackingMapInstanceRef.current);
+  const trackingMetrics = useMemo(() => {
+    if (!trackingBooking) {
+      return null;
     }
 
-    return () => {
-      if (!trackingBooking && trackingMapInstanceRef.current) {
-        trackingMapInstanceRef.current.remove();
-        trackingMapInstanceRef.current = null;
-        ambulanceMarkerRef.current = null;
-        routeLayerRef.current = null;
+    const pickupLat = trackingBooking.pickupLatitude ?? 28.6139;
+    const pickupLng = trackingBooking.pickupLongitude ?? 77.209;
+    const destinationLat =
+      trackingBooking.destinationLatitude ?? trackingBooking.dispatch?.hospital?.latitude;
+    const destinationLng =
+      trackingBooking.destinationLongitude ?? trackingBooking.dispatch?.hospital?.longitude;
+    const ambulanceLat = trackingBooking.dispatch?.ambulance?.currentLatitude ?? (pickupLat - 0.05);
+    const ambulanceLng = trackingBooking.dispatch?.ambulance?.currentLongitude ?? (pickupLng + 0.05);
+    const dispatchStatus = trackingBooking.dispatch?.status || trackingBooking.status;
+
+    const towardPickup = ['ASSIGNED', 'DISPATCHED', 'EN_ROUTE', 'EN_ROUTE_PICKUP'].includes(dispatchStatus);
+    const towardHospital = ['EN_ROUTE_HOSPITAL'].includes(dispatchStatus);
+    const arrived = ['AT_HOSPITAL', 'COMPLETED'].includes(dispatchStatus);
+
+    let targetLat = pickupLat;
+    let targetLng = pickupLng;
+    let targetLabel = 'Pickup Location';
+    let routeTitle = 'Route To Pickup';
+    let etaLabel = 'ETA to Pickup';
+    let etaMinutes: number | null = null;
+
+    if (towardHospital && destinationLat != null && destinationLng != null) {
+      targetLat = destinationLat;
+      targetLng = destinationLng;
+      targetLabel = trackingBooking.dispatch?.hospital?.name || 'Destination Hospital';
+      routeTitle = 'Route To Hospital';
+      etaLabel = 'ETA to Hospital';
+      etaMinutes = Math.max(1, Math.round((calculateDistanceKm(ambulanceLat, ambulanceLng, targetLat, targetLng) / 35) * 60));
+    } else if (towardPickup) {
+      etaMinutes = Math.max(1, Math.round((calculateDistanceKm(ambulanceLat, ambulanceLng, targetLat, targetLng) / 35) * 60));
+    } else if (dispatchStatus === 'AT_PICKUP') {
+      if (destinationLat != null && destinationLng != null) {
+        targetLat = destinationLat;
+        targetLng = destinationLng;
+        targetLabel = trackingBooking.dispatch?.hospital?.name || 'Destination Hospital';
+        routeTitle = 'Route To Hospital';
+        etaLabel = 'Preparing Transfer';
       }
+      etaMinutes = 3;
+    } else if (arrived) {
+      etaMinutes = 0;
+      if (destinationLat != null && destinationLng != null) {
+        targetLat = destinationLat;
+        targetLng = destinationLng;
+        targetLabel = trackingBooking.dispatch?.hospital?.name || 'Destination Hospital';
+        routeTitle = 'Route Completed';
+      }
+    }
+
+    const etaText =
+      etaMinutes == null
+        ? 'Calculating...'
+        : etaMinutes === 0
+          ? 'Arrived'
+          : `${etaMinutes} min`;
+
+    return {
+      dispatchStatus,
+      ambulanceLat,
+      ambulanceLng,
+      targetLat,
+      targetLng,
+      targetLabel,
+      routeTitle,
+      etaLabel,
+      etaMinutes,
+      etaText,
+      expectedTimeText: etaMinutes != null && etaMinutes > 0 ? formatExpectedTime(etaMinutes) : null,
     };
   }, [trackingBooking]);
 
-  // Simulate real-time location updates
   useEffect(() => {
-    if (!trackingBooking || !trackingMapInstanceRef.current) return;
+    if (!trackingBooking || !trackingMetrics) {
+      setLiveEta(null);
+      return;
+    }
 
-    const interval = setInterval(() => {
-      if (ambulanceMarkerRef.current) {
-        const currentPos = ambulanceMarkerRef.current.getLatLng();
-        const pickupLat = trackingBooking.pickupLatitude || 28.6139;
-        const pickupLng = trackingBooking.pickupLongitude || 77.2090;
-        
-        const newLat = currentPos.lat + (pickupLat - currentPos.lat) * 0.1;
-        const newLng = currentPos.lng + (pickupLng - currentPos.lng) * 0.1;
-        
-        ambulanceMarkerRef.current.setLatLng([newLat, newLng]);
-        setAmbulanceLocation({ lat: newLat, lng: newLng });
+    if (trackingMetrics.etaMinutes === 0) {
+      setLiveEta({
+        source: 'fallback',
+        etaMinutes: 0,
+        etaText: 'Arrived',
+        expectedArrivalIso: new Date().toISOString(),
+      });
+      return;
+    }
 
-        if (routeLayerRef.current) {
-          trackingMapInstanceRef.current.removeLayer(routeLayerRef.current);
+    const token = tokenStorage.getToken();
+    if (!token) {
+      setLiveEta(null);
+      return;
+    }
+
+    let isCancelled = false;
+
+    const fetchLiveEta = async () => {
+      try {
+        const response = await axios.get(`${API_BASE_URL}/dashboard/eta`, {
+          headers: { Authorization: `Bearer ${token}` },
+          params: {
+            originLat: trackingMetrics.ambulanceLat,
+            originLng: trackingMetrics.ambulanceLng,
+            destinationLat: trackingMetrics.targetLat,
+            destinationLng: trackingMetrics.targetLng,
+          },
+        });
+
+        if (!isCancelled) {
+          setLiveEta(response.data);
         }
-        routeLayerRef.current = L.polyline([
-          [newLat, newLng],
-          [pickupLat, pickupLng]
-        ], { color: 'red', weight: 3, opacity: 0.7, dashArray: '10, 10' })
-          .addTo(trackingMapInstanceRef.current);
-
-        const distance = Math.sqrt(
-          Math.pow(pickupLat - newLat, 2) + Math.pow(pickupLng - newLng, 2)
-        ) * 111;
-        const etaMinutes = Math.max(1, Math.round(distance * 2));
-        setEta(`${etaMinutes} min`);
-
-        if (distance < 0.5) {
-          clearInterval(interval);
-          setEta('Arrived');
+      } catch {
+        if (!isCancelled) {
+          setLiveEta(null);
         }
       }
-    }, 3000);
+    };
 
-    return () => clearInterval(interval);
-  }, [trackingBooking]);
+    fetchLiveEta();
+    const interval = setInterval(fetchLiveEta, 30000);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
+  }, [trackingBooking, trackingMetrics]);
 
   // Reverse geocode using Nominatim (OpenStreetMap)
   const reverseGeocode = async (lat: number, lng: number, setter: (val: string) => void) => {
@@ -556,11 +643,21 @@ function Dashboard() {
       
       // Set bookings
       if (data.bookings && data.bookings.length > 0) {
-        setBookings(data.bookings.map((b: any) => ({
+        const mappedBookings = data.bookings.map((b: any) => ({
           id: b.id,
           userId: b.userId,
           hospitalId: b.hospitalId,
           pickupLocation: b.pickupLocation || 'Not specified',
+          pickupLatitude: b.pickupLatitude != null ? Number(b.pickupLatitude) : undefined,
+          pickupLongitude: b.pickupLongitude != null ? Number(b.pickupLongitude) : undefined,
+          destinationLatitude:
+            b.destinationLatitude != null
+              ? Number(b.destinationLatitude)
+              : (b.dispatch?.hospital?.latitude != null ? Number(b.dispatch.hospital.latitude) : undefined),
+          destinationLongitude:
+            b.destinationLongitude != null
+              ? Number(b.destinationLongitude)
+              : (b.dispatch?.hospital?.longitude != null ? Number(b.dispatch.hospital.longitude) : undefined),
           bookingType: b.bookingType || 'EMERGENCY',
           severity: b.severity || 'MEDIUM',
           status: b.status || 'PENDING',
@@ -576,12 +673,30 @@ function Dashboard() {
           } : undefined,
           dispatch: b.dispatch ? {
             status: b.dispatch.status,
+            hospital: b.dispatch.hospital ? {
+              id: b.dispatch.hospital.id,
+              name: b.dispatch.hospital.name,
+              address: b.dispatch.hospital.address,
+              latitude: b.dispatch.hospital.latitude != null ? Number(b.dispatch.hospital.latitude) : undefined,
+              longitude: b.dispatch.hospital.longitude != null ? Number(b.dispatch.hospital.longitude) : undefined,
+            } : undefined,
             ambulance: b.dispatch.ambulance ? {
               vehicleNumber: b.dispatch.ambulance.vehicleNumber,
-              type: b.dispatch.ambulance.type
+              type: b.dispatch.ambulance.type,
+              currentLatitude: b.dispatch.ambulance.currentLatitude != null ? Number(b.dispatch.ambulance.currentLatitude) : undefined,
+              currentLongitude: b.dispatch.ambulance.currentLongitude != null ? Number(b.dispatch.ambulance.currentLongitude) : undefined,
             } : undefined
           } : undefined
-        })));
+        }));
+
+        setBookings(mappedBookings);
+
+        if (trackingBooking) {
+          const updatedTracking = mappedBookings.find((b: Booking) => b.id === trackingBooking.id);
+          if (updatedTracking) {
+            setTrackingBooking(updatedTracking);
+          }
+        }
       }
       
       setLoading(false);
@@ -602,12 +717,51 @@ function Dashboard() {
     return () => clearInterval(refreshInterval);
   }, []);
 
-  const handleCreateBooking = async () => {
+  useEffect(() => {
+    const token = tokenStorage.getToken();
+    if (!token) {
+      return;
+    }
+
+    const socket = io('http://localhost:3000', {
+      transports: ['websocket'],
+    });
+
+    const onDispatchDiverted = (payload: any) => {
+      const isRelevant = payload?.userId === userProfile?.id || bookings.some((b) => b.id === payload?.bookingId);
+      if (!isRelevant) return;
+
+      const oldName = payload?.oldHospital?.name || 'previous hospital';
+      const newName = payload?.newHospital?.name || 'new hospital';
+      alert(`Hospital update: ${oldName} is unavailable. Ambulance diverted to ${newName}.`);
+      fetchDashboardData();
+    };
+
+    socket.on('dispatch_diverted', onDispatchDiverted);
+
+    return () => {
+      socket.off('dispatch_diverted', onDispatchDiverted);
+      socket.disconnect();
+    };
+  }, [userProfile?.id, bookings]);
+
+  const handleCreateBooking = async (triageOverride?: { chiefComplaint: string; severity: string; isBreathing: boolean; isConscious: boolean; hasChestPain: boolean; hasSevereBleeding: boolean }) => {
     try {
+      // Validate required fields
+      if (!pickupLocation && !pickupCoords) {
+        alert('Please select a pickup location');
+        return;
+      }
+
+      if (bookingType === 'SCHEDULED' && (!dropoffLocation || !scheduledTime)) {
+        alert('Please provide dropoff location and scheduled time for scheduled transport');
+        return;
+      }
+
       const token = tokenStorage.getToken();
       const bookingData: any = {
-        pickupLocation,
-        pickupAddress: pickupLocation,
+        pickupLocation: pickupLocation || 'Current Location',
+        pickupAddress: pickupLocation || 'Current Location',
         pickupLatitude: pickupCoords?.lat || 28.6139,
         pickupLongitude: pickupCoords?.lng || 77.2090,
         bookingType,
@@ -621,14 +775,21 @@ function Dashboard() {
         bookingData.scheduledTime = scheduledTime;
         bookingData.ambulanceFacilities = ambulanceFacilities;
       } else {
-        bookingData.triageData = triageData;
+        const td = triageOverride || triageData;
+        bookingData.triageData = td;
+        bookingData.severity = td.severity;
+        bookingData.description = td.chiefComplaint;
       }
 
-      await axios.post(
+      console.log('Creating booking with data:', bookingData);
+
+      const response = await axios.post(
         `${API_BASE_URL}/bookings`,
         bookingData,
         { headers: { Authorization: `Bearer ${token}` } }
       );
+
+      console.log('Booking created successfully:', response.data);
 
       // Reset form
       setShowBookingForm(false);
@@ -653,12 +814,15 @@ function Dashboard() {
         hasChestPain: false,
         hasSevereBleeding: false,
       });
+      setTriageCompleted(false);
+      setTriageResultData(null);
 
       await fetchDashboardData();
       alert('Booking created successfully! An ambulance will be assigned shortly.');
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to create booking:', err);
-      alert('Failed to create booking');
+      const errorMessage = err.response?.data?.message || err.message || 'Failed to create booking';
+      alert(`Error: ${errorMessage}`);
     }
   };
 
@@ -750,15 +914,25 @@ function Dashboard() {
     
     try {
       const token = tokenStorage.getToken();
-      await axios.patch(
-        `${API_BASE_URL}/bookings/${bookingId}/cancel`,
-        {},
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      try {
+        await axios.patch(
+          `${API_BASE_URL}/bookings/${bookingId}/cancel`,
+          {},
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+      } catch (cancelErr: any) {
+        // Fallback for deployments where cancel route can fail but generic status update works.
+        await axios.patch(
+          `${API_BASE_URL}/bookings/${bookingId}`,
+          { status: 'CANCELLED' },
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+      }
       await fetchDashboardData();
-    } catch (err) {
+      alert('Booking cancelled successfully.');
+    } catch (err: any) {
       console.error('Failed to cancel booking:', err);
-      alert('Failed to cancel booking');
+      alert(err.response?.data?.message || 'Failed to cancel booking');
     }
   };
 
@@ -822,8 +996,8 @@ function Dashboard() {
   const getDispatchStatusLabel = (status: string) => {
     switch (status) {
       case 'DISPATCHED':
-      case 'ASSIGNED': return '🚑 Ambulance Assigned';
-      case 'EN_ROUTE': return '🚗 En Route to You';
+      case 'ASSIGNED': return ' Ambulance Assigned';
+      case 'EN_ROUTE': return ' En Route to You';
       case 'AT_PICKUP': return '✅ Arrived - Waiting';
       case 'EN_ROUTE_HOSPITAL': return '🏥 Going to Hospital';
       case 'AT_HOSPITAL': return '🏥 At Hospital';
@@ -897,6 +1071,12 @@ function Dashboard() {
             </svg>
             <span>Profile</span>
           </a>
+          <a href="#" className={`nav-item ${activeTab === 'locations' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('locations'); setShowBookingForm(false); }}>
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="currentColor"/>
+            </svg>
+            <span>Saved Locations</span>
+          </a>
         </nav>
 
         <button onClick={handleLogout} className="logout-btn">
@@ -910,8 +1090,8 @@ function Dashboard() {
       <main className="main-content">
         <header className="dashboard-header">
           <div>
-            <h1>{activeTab === 'bookings' ? 'My Bookings' : 'My Profile'}</h1>
-            <p>{activeTab === 'bookings' ? 'Book ambulance services and track your requests' : 'Manage your personal information'}</p>
+            <h1>{activeTab === 'bookings' ? 'My Bookings' : activeTab === 'profile' ? 'My Profile' : 'Saved Locations'}</h1>
+            <p>{activeTab === 'bookings' ? 'Book ambulance services and track your requests' : activeTab === 'profile' ? 'Manage your personal information' : 'Manage your frequently used locations'}</p>
           </div>
           {userProfile && activeTab === 'bookings' && (
             <div className="user-info-card">
@@ -1308,6 +1488,15 @@ function Dashboard() {
                 </>
               )}
             </div>
+            
+            {/* Notification Preferences Section */}
+            <div style={{ marginTop: '32px' }}>
+              <NotificationPreferencesSection token={tokenStorage.getToken() || ''} />
+            </div>
+          </div>
+        ) : activeTab === 'locations' ? (
+          <div style={{ padding: '24px' }}>
+            <SavedLocationsTab token={tokenStorage.getToken() || ''} />
           </div>
         ) : !showBookingForm ? (
           <>
@@ -1353,173 +1542,159 @@ function Dashboard() {
               </div>
             </div>
 
-            <div className="action-buttons">
-              <button 
-                onClick={() => {
-                  setBookingType('EMERGENCY');
-                  setShowBookingForm(true);
+            {/* Action Buttons — improved CTA hierarchy */}
+            <div style={{ display: 'flex', gap: '14px', marginBottom: '28px', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => { setBookingType('EMERGENCY'); setShowBookingForm(true); }}
+                style={{
+                  flex: 1,
+                  minWidth: '220px',
+                  padding: '15px 28px',
+                  background: 'linear-gradient(135deg, #BE123C, #9F1239)',
+                  color: 'white',
+                  border: 'none',
+                  borderRadius: '12px',
+                  fontSize: '16px',
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '10px',
+                  boxShadow: '0 4px 14px rgba(159,18,57,0.35)',
+                  transition: 'transform 0.15s, box-shadow 0.15s',
                 }}
-                className="action-btn emergency"
+                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 20px rgba(159,18,57,0.4)'; }}
+                onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 4px 14px rgba(159,18,57,0.35)'; }}
               >
-                <svg viewBox="0 0 24 24" fill="none">
-                  <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" fill="white"/>
-                  <path d="M12 8v8m-4-4h8" stroke="#de350b" strokeWidth="2" strokeLinecap="round"/>
-                </svg>
-                Request Emergency Ambulance
+                🚑 Request Emergency Ambulance
               </button>
-              <button 
-                onClick={() => {
-                  setBookingType('SCHEDULED');
-                  setShowBookingForm(true);
+              <button
+                onClick={() => { setBookingType('SCHEDULED'); setShowBookingForm(true); }}
+                style={{
+                  flex: 1,
+                  minWidth: '180px',
+                  padding: '15px 28px',
+                  background: 'white',
+                  color: '#1E40AF',
+                  border: '2px solid #BFDBFE',
+                  borderRadius: '12px',
+                  fontSize: '15px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '10px',
+                  boxShadow: '0 2px 8px rgba(30,64,175,0.1)',
+                  transition: 'transform 0.15s, box-shadow 0.15s, background 0.15s',
                 }}
-                className="action-btn scheduled"
+                onMouseEnter={e => { e.currentTarget.style.background = '#EFF6FF'; e.currentTarget.style.transform = 'translateY(-2px)'; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'white'; e.currentTarget.style.transform = 'translateY(0)'; }}
               >
-                <svg viewBox="0 0 24 24" fill="none">
-                  <rect x="3" y="4" width="18" height="18" rx="2" fill="white"/>
-                  <path d="M16 2v4M8 2v4M3 10h18" stroke="#0066cc" strokeWidth="2"/>
-                </svg>
-                Schedule Transport
+                📅 Schedule Transport
               </button>
             </div>
 
-            <div className="bookings-section">
-              <div className="section-header">
-                <h2>My Bookings</h2>
-                <span className="count-badge">{bookings.length}</span>
-              </div>
+            {/* Bookings Section with Sub-Tabs */}
+            <div style={{ marginTop: '8px' }}>
+              {/* Sub-tab switcher */}
+              {(() => {
+                const activeBookings = bookings.filter(b => ACTIVE_STATUSES.includes(b.status));
+                const historyBookings = bookings.filter(b => !ACTIVE_STATUSES.includes(b.status));
+                return (
+                  <>
+                    <BookingTabs
+                      tabs={[
+                        { id: 'current', label: 'Current Bookings', count: activeBookings.length },
+                        { id: 'history', label: 'Booking History', count: historyBookings.length },
+                      ]}
+                      activeTab={bookingSubTab}
+                      onChange={id => setBookingSubTab(id as 'current' | 'history')}
+                    />
 
-              <div className="bookings-grid">
-                {bookings.length > 0 ? (
-                  bookings.map(booking => (
-                    <div key={booking.id} className="booking-card">
-                      <div className="booking-header">
-                        <span className="booking-id">#{booking.id.slice(0, 8)}</span>
-                        <span 
-                          className="booking-status"
-                          style={{ backgroundColor: getStatusColor(booking.status) }}
-                        >
-                          {booking.status}
-                        </span>
-                      </div>
-
-                      <div className="booking-type">
-                        <svg viewBox="0 0 24 24" fill="none" className="type-icon">
-                          {booking.bookingType === 'EMERGENCY' ? (
-                            <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" fill="#de350b"/>
-                          ) : (
-                            <rect x="3" y="4" width="18" height="18" rx="2" fill="#0066cc"/>
-                          )}
-                        </svg>
-                        <span>{booking.bookingType}</span>
-                        {booking.severity && (
-                          <span 
-                            className="severity-indicator"
-                            style={{ backgroundColor: getSeverityColor(booking.severity) }}
-                          >
-                            {booking.severity}
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="booking-locations">
-                        <div className="location-row">
-                          <svg viewBox="0 0 24 24" fill="none" className="location-icon">
-                            <circle cx="12" cy="10" r="3" fill="#00a3bf"/>
-                            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" stroke="#00a3bf" strokeWidth="2" fill="none"/>
-                          </svg>
-                          <div>
-                            <strong>Pickup</strong>
-                            <p>{booking.pickupLocation}</p>
+                    {/* Loading skeleton */}
+                    {loading ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                        {[1,2,3].map(i => (
+                          <div key={i} style={{ background: 'white', borderRadius: '14px', overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
+                            <div style={{ height: '4px', background: '#E2E8F0' }} />
+                            <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                              {[60,80,40,90].map((w, j) => (
+                                <div key={j} style={{ height: '14px', borderRadius: '9999px', background: '#F1F5F9', width: `${w}%`, animation: 'pulse 1.5s infinite' }} />
+                              ))}
+                            </div>
                           </div>
-                        </div>
-
+                        ))}
                       </div>
-
-                      {booking.dispatch && booking.dispatch.ambulance && (
-                        <div className="ambulance-info" style={{ background: '#e3f2fd', padding: '12px', borderRadius: '8px', marginTop: '12px' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                            <svg viewBox="0 0 24 24" fill="none" width="24" height="24">
-                              <path d="M20 8h-3V4H3c-1.1 0-2 .9-2 2v11h2c0 1.66 1.34 3 3 3s3-1.34 3-3h6c0 1.66 1.34 3 3 3s3-1.34 3-3h2v-5l-3-4z" fill="#1976d2"/>
-                            </svg>
-                            <strong style={{ color: '#1976d2' }}>{booking.dispatch.ambulance.vehicleNumber}</strong>
-                            <span style={{ fontSize: '12px', color: '#666' }}>({booking.dispatch.ambulance.type})</span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <span style={{ 
-                              padding: '4px 10px', 
-                              borderRadius: '12px', 
-                              fontSize: '12px', 
-                              fontWeight: '600',
-                              backgroundColor: getDispatchStatusColor(booking.dispatch.status),
-                              color: 'white'
-                            }}>
-                              {getDispatchStatusLabel(booking.dispatch.status)}
-                            </span>
-                          </div>
-                          {/* Progress Bar */}
-                          <div style={{ marginTop: '10px', background: '#e0e0e0', borderRadius: '4px', height: '6px', overflow: 'hidden' }}>
-                            <div style={{ 
-                              width: getDispatchProgress(booking.dispatch.status) + '%', 
-                              background: 'linear-gradient(90deg, #1976d2, #42a5f5)', 
-                              height: '100%',
-                              transition: 'width 0.5s ease'
-                            }}></div>
-                          </div>
+                    ) : bookingSubTab === 'current' ? (
+                      activeBookings.length > 0 ? (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                          {activeBookings.map(booking => (
+                            <BookingCard
+                              key={booking.id}
+                              booking={booking}
+                              onTrack={booking.dispatch ? () => startTracking(booking) : undefined}
+                              onCancel={() => handleCancelBooking(booking.id)}
+                            />
+                          ))}
                         </div>
-                      )}
-
-                      <div className="booking-footer">
-                        <div className="booking-time">
-                          {new Date(booking.createdAt).toLocaleString()}
+                      ) : (
+                        <div style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: '64px 24px',
+                          background: 'white',
+                          borderRadius: '16px',
+                          border: '1.5px dashed #CBD5E1',
+                          gap: '16px',
+                          textAlign: 'center',
+                        }}>
+                          <div style={{ fontSize: '56px', lineHeight: 1 }}>🚑</div>
+                          <h3 style={{ margin: 0, fontSize: '20px', color: '#1E293B', fontWeight: 700 }}>No Active Bookings</h3>
+                          <p style={{ margin: 0, fontSize: '14px', color: '#64748B', maxWidth: '320px', lineHeight: 1.6 }}>
+                            You have no active or upcoming bookings. Use the buttons above to request emergency assistance or schedule a transport.
+                          </p>
                         </div>
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          {(booking.status === 'CONFIRMED' || booking.status === 'PENDING') && booking.dispatch && (
-                            <button 
-                              onClick={() => startTracking(booking)}
-                              style={{
-                                padding: '6px 12px',
-                                backgroundColor: '#00875a',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                fontSize: '12px'
-                              }}
-                            >
-                              📍 Track Live
-                            </button>
-                          )}
-                          {booking.status !== 'COMPLETED' && booking.status !== 'CANCELLED' && (
-                            <button 
-                              onClick={() => handleCancelBooking(booking.id)}
-                              className="cancel-booking-btn"
-                              style={{
-                                padding: '6px 12px',
-                                backgroundColor: '#de350b',
-                                color: 'white',
-                                border: 'none',
-                                borderRadius: '4px',
-                                cursor: 'pointer',
-                                fontSize: '12px'
-                              }}
-                            >
-                              Cancel Booking
-                            </button>
-                          )}
+                      )
+                    ) : (
+                      /* Booking History Tab */
+                      historyBookings.length > 0 ? (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
+                          {historyBookings.map(booking => (
+                            <BookingCard
+                              key={booking.id}
+                              booking={booking}
+                              showActions={false}
+                            />
+                          ))}
                         </div>
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="empty-state">
-                    <svg viewBox="0 0 24 24" fill="none" className="empty-icon">
-                      <rect x="3" y="4" width="18" height="18" rx="2" fill="#e0e0e0"/>
-                    </svg>
-                    <p>No bookings yet</p>
-                    <span>Create your first booking to get started</span>
-                  </div>
-                )}
-              </div>
+                      ) : (
+                        <div style={{
+                          display: 'flex',
+                          flexDirection: 'column',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          padding: '64px 24px',
+                          background: 'white',
+                          borderRadius: '16px',
+                          border: '1.5px dashed #CBD5E1',
+                          gap: '16px',
+                          textAlign: 'center',
+                        }}>
+                          <div style={{ fontSize: '56px', lineHeight: 1 }}>📋</div>
+                          <h3 style={{ margin: 0, fontSize: '20px', color: '#1E293B', fontWeight: 700 }}>No Booking History</h3>
+                          <p style={{ margin: 0, fontSize: '14px', color: '#64748B', maxWidth: '320px', lineHeight: 1.6 }}>
+                            Your completed and cancelled bookings will appear here.
+                          </p>
+                        </div>
+                      )
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </>
         ) : (
@@ -1694,68 +1869,30 @@ function Dashboard() {
                 </>
               ) : (
                 <div className="triage-section">
-                  <h3>Emergency Triage</h3>
-                  
-                  <div className="form-group">
-                    <label>Chief Complaint</label>
-                    <textarea 
-                      value={triageData.chiefComplaint}
-                      onChange={(e) => setTriageData({...triageData, chiefComplaint: e.target.value})}
-                      placeholder="Describe the medical emergency"
-                      rows={3}
-                    />
-                  </div>
-
-                  <div className="form-group">
-                    <label>Severity Level</label>
-                    <select 
-                      value={triageData.severity}
-                      onChange={(e) => setTriageData({...triageData, severity: e.target.value as any})}
-                    >
-                      <option value="LOW">Low</option>
-                      <option value="MEDIUM">Medium</option>
-                      <option value="HIGH">High</option>
-                      <option value="CRITICAL">Critical</option>
-                    </select>
-                  </div>
-
-                  <div className="checkbox-group">
-                    <label>
-                      <input 
-                        type="checkbox"
-                        checked={!triageData.isBreathing}
-                        onChange={(e) => setTriageData({...triageData, isBreathing: !e.target.checked})}
-                      />
-                      <span>Difficulty Breathing</span>
-                    </label>
-                    
-                    <label>
-                      <input 
-                        type="checkbox"
-                        checked={!triageData.isConscious}
-                        onChange={(e) => setTriageData({...triageData, isConscious: !e.target.checked})}
-                      />
-                      <span>Loss of Consciousness</span>
-                    </label>
-                    
-                    <label>
-                      <input 
-                        type="checkbox"
-                        checked={triageData.hasChestPain}
-                        onChange={(e) => setTriageData({...triageData, hasChestPain: e.target.checked})}
-                      />
-                      <span>Chest Pain</span>
-                    </label>
-                    
-                    <label>
-                      <input 
-                        type="checkbox"
-                        checked={triageData.hasSevereBleeding}
-                        onChange={(e) => setTriageData({...triageData, hasSevereBleeding: e.target.checked})}
-                      />
-                      <span>Severe Bleeding</span>
-                    </label>
-                  </div>
+                  <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', color: '#172b4d', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    🤖 AI Emergency Triage
+                    {triageCompleted && (
+                      <span style={{ fontSize: '12px', padding: '3px 10px', background: '#e3fcef', color: '#00875a', borderRadius: '16px', fontWeight: 600 }}>
+                        ✓ Complete
+                      </span>
+                    )}
+                  </h3>
+                  <TriageChat
+                    onComplete={(result: TriageResult) => {
+                      setTriageResultData(result);
+                      setTriageCompleted(true);
+                      const mappedSeverity = result.severity === 'MODERATE' ? 'MEDIUM' : result.severity;
+                      const td = {
+                        chiefComplaint: result.chiefComplaint,
+                        severity: mappedSeverity as 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW',
+                        isBreathing: result.isBreathing,
+                        isConscious: result.isConscious,
+                        hasChestPain: result.hasChestPain,
+                        hasSevereBleeding: result.hasSevereBleeding,
+                      };
+                      setTriageData(td);
+                    }}
+                  />
                 </div>
               )}
 
@@ -1764,11 +1901,11 @@ function Dashboard() {
                   Cancel
                 </button>
                 <button 
-                  onClick={handleCreateBooking} 
+                  onClick={() => handleCreateBooking()} 
                   className="submit-btn"
-                  disabled={bookingType === 'EMERGENCY' ? !pickupLocation : (!pickupLocation || !dropoffLocation || !scheduledTime)}
+                  disabled={bookingType === 'EMERGENCY' ? (!pickupLocation || !triageCompleted) : (!pickupLocation || !dropoffLocation || !scheduledTime)}
                 >
-                  {bookingType === 'EMERGENCY' ? 'Request Emergency Ambulance' : 'Schedule Transport'}
+                  {bookingType === 'EMERGENCY' ? '🚑 Request Emergency Ambulance' : '📅 Schedule Transport'}
                 </button>
               </div>
             </div>
@@ -1927,14 +2064,28 @@ function Dashboard() {
               <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
                 <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Status</div>
                 <div style={{ fontSize: '16px', fontWeight: '700', color: '#00875a' }}>
-                  {trackingBooking.status}
+                  {getDispatchStatusLabel(trackingMetrics?.dispatchStatus || trackingBooking.status)}
                 </div>
               </div>
               <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>ETA</div>
-                <div style={{ fontSize: '20px', fontWeight: '700', color: '#ff5722' }}>
-                  {eta || 'Calculating...'}
+                <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
+                  {trackingMetrics?.etaLabel || 'ETA'}
                 </div>
+                <div style={{ fontSize: '20px', fontWeight: '700', color: '#ff5722' }}>
+                  {liveEta?.etaText || trackingMetrics?.etaText || 'Calculating...'}
+                </div>
+                {(liveEta?.expectedArrivalIso || trackingMetrics?.expectedTimeText) && (
+                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                    Expected by {liveEta?.expectedArrivalIso
+                      ? new Date(liveEta.expectedArrivalIso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                      : trackingMetrics?.expectedTimeText}
+                  </div>
+                )}
+                {liveEta?.source === 'google' && (
+                  <div style={{ fontSize: '11px', color: '#00875a', marginTop: '4px' }}>
+                    Google traffic ETA
+                  </div>
+                )}
               </div>
               {trackingBooking.dispatch?.ambulance && (
                 <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
@@ -1944,33 +2095,49 @@ function Dashboard() {
                   </div>
                 </div>
               )}
-              {ambulanceLocation && (
+              {trackingBooking.dispatch?.hospital && (
+                <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
+                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Selected Hospital</div>
+                  <div style={{ fontSize: '14px', fontWeight: '700', color: '#5e35b1' }}>
+                    {trackingBooking.dispatch.hospital.name}
+                  </div>
+                </div>
+              )}
+              {trackingMetrics && (
                 <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
                   <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Ambulance Location</div>
                   <div style={{ fontSize: '12px', fontWeight: '600', color: '#333' }}>
-                    {ambulanceLocation.lat.toFixed(4)}, {ambulanceLocation.lng.toFixed(4)}
+                    {trackingMetrics.ambulanceLat.toFixed(4)}, {trackingMetrics.ambulanceLng.toFixed(4)}
                   </div>
                 </div>
               )}
             </div>
 
             <div style={{ flex: 1, position: 'relative', minHeight: '400px' }}>
-              <div ref={trackingMapRef} style={{ width: '100%', height: '100%' }}></div>
+              <LiveRouteMap
+                ambulanceLat={trackingMetrics?.ambulanceLat}
+                ambulanceLng={trackingMetrics?.ambulanceLng}
+                targetLat={trackingMetrics?.targetLat}
+                targetLng={trackingMetrics?.targetLng}
+                targetLabel={trackingMetrics?.targetLabel}
+                title={trackingMetrics?.routeTitle || 'Route'}
+                ctaLabel="Open Route"
+              />
             </div>
 
             <div style={{ padding: '16px 24px', background: '#f8f9fa', borderTop: '1px solid #e0e0e0' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '13px' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <div style={{ width: '12px', height: '12px', background: '#2196f3', borderRadius: '50%' }}></div>
-                  <span>Pickup Location</span>
+                  <div style={{ width: '12px', height: '12px', background: '#0066cc', borderRadius: '50%' }}></div>
+                  <span>Ambulance</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <div style={{ width: '12px', height: '12px', background: '#f44336', borderRadius: '50%' }}></div>
-                  <span>Ambulance (Live)</span>
+                  <div style={{ width: '12px', height: '12px', background: '#de350b', borderRadius: '50%' }}></div>
+                  <span>Current Destination</span>
                 </div>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <div style={{ width: '20px', height: '2px', background: '#f44336', borderTop: '2px dashed #f44336' }}></div>
-                  <span>Route</span>
+                  <div style={{ width: '20px', height: '2px', background: '#0066cc', borderTop: '2px dashed #0066cc' }}></div>
+                  <span>Live Route</span>
                 </div>
               </div>
             </div>

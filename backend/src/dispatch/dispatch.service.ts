@@ -5,6 +5,7 @@ import { Dispatch } from './entities';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { UserRole, BookingStatus, AmbulanceStatus } from '../common/enums';
+import { RealtimeGateway } from '../realtime/realtime.gateway';
 
 /**
  * Dispatch Service
@@ -19,6 +20,7 @@ export class DispatchService {
     private bookingRepository: Repository<Booking>,
     @InjectRepository(Ambulance)
     private ambulanceRepository: Repository<Ambulance>,
+    private readonly realtimeGateway: RealtimeGateway,
   ) {}
 
   /**
@@ -102,7 +104,17 @@ export class DispatchService {
       await this.updateAmbulanceStatus(dispatch.ambulanceId, status);
     }
 
-    return this.dispatchRepository.save(dispatch);
+    const savedDispatch = await this.dispatchRepository.save(dispatch);
+
+    this.realtimeGateway.server.emit('dispatch_status_updated', {
+      dispatchId: savedDispatch.id,
+      bookingId: savedDispatch.bookingId,
+      ambulanceId: savedDispatch.ambulanceId,
+      status: savedDispatch.status,
+      completedAt: savedDispatch.completedAt,
+    });
+
+    return savedDispatch;
   }
 
   /**
@@ -113,6 +125,7 @@ export class DispatchService {
     if (!booking) return;
 
     switch (dispatchStatus) {
+      case 'EN_ROUTE_PICKUP':
       case 'EN_ROUTE':
       case 'AT_PICKUP':
       case 'EN_ROUTE_HOSPITAL':
@@ -138,6 +151,7 @@ export class DispatchService {
     if (!ambulance) return;
 
     switch (dispatchStatus) {
+      case 'EN_ROUTE_PICKUP':
       case 'EN_ROUTE':
       case 'AT_PICKUP':
       case 'EN_ROUTE_HOSPITAL':

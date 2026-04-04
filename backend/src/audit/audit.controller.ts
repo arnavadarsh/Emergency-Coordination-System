@@ -25,4 +25,9 @@ export class AuditController {
   async findByEntity(@Query('type') type: string, @Query('id') id: string) {
     return this.auditService.findByEntity(type, id);
   }
+
+  @Get('stats')
+  async getStats() {
+    return this.auditService.getStats();
+  }
 }

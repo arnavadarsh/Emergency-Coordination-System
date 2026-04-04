@@ -1,15 +1,10 @@
-import { Controller, Get, Patch, Param, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Param, Body, UseGuards, Query } from '@nestjs/common';
 import { HospitalsService } from './hospitals.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, CurrentUser } from '../common/decorators';
 import { UserRole } from '../common/enums';
-
-interface UpdateHospitalDto {
-  serviceStatus?: string;
-  availableBeds?: number;
-  totalBeds?: number;
-}
+import { UpdateHospitalDto, UpdateBedsDto, UpdateStatusDto, UpdateCapabilityDto } from './dto';
 
 /**
  * Hospitals Controller
@@ -45,9 +40,9 @@ export class HospitalsController {
   @Roles(UserRole.HOSPITAL, UserRole.ADMIN)
   async updateStatus(
     @Param('id') id: string,
-    @Body('serviceStatus') serviceStatus: string,
+    @Body() body: { status: string },
   ) {
-    return this.hospitalsService.updateStatus(id, serviceStatus);
+    return this.hospitalsService.updateStatus(id, body.status);
   }
 
   @Patch(':id/beds')
@@ -55,8 +50,37 @@ export class HospitalsController {
   @Roles(UserRole.HOSPITAL, UserRole.ADMIN)
   async updateBeds(
     @Param('id') id: string,
-    @Body() data: { availableBeds: number },
+    @Body() updateBedsDto: UpdateBedsDto,
   ) {
-    return this.hospitalsService.updateBeds(id, data.availableBeds);
+    return this.hospitalsService.updateBeds(id, updateBedsDto.availableBeds);
+  }
+
+  @Patch(':id/capability')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.HOSPITAL, UserRole.ADMIN)
+  async updateCapability(
+    @Param('id') id: string,
+    @Body() updateCapabilityDto: UpdateCapabilityDto,
+  ) {
+    return this.hospitalsService.updateCapability(id, updateCapabilityDto);
+  }
+
+  @Get('nearby')
+  async findNearby(
+    @Query('latitude') latitude: string,
+    @Query('longitude') longitude: string,
+    @Query('radius') radius?: string,
+  ) {
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+    const radiusKm = radius ? parseFloat(radius) : 10;
+    return this.hospitalsService.findNearby(lat, lng, radiusKm);
+  }
+
+  @Get(':id/stats')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.HOSPITAL, UserRole.ADMIN)
+  async getStats(@Param('id') id: string) {
+    return this.hospitalsService.getHospitalStats(id);
   }
 }

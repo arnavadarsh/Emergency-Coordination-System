@@ -7,9 +7,13 @@ import {
   ManyToOne,
   JoinColumn,
   Index,
+  OneToOne,
 } from 'typeorm';
 import { BookingStatus, SeverityLevel } from '../../common/enums';
 import { User } from '../../users/entities/user.entity';
+import { TriageReport } from '../../triage/entities/triage.entity';
+import { Ambulance } from '../../ambulances/entities/ambulance.entity';
+import { Hospital } from '../../hospitals/entities/hospital.entity';
 
 /**
  * Booking entity
@@ -34,9 +38,17 @@ export class Booking {
   @Column({
     type: 'enum',
     enum: BookingStatus,
-    default: BookingStatus.CREATED,
+    default: BookingStatus.PENDING,
   })
   status: BookingStatus;
+
+  @Column({
+    type: 'varchar',
+    length: 20,
+    name: 'booking_type',
+    default: 'EMERGENCY',
+  })
+  bookingType: string;
 
   @Column({
     type: 'enum',
@@ -77,4 +89,16 @@ export class Booking {
 
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
+
+  requirements?: any;
+
+  @OneToOne(() => TriageReport, triageReport => triageReport.booking)
+  triageReport: TriageReport;
+
+  // NOTE: Current deployed DB schema does not include ambulance/hospital FK columns on bookings.
+  // Keep as non-persistent properties for compatibility with in-memory workflow usage.
+  ambulance?: Ambulance;
+  hospital?: Hospital;
+
+  rankedHospitals?: any;
 }

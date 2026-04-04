@@ -5,8 +5,10 @@ import {
   CreateDateColumn,
   UpdateDateColumn,
   Index,
+  OneToMany,
 } from 'typeorm';
 import { AmbulanceStatus } from '../../common/enums';
+import { Booking } from '../../bookings/entities/booking.entity';
 
 /**
  * Ambulance entity
@@ -43,6 +45,9 @@ export class Ambulance {
 
   @Column({ type: 'jsonb', nullable: true, name: 'equipment_list' })
   equipmentList: any;
+
+  @OneToMany(() => Booking, booking => booking.ambulance)
+  bookings: Booking[];
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -1,21 +1,53 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { io } from 'socket.io-client';
 import { tokenStorage } from '../utils/tokenStorage';
-import '../styles/Dashboard.css';
+import { DriverRouteMap } from '../components/DriverRouteMap';
+import ActiveCaseCard from '../components/ActiveCaseCard';
+import ChecklistModal from '../components/ChecklistModal';
 
 const API_BASE_URL = 'http://localhost:3000/api';
 
+// ── Palette (matches user dashboard) ─────────────────────────
+const C = {
+  pageBg:       '#f5f7fa',
+  sidebar:      '#ffffff',
+  sidebarBorder:'#e0e0e0',
+  card:         '#ffffff',
+  cardBorder:   '#e0e0e0',
+  input:        '#f5f7fa',
+  textPrimary:  '#172b4d',
+  textSecondary:'#6b778c',
+  textMuted:    '#97a0af',
+  accent:       '#00a3bf',
+  accentSoft:   '#e6f7f9',
+  accentHover:  '#008a9e',
+  red:          '#de350b',
+  redSoft:      '#fff4f2',
+  green:        '#00875a',
+  greenSoft:    '#e3fcef',
+};
+
+// ── Interfaces ────────────────────────────────────────────────
 interface Booking {
   id: string;
   userId: string;
   pickupLocation: string;
+  pickupLatitude?: number;
+  pickupLongitude?: number;
   dropoffLocation: string;
+  destinationLatitude?: number;
+  destinationLongitude?: number;
+  selectedHospitalName?: string;
+  selectedHospitalAddress?: string;
   bookingType: 'EMERGENCY' | 'SCHEDULED';
   severity?: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW';
   status: string;
-  scheduledTime?: string;
   createdAt: string;
+  patientName?: string;
+  patientPhone?: string;
+  description?: string;
 }
 
 interface Dispatch {
@@ -23,7 +55,7 @@ interface Dispatch {
   bookingId: string;
   ambulanceId: string;
   driverId: string;
-  status: 'ASSIGNED' | 'DISPATCHED' | 'EN_ROUTE' | 'AT_PICKUP' | 'EN_ROUTE_HOSPITAL' | 'AT_HOSPITAL' | 'COMPLETED' | 'CANCELLED';
+  status: string;
   assignedAt: string;
   completedAt?: string;
   booking: Booking;
@@ -39,15 +71,59 @@ interface DriverProfile {
   phoneNumber: string;
   address?: string;
   ambulanceId: string;
-  ambulance?: {
-    vehicleNumber: string;
-    type: string;
-    status: string;
-  };
+  ambulance?: { vehicleNumber: string; type: string; status: string; currentLatitude?: number; currentLongitude?: number };
 }
 
 type TabType = 'active' | 'history' | 'profile';
+const ACTIVE_STATUSES = ['ASSIGNED','DISPATCHED','EN_ROUTE','EN_ROUTE_PICKUP','AT_PICKUP','EN_ROUTE_HOSPITAL','AT_HOSPITAL'];
 
+function sevColor(s?: string) {
+  return s === 'CRITICAL' ? '#de350b' : s === 'HIGH' ? '#ff8b00' : s === 'MEDIUM' ? '#ffab00' : '#00875a';
+}
+function statusLabel(s: string) { return s.replace(/_/g, ' '); }
+
+// ── Sidebar NavButton ─────────────────────────────────────────
+function NavItem({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: '12px',
+      padding: '12px 16px', borderRadius: '8px', border: 'none',
+      cursor: 'pointer', textAlign: 'left', width: '100%',
+      background: active ? C.accentSoft : 'transparent',
+      color: active ? C.accent : C.textSecondary,
+      fontWeight: active ? 600 : 500, fontSize: '14px',
+      transition: 'all 0.2s',
+    }}>
+      <span style={{ fontSize: '18px' }}>{icon}</span>
+      {label}
+    </button>
+  );
+}
+
+// ── Card ──────────────────────────────────────────────────────
+function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
+  return (
+    <div style={{
+      background: C.card, borderRadius: '12px',
+      border: `1px solid ${C.cardBorder}`,
+      boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
+      ...style,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+// ── Field label ───────────────────────────────────────────────
+function FieldLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: '11px', color: C.textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '4px' }}>
+      {children}
+    </div>
+  );
+}
+
+// ── Main ──────────────────────────────────────────────────────
 function Dashboard() {
   const navigate = useNavigate();
   const [dispatches, setDispatches] = useState<Dispatch[]>([]);
@@ -56,545 +132,370 @@ function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('active');
+  const [showChecklist, setShowChecklist] = useState(false);
+  const [historyFilter, setHistoryFilter] = useState<'ALL' | 'COMPLETED' | 'CANCELLED'>('ALL');
+  const [historySearch, setHistorySearch] = useState('');
   const [editingProfile, setEditingProfile] = useState(false);
-  const [profileForm, setProfileForm] = useState({
-    firstName: '',
-    lastName: '',
-    phoneNumber: '',
-    address: ''
-  });
+  const [profileForm, setProfileForm] = useState({ firstName: '', lastName: '', phoneNumber: '', address: '' });
 
-  const fetchDashboardData = async () => {
+  const fetchData = async () => {
     try {
       const token = tokenStorage.getToken();
-      const response = await axios.get(`${API_BASE_URL}/dashboard/driver`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      
-      const data = response.data;
-      
-      // Set driver profile
+      const { data } = await axios.get(`${API_BASE_URL}/dashboard/driver`, { headers: { Authorization: `Bearer ${token}` } });
       if (data.driver) {
-        const profile = {
-          id: data.driver.id,
-          email: data.driver.email,
-          firstName: data.driver.firstName || '',
-          lastName: data.driver.lastName || '',
-          name: data.driver.name || `${data.driver.firstName || ''} ${data.driver.lastName || ''}`.trim() || 'Driver',
+        const p: DriverProfile = {
+          id: data.driver.id, email: data.driver.email,
+          firstName: data.driver.firstName || '', lastName: data.driver.lastName || '',
+          name: data.driver.name || `${data.driver.firstName||''} ${data.driver.lastName||''}`.trim() || 'Driver',
           licenseNumber: data.driver.licenseNumber || 'N/A',
           phoneNumber: data.driver.phoneNumber || 'N/A',
-          address: data.driver.address || '',
-          ambulanceId: data.driver.ambulanceId || '',
+          address: data.driver.address || '', ambulanceId: data.driver.ambulanceId || '',
           ambulance: data.ambulance ? {
-            vehicleNumber: data.ambulance.vehicleNumber || 'N/A',
-            type: data.ambulance.type || 'STANDARD',
-            status: data.ambulance.status || 'AVAILABLE'
+            vehicleNumber: data.ambulance.vehicleNumber || 'N/A', type: data.ambulance.type || 'STANDARD',
+            status: data.ambulance.status || 'AVAILABLE',
+            currentLatitude: data.ambulance.currentLatitude != null ? Number(data.ambulance.currentLatitude) : undefined,
+            currentLongitude: data.ambulance.currentLongitude != null ? Number(data.ambulance.currentLongitude) : undefined,
           } : undefined
         };
-        setDriverProfile(profile);
-        setProfileForm({
-          firstName: profile.firstName,
-          lastName: profile.lastName,
-          phoneNumber: profile.phoneNumber === 'N/A' ? '' : profile.phoneNumber,
-          address: profile.address || ''
-        });
+        setDriverProfile(p);
+        setProfileForm({ firstName: p.firstName||'', lastName: p.lastName||'',
+          phoneNumber: p.phoneNumber==='N/A'?'':p.phoneNumber, address: p.address||'' });
       }
-      
-      // Set dispatches
-      if (data.dispatches && data.dispatches.length > 0) {
-        const formattedDispatches = data.dispatches.map((d: any) => ({
-          id: d.id,
-          bookingId: d.bookingId || d.booking?.id,
-          ambulanceId: d.ambulanceId,
-          driverId: d.driverId,
-          status: d.status || 'ASSIGNED',
-          assignedAt: d.assignedAt || d.createdAt,
-          completedAt: d.completedAt,
+      if (data.dispatches?.length) {
+        const fmt = data.dispatches.map((d: any): Dispatch => ({
+          id: d.id, bookingId: d.bookingId||d.booking?.id,
+          ambulanceId: d.ambulanceId, driverId: d.driverId, status: d.status||'ASSIGNED',
+          assignedAt: d.assignedAt||d.createdAt, completedAt: d.completedAt,
           booking: {
-            id: d.booking?.id || d.bookingId,
-            userId: d.booking?.userId || '',
-            pickupLocation: d.booking?.pickupLocation || 'Not specified',
-            dropoffLocation: d.booking?.dropoffLocation || d.booking?.hospitalName || 'Not specified',
-            bookingType: d.booking?.bookingType || 'EMERGENCY',
-            severity: d.booking?.severity || 'MEDIUM',
-            status: d.booking?.status || 'IN_PROGRESS',
-            createdAt: d.booking?.createdAt || d.assignedAt
+            id: d.booking?.id||d.bookingId, userId: d.booking?.userId||'',
+            pickupLocation: d.booking?.pickupLocation||d.booking?.pickupAddress||'Not specified',
+            pickupLatitude: d.booking?.pickupLatitude!=null?Number(d.booking.pickupLatitude):undefined,
+            pickupLongitude: d.booking?.pickupLongitude!=null?Number(d.booking.pickupLongitude):undefined,
+            dropoffLocation: d.booking?.dropoffLocation||d.booking?.destinationAddress||'Not specified',
+            destinationLatitude: d.booking?.destinationLatitude!=null?Number(d.booking.destinationLatitude):undefined,
+            destinationLongitude: d.booking?.destinationLongitude!=null?Number(d.booking.destinationLongitude):undefined,
+            selectedHospitalName: d.booking?.selectedHospitalName||d.hospital?.name||'Hospital',
+            selectedHospitalAddress: d.booking?.selectedHospitalAddress||d.hospital?.address||'',
+            bookingType: d.booking?.bookingType||'EMERGENCY', severity: d.booking?.severity||'MEDIUM',
+            status: d.booking?.status||'IN_PROGRESS', createdAt: d.booking?.createdAt||d.assignedAt,
+            patientName: d.booking?.user?.name||d.booking?.userName||'Patient',
+            patientPhone: d.booking?.user?.phoneNumber||d.booking?.userPhone,
+            description: d.booking?.triageData?.chiefComplaint||d.booking?.description,
           }
         }));
-        
-        setDispatches(formattedDispatches);
-        
-        // Find active dispatch
-        const active = formattedDispatches.find(
-          (d: Dispatch) => ['ASSIGNED', 'DISPATCHED', 'EN_ROUTE', 'AT_PICKUP', 'EN_ROUTE_HOSPITAL', 'AT_HOSPITAL'].includes(d.status)
-        );
-        setActiveDispatch(active || null);
-      }
-      
-      setLoading(false);
-      setError(null);
-    } catch (err: any) {
-      console.error('Failed to fetch dashboard data:', err);
-      setError(err.response?.data?.message || 'Failed to load dashboard data');
-      setLoading(false);
-    }
+        setDispatches(fmt);
+        setActiveDispatch(fmt.find((d: Dispatch) => ACTIVE_STATUSES.includes(d.status))||null);
+      } else { setDispatches([]); setActiveDispatch(null); }
+      setLoading(false); setError(null);
+    } catch (err: any) { setError(err.response?.data?.message||'Failed to load data'); setLoading(false); }
   };
 
+  useEffect(() => { fetchData(); const t = setInterval(fetchData, 30000); return () => clearInterval(t); }, []);
   useEffect(() => {
-    fetchDashboardData();
-    
-    // Refresh data every 30 seconds
-    const refreshInterval = setInterval(fetchDashboardData, 30000);
-
-    return () => clearInterval(refreshInterval);
+    const socket = io('http://localhost:3000', { transports: ['websocket'] });
+    socket.on('dispatch_assigned', fetchData);
+    socket.on('dispatch_status_updated', fetchData);
+    socket.on('dispatch_diverted', (p: any) => { if (p?.newHospital) alert(`Diverted to ${p.newHospital.name}`); fetchData(); });
+    return () => { socket.off('dispatch_assigned', fetchData); socket.off('dispatch_status_updated', fetchData); socket.disconnect(); };
   }, []);
 
-  const updateDispatchStatus = async (dispatchId: string, newStatus: string) => {
+  const updateStatus = async (dispatchId: string, newStatus: string) => {
     try {
       const token = tokenStorage.getToken();
-      await axios.patch(
-        `${API_BASE_URL}/dispatch/${dispatchId}/status`,
-        { status: newStatus },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      await fetchDashboardData();
-    } catch (err) {
-      console.error('Failed to update dispatch status:', err);
-      alert('Failed to update status');
-    }
+      await axios.patch(`${API_BASE_URL}/dispatch/${dispatchId}/status`, { status: newStatus }, { headers: { Authorization: `Bearer ${token}` } });
+      await fetchData();
+    } catch { alert('Failed to update status'); }
   };
 
   const handleUpdateProfile = async () => {
     try {
       const token = tokenStorage.getToken();
-      await axios.patch(
-        `${API_BASE_URL}/users/profile`,
-        profileForm,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      setEditingProfile(false);
-      await fetchDashboardData();
-      alert('Profile updated successfully!');
-    } catch (err) {
-      console.error('Failed to update profile:', err);
-      alert('Failed to update profile');
-    }
+      await axios.patch(`${API_BASE_URL}/users/profile`, profileForm, { headers: { Authorization: `Bearer ${token}` } });
+      setEditingProfile(false); await fetchData();
+    } catch { alert('Failed to update profile'); }
   };
 
-  const handleLogout = () => {
-    tokenStorage.clearToken();
-    navigate('/login');
-  };
+  const handleLogout = () => { tokenStorage.clearToken(); navigate('/'); };
 
-  const getSeverityColor = (severity?: string) => {
-    switch (severity) {
-      case 'CRITICAL': return '#de350b';
-      case 'HIGH': return '#ff8b00';
-      case 'MEDIUM': return '#ffab00';
-      case 'LOW': return '#00875a';
-      default: return '#0066cc';
-    }
-  };
+  if (loading) return (
+    <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background: C.pageBg, flexDirection:'column', gap:'16px' }}>
+      <div style={{ width:'36px', height:'36px', borderRadius:'50%', border:`3px solid ${C.accentSoft}`, borderTopColor: C.accent, animation:'spin 0.8s linear infinite' }} />
+      <div style={{ fontSize:'14px', color: C.textSecondary }}>Loading dashboard…</div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'ASSIGNED': 
-      case 'DISPATCHED': return '#0066cc';
-      case 'EN_ROUTE': 
-      case 'EN_ROUTE_HOSPITAL': return '#ff8b00';
-      case 'AT_PICKUP':
-      case 'AT_HOSPITAL': return '#00875a';
-      case 'COMPLETED': return '#6b778c';
-      case 'CANCELLED': return '#de350b';
-      default: return '#6b778c';
-    }
-  };
+  if (error) return (
+    <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background: C.pageBg, flexDirection:'column', gap:'12px' }}>
+      <div style={{ fontSize:'36px' }}>⚠️</div>
+      <div style={{ fontSize:'16px', color: C.red, fontWeight:600 }}>{error}</div>
+      <button onClick={fetchData} style={{ padding:'10px 24px', background: C.accent, color:'white', border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600 }}>Retry</button>
+    </div>
+  );
 
-  if (loading) {
-    return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Loading...</div>
-          <div style={{ color: '#666' }}>Fetching data from server</div>
-        </div>
-      </div>
-    );
-  }
+  const historyDispatches = dispatches
+    .filter(d => !ACTIVE_STATUSES.includes(d.status))
+    .filter(d => historyFilter==='ALL'||d.status===historyFilter)
+    .filter(d => !historySearch ||
+      d.booking.pickupLocation.toLowerCase().includes(historySearch.toLowerCase()) ||
+      (d.booking.selectedHospitalName||'').toLowerCase().includes(historySearch.toLowerCase()) ||
+      d.booking.id.includes(historySearch));
 
-  if (error) {
-    return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center', color: '#ff4444' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Error</div>
-          <div>{error}</div>
-          <button onClick={fetchDashboardData} style={{ marginTop: '20px', padding: '10px 20px', cursor: 'pointer' }}>Retry</button>
-        </div>
-      </div>
-    );
-  }
+  const isAvailable = !activeDispatch;
+  const NAV: { id: TabType; icon: string; label: string }[] = [
+    { id:'active',  icon:'🚑', label:'Active Dispatch' },
+    { id:'history', icon:'📋', label:'Booking History' },
+    { id:'profile', icon:'👤', label:'Profile' },
+  ];
 
   return (
-    <div className="dashboard-container">
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <div className="logo-section">
-            <svg className="logo-icon" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" fill="#ff8b00"/>
-              <path d="M12 8v8m-4-4h8" stroke="white" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-            <span className="logo-text">ECS Driver</span>
+    <div style={{ display:'flex', minHeight:'100vh', background: C.pageBg, fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif', color: C.textPrimary }}>
+      <style>{`*{box-sizing:border-box} ::-webkit-scrollbar{width:6px} ::-webkit-scrollbar-track{background:${C.pageBg}} ::-webkit-scrollbar-thumb{background:${C.cardBorder};border-radius:9999px}`}</style>
+
+      {showChecklist && driverProfile?.ambulanceId && activeDispatch && (
+        <ChecklistModal
+          ambulanceId={driverProfile.ambulanceId}
+          severity={activeDispatch.booking.severity}
+          requiredEquipment={(activeDispatch.booking as any).triageData?.ambulance?.equipment}
+          onConfirm={() => { setShowChecklist(false); updateStatus(activeDispatch.id, 'EN_ROUTE_PICKUP'); }}
+          onClose={() => setShowChecklist(false)}
+        />
+      )}
+
+      {/* ── Sidebar ─────────────────────────────── */}
+      <aside style={{ width:'260px', flexShrink:0, background: C.sidebar, borderRight:`1px solid ${C.sidebarBorder}`,
+        display:'flex', flexDirection:'column', position:'sticky', top:0, height:'100vh',
+        boxShadow:'2px 0 8px rgba(0,0,0,0.05)' }}>
+
+        {/* Logo */}
+        <div style={{ padding:'24px', borderBottom:`1px solid ${C.sidebarBorder}` }}>
+          <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'12px' }}>
+            <span style={{ fontSize:'28px' }}>🚑</span>
+            <span style={{ fontSize:'20px', fontWeight:700, color: C.textPrimary }}>ECS Driver</span>
           </div>
-          <div className="driver-badge">Driver Portal</div>
+          <div style={{ display:'inline-flex', alignItems:'center', gap:'6px',
+            padding:'5px 12px', borderRadius:'12px', fontSize:'12px', fontWeight:600,
+            background: isAvailable ? C.greenSoft : C.redSoft,
+            color: isAvailable ? C.green : C.red }}>
+            <div style={{ width:'7px', height:'7px', borderRadius:'50%', background: isAvailable ? C.green : C.red }} />
+            {isAvailable ? 'AVAILABLE' : 'ON DISPATCH'}
+          </div>
         </div>
 
-        <nav className="nav-menu">
-          <a href="#" className={`nav-item ${activeTab === 'active' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('active'); }}>
-            <svg viewBox="0 0 24 24" fill="none">
-              <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" fill="currentColor"/>
-            </svg>
-            <span>Active Dispatch</span>
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('history'); }}>
-            <svg viewBox="0 0 24 24" fill="none">
-              <path d="M13 3a9 9 0 00-9 9H1l3.89 3.89.07.14L9 12H6a7 7 0 117 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0013 21a9 9 0 000-18zm-1 5v5l4.25 2.52.77-1.28-3.52-2.09V8z" fill="currentColor"/>
-            </svg>
-            <span>History</span>
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('profile'); }}>
-            <svg viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="8" r="4" fill="currentColor"/>
-              <path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2" fill="currentColor"/>
-            </svg>
-            <span>Profile</span>
-          </a>
+        {/* Vehicle */}
+        {driverProfile?.ambulance && (
+          <div style={{ padding:'14px 24px', borderBottom:`1px solid ${C.sidebarBorder}` }}>
+            <div style={{ fontSize:'13px', color: C.textPrimary, fontWeight:600 }}>{driverProfile.ambulance.vehicleNumber}</div>
+            <div style={{ fontSize:'12px', color: C.textSecondary }}>{driverProfile.ambulance.type}</div>
+          </div>
+        )}
+
+        {/* Nav */}
+        <nav style={{ flex:1, padding:'16px', display:'flex', flexDirection:'column', gap:'4px' }}>
+          {NAV.map(n => <NavItem key={n.id} icon={n.icon} label={n.label} active={activeTab===n.id} onClick={() => setActiveTab(n.id)} />)}
         </nav>
 
-        <button onClick={handleLogout} className="logout-btn">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z" fill="currentColor"/>
-          </svg>
-          Logout
-        </button>
+        {/* Driver info + logout */}
+        <div style={{ padding:'16px 24px', borderTop:`1px solid ${C.sidebarBorder}` }}>
+          <div style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary, marginBottom:'2px' }}>{driverProfile?.name}</div>
+          <div style={{ fontSize:'12px', color: C.textSecondary, marginBottom:'12px' }}>Lic: {driverProfile?.licenseNumber}</div>
+          <button onClick={handleLogout} style={{ width:'100%', padding:'10px 12px',
+            background:'white', color: C.textSecondary, border:`1px solid ${C.cardBorder}`,
+            borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:500,
+            display:'flex', alignItems:'center', justifyContent:'center', gap:'8px', transition:'all 0.2s' }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = C.red; e.currentTarget.style.color = C.red; }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = C.cardBorder; e.currentTarget.style.color = C.textSecondary; }}>
+            Sign Out →
+          </button>
+        </div>
       </aside>
 
-      <main className="main-content">
-        <header className="dashboard-header">
-          <div>
-            <h1>{activeTab === 'active' ? 'Active Dispatch' : activeTab === 'history' ? 'Dispatch History' : 'My Profile'}</h1>
-            <p>{activeTab === 'active' ? 'Manage your current dispatch' : activeTab === 'history' ? 'View past dispatches' : 'Manage your personal information'}</p>
+      {/* ── Main ────────────────────────────────── */}
+      <main style={{ flex:1, overflowY:'auto', padding:'32px' }}>
+
+        {/* Active Dispatch */}
+        {activeTab==='active' && (
+          <div style={{ maxWidth:'700px', margin:'0 auto' }}>
+            <h1 style={{ fontSize:'28px', fontWeight:700, color: C.textPrimary, margin:'0 0 4px' }}>Active Dispatch</h1>
+            <p style={{ fontSize:'15px', color: C.textSecondary, margin:'0 0 24px' }}>
+              {activeDispatch ? 'Respond quickly — a patient is waiting.' : 'No active dispatch. Waiting for assignment.'}
+            </p>
+
+            {activeDispatch ? (
+              <>
+                <ActiveCaseCard
+                  dispatch={activeDispatch}
+                  onStartJourney={() => setShowChecklist(true)}
+                  onArrivedPickup={() => updateStatus(activeDispatch.id,'AT_PICKUP')}
+                  onEnRouteHospital={() => updateStatus(activeDispatch.id,'EN_ROUTE_HOSPITAL')}
+                  onArrivedHospital={() => updateStatus(activeDispatch.id,'AT_HOSPITAL')}
+                  onComplete={() => updateStatus(activeDispatch.id,'COMPLETED')}
+                />
+
+                {['ASSIGNED','DISPATCHED','EN_ROUTE_PICKUP','EN_ROUTE'].includes(activeDispatch.status) && (
+                  <Card style={{ overflow:'hidden', marginTop:'20px' }}>
+                    <div style={{ padding:'14px 20px', borderBottom:`1px solid ${C.cardBorder}` }}>
+                      <span style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary }}>🗺 Route to Patient</span>
+                    </div>
+                    <DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
+                      targetLat={activeDispatch.booking.pickupLatitude} targetLng={activeDispatch.booking.pickupLongitude}
+                      targetLabel={activeDispatch.booking.pickupLocation} title="Route To Patient" ctaLabel="Open in Maps" />
+                  </Card>
+                )}
+
+                {['AT_PICKUP','EN_ROUTE_HOSPITAL','AT_HOSPITAL'].includes(activeDispatch.status) && (
+                  <Card style={{ overflow:'hidden', marginTop:'20px' }}>
+                    <div style={{ padding:'14px 20px', borderBottom:`1px solid ${C.cardBorder}` }}>
+                      <span style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary }}>🏥 Route to Hospital</span>
+                    </div>
+                    <DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
+                      targetLat={activeDispatch.booking.destinationLatitude} targetLng={activeDispatch.booking.destinationLongitude}
+                      targetLabel={activeDispatch.booking.selectedHospitalName||activeDispatch.booking.dropoffLocation}
+                      title="Route To Hospital" ctaLabel="Open in Maps" />
+                  </Card>
+                )}
+              </>
+            ) : (
+              <Card style={{ padding:'60px 24px', textAlign:'center' }}>
+                <div style={{ fontSize:'56px', marginBottom:'16px' }}>🟢</div>
+                <h2 style={{ margin:'0 0 8px', fontSize:'20px', fontWeight:600, color: C.textPrimary }}>You're Available</h2>
+                <p style={{ margin:0, fontSize:'14px', color: C.textSecondary, lineHeight:1.6 }}>
+                  Waiting for dispatch. A new case will appear here automatically.
+                </p>
+              </Card>
+            )}
           </div>
-          {driverProfile && activeTab !== 'profile' && (
-            <div className="driver-info-card">
-              <div className="info-row">
-                <strong>{driverProfile.name}</strong>
-              </div>
-              <div className="info-row">
-                License: {driverProfile.licenseNumber}
-              </div>
-              {driverProfile.ambulance && (
-                <div className="info-row">
-                  Vehicle: {driverProfile.ambulance.vehicleNumber} ({driverProfile.ambulance.type})
-                </div>
-              )}
-            </div>
-          )}
-        </header>
+        )}
 
-        {activeTab === 'profile' ? (
-          <div className="profile-section" style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' }}>
-              <h2 style={{ margin: 0, fontSize: '20px', color: '#333' }}>Personal Information</h2>
-              {!editingProfile ? (
-                <button onClick={() => setEditingProfile(true)} style={{ padding: '8px 16px', backgroundColor: '#ff8b00', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
-                  Edit Profile
+        {/* Booking History */}
+        {activeTab==='history' && (
+          <div style={{ maxWidth:'700px', margin:'0 auto' }}>
+            <h1 style={{ fontSize:'28px', fontWeight:700, color: C.textPrimary, margin:'0 0 4px' }}>Booking History</h1>
+            <p style={{ fontSize:'15px', color: C.textSecondary, margin:'0 0 24px' }}>All your past dispatches.</p>
+
+            <div style={{ display:'flex', gap:'10px', marginBottom:'20px', flexWrap:'wrap' }}>
+              <input value={historySearch} onChange={e => setHistorySearch(e.target.value)}
+                placeholder="Search location or ID…"
+                style={{ flex:1, minWidth:'200px', padding:'10px 14px', border:`1px solid ${C.cardBorder}`,
+                  borderRadius:'8px', fontSize:'14px', outline:'none', background:'white', color: C.textPrimary,
+                  transition:'all 0.2s', fontFamily:'inherit' }}
+                onFocus={e => { e.target.style.borderColor = C.accent; e.target.style.boxShadow = `0 0 0 3px rgba(0,163,191,0.1)`; }}
+                onBlur={e => { e.target.style.borderColor = C.cardBorder; e.target.style.boxShadow = 'none'; }} />
+              {(['ALL','COMPLETED','CANCELLED'] as const).map(f => (
+                <button key={f} onClick={() => setHistoryFilter(f)} style={{
+                  padding:'10px 14px', borderRadius:'8px', border:'1px solid',
+                  borderColor: historyFilter===f ? C.accent : C.cardBorder,
+                  background: historyFilter===f ? C.accentSoft : 'white',
+                  color: historyFilter===f ? C.accent : C.textSecondary,
+                  fontWeight: historyFilter===f ? 600 : 500, fontSize:'13px', cursor:'pointer', transition:'all 0.2s',
+                }}>
+                  {f}
                 </button>
-              ) : (
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button onClick={() => setEditingProfile(false)} style={{ padding: '8px 16px', backgroundColor: '#e0e0e0', color: '#333', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
-                    Cancel
-                  </button>
-                  <button onClick={handleUpdateProfile} style={{ padding: '8px 16px', backgroundColor: '#00875a', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer' }}>
-                    Save Changes
-                  </button>
-                </div>
-              )}
+              ))}
             </div>
 
-            {!editingProfile ? (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '20px' }}>
-                <div style={{ padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600' }}>Email</label>
-                  <p style={{ margin: '8px 0 0', fontSize: '16px', color: '#333' }}>{driverProfile?.email || 'N/A'}</p>
-                </div>
-                <div style={{ padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600' }}>Full Name</label>
-                  <p style={{ margin: '8px 0 0', fontSize: '16px', color: '#333' }}>{driverProfile?.name || 'N/A'}</p>
-                </div>
-                <div style={{ padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600' }}>Phone Number</label>
-                  <p style={{ margin: '8px 0 0', fontSize: '16px', color: '#333' }}>{driverProfile?.phoneNumber || 'N/A'}</p>
-                </div>
-                <div style={{ padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600' }}>License Number</label>
-                  <p style={{ margin: '8px 0 0', fontSize: '16px', color: '#333' }}>{driverProfile?.licenseNumber || 'N/A'}</p>
-                </div>
-                <div style={{ padding: '16px', backgroundColor: '#f8f9fa', borderRadius: '8px' }}>
-                  <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600' }}>Address</label>
-                  <p style={{ margin: '8px 0 0', fontSize: '16px', color: '#333' }}>{driverProfile?.address || 'Not set'}</p>
-                </div>
-                {driverProfile?.ambulance && (
-                  <div style={{ padding: '16px', backgroundColor: '#fff3e0', borderRadius: '8px' }}>
-                    <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600' }}>Assigned Vehicle</label>
-                    <p style={{ margin: '8px 0 0', fontSize: '16px', color: '#333' }}>{driverProfile.ambulance.vehicleNumber} ({driverProfile.ambulance.type})</p>
-                    <p style={{ margin: '4px 0 0', fontSize: '14px', color: '#ff8b00' }}>Status: {driverProfile.ambulance.status}</p>
+            <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+              {historyDispatches.length > 0 ? historyDispatches.map(d => (
+                <Card key={d.id} style={{ padding:'18px 20px' }}>
+                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:'12px' }}>
+                    <div>
+                      <div style={{ fontFamily:'monospace', fontSize:'12px', color: C.textMuted, marginBottom:'2px' }}>
+                        #{d.booking.id.slice(0,12).toUpperCase()}
+                      </div>
+                      <div style={{ fontSize:'15px', fontWeight:600, color: C.textPrimary }}>{d.booking.patientName||'Patient'}</div>
+                    </div>
+                    <div style={{ display:'flex', gap:'6px', flexWrap:'wrap', justifyContent:'flex-end' }}>
+                      {d.booking.severity && (
+                        <span style={{ padding:'3px 10px', borderRadius:'10px', fontSize:'11px', fontWeight:600,
+                          color:'white', background: sevColor(d.booking.severity), textTransform:'uppercase', letterSpacing:'0.5px' }}>
+                          {d.booking.severity}
+                        </span>
+                      )}
+                      <span style={{ padding:'3px 10px', borderRadius:'10px', fontSize:'11px', fontWeight:600, color:'white',
+                        background: d.status==='COMPLETED' ? C.green : C.red, textTransform:'uppercase', letterSpacing:'0.5px' }}>
+                        {statusLabel(d.status)}
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ display:'flex', gap:'8px', alignItems:'center', fontSize:'13px', color: C.textSecondary, marginBottom:'10px',
+                    padding:'10px 12px', background: C.pageBg, borderRadius:'8px' }}>
+                    <span>📍</span>
+                    <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{d.booking.pickupLocation}</span>
+                    <span>→</span>
+                    <span>🏥</span>
+                    <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{d.booking.selectedHospitalName||d.booking.dropoffLocation}</span>
+                  </div>
+                  <div style={{ fontSize:'12px', color: C.textMuted }}>{new Date(d.assignedAt).toLocaleString()}</div>
+                </Card>
+              )) : (
+                <Card style={{ padding:'48px 24px', textAlign:'center' }}>
+                  <div style={{ fontSize:'40px', marginBottom:'12px' }}>📋</div>
+                  <div style={{ fontSize:'16px', fontWeight:600, color: C.textSecondary, marginBottom:'6px' }}>No History Found</div>
+                  <div style={{ fontSize:'13px', color: C.textMuted }}>Completed dispatches will appear here.</div>
+                </Card>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Profile */}
+        {activeTab==='profile' && (
+          <div style={{ maxWidth:'560px', margin:'0 auto' }}>
+            <h1 style={{ fontSize:'28px', fontWeight:700, color: C.textPrimary, margin:'0 0 24px' }}>My Profile</h1>
+
+            {driverProfile?.ambulance && (
+              <Card style={{ padding:'20px', marginBottom:'16px', background: C.accentSoft, borderColor: C.accent }}>
+                <FieldLabel>Assigned Vehicle</FieldLabel>
+                <div style={{ fontSize:'20px', fontWeight:700, color: C.textPrimary, marginBottom:'2px' }}>{driverProfile.ambulance.vehicleNumber}</div>
+                <div style={{ fontSize:'13px', color: C.textSecondary }}>{driverProfile.ambulance.type} · Status: {driverProfile.ambulance.status}</div>
+              </Card>
+            )}
+
+            <Card>
+              <div style={{ padding:'16px 20px', borderBottom:`1px solid ${C.cardBorder}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                <span style={{ fontSize:'16px', fontWeight:600, color: C.textPrimary }}>Personal Information</span>
+                {!editingProfile ? (
+                  <button onClick={() => setEditingProfile(true)} style={{ padding:'7px 16px', background: C.accentSoft, color: C.accent,
+                    border:`1px solid ${C.accent}`, borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+                    Edit Profile
+                  </button>
+                ) : (
+                  <div style={{ display:'flex', gap:'8px' }}>
+                    <button onClick={() => setEditingProfile(false)} style={{ padding:'7px 14px', background:'white', color: C.textSecondary,
+                      border:`1px solid ${C.cardBorder}`, borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>Cancel</button>
+                    <button onClick={handleUpdateProfile} style={{ padding:'7px 14px', background: C.green, color:'white',
+                      border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>Save Changes</button>
                   </div>
                 )}
               </div>
-            ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '20px' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '14px', fontWeight: '500', marginBottom: '8px', color: '#333' }}>First Name</label>
-                  <input type="text" value={profileForm.firstName} onChange={(e) => setProfileForm({...profileForm, firstName: e.target.value})} style={{ width: '100%', padding: '12px', border: '1px solid #ddd', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' }} placeholder="Enter first name" />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '14px', fontWeight: '500', marginBottom: '8px', color: '#333' }}>Last Name</label>
-                  <input type="text" value={profileForm.lastName} onChange={(e) => setProfileForm({...profileForm, lastName: e.target.value})} style={{ width: '100%', padding: '12px', border: '1px solid #ddd', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' }} placeholder="Enter last name" />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '14px', fontWeight: '500', marginBottom: '8px', color: '#333' }}>Phone Number</label>
-                  <input type="tel" value={profileForm.phoneNumber} onChange={(e) => setProfileForm({...profileForm, phoneNumber: e.target.value})} style={{ width: '100%', padding: '12px', border: '1px solid #ddd', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' }} placeholder="Enter phone number" />
-                </div>
-                <div>
-                  <label style={{ display: 'block', fontSize: '14px', fontWeight: '500', marginBottom: '8px', color: '#333' }}>Address</label>
-                  <input type="text" value={profileForm.address} onChange={(e) => setProfileForm({...profileForm, address: e.target.value})} style={{ width: '100%', padding: '12px', border: '1px solid #ddd', borderRadius: '8px', fontSize: '14px', boxSizing: 'border-box' }} placeholder="Enter address" />
-                </div>
+
+              <div style={{ padding:'20px', display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:'16px' }}>
+                {!editingProfile ? (
+                  [['Name', driverProfile?.name],['Email', driverProfile?.email],
+                   ['Phone', driverProfile?.phoneNumber],['License', driverProfile?.licenseNumber],
+                   ['Address', driverProfile?.address||'Not set']].map(([label, val]) => (
+                    <div key={label as string} style={{ padding:'14px', background: C.pageBg, borderRadius:'8px' }}>
+                      <FieldLabel>{label}</FieldLabel>
+                      <div style={{ fontSize:'15px', color: C.textPrimary, fontWeight:500 }}>{val}</div>
+                    </div>
+                  ))
+                ) : (
+                  [['First Name','firstName'],['Last Name','lastName'],['Phone','phoneNumber'],['Address','address']].map(([label, key]) => (
+                    <div key={key}>
+                      <label style={{ display:'block', fontSize:'13px', fontWeight:600, color: C.textPrimary, marginBottom:'6px' }}>{label}</label>
+                      <input value={(profileForm as any)[key]} onChange={e => setProfileForm(p => ({...p,[key]:e.target.value}))}
+                        style={{ width:'100%', padding:'11px 12px', border:`1px solid ${C.cardBorder}`, borderRadius:'8px',
+                          fontSize:'14px', outline:'none', fontFamily:'inherit', color: C.textPrimary, background:'white', transition:'all 0.2s' }}
+                        onFocus={e => { e.target.style.borderColor = C.accent; e.target.style.boxShadow = `0 0 0 3px rgba(0,163,191,0.1)`; }}
+                        onBlur={e => { e.target.style.borderColor = C.cardBorder; e.target.style.boxShadow='none'; }} />
+                    </div>
+                  ))
+                )}
               </div>
-            )}
+            </Card>
           </div>
-        ) : activeTab === 'history' ? (
-          <div className="card history-card" style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h2 style={{ margin: 0 }}>All Dispatches</h2>
-              <span className="count-badge" style={{ background: '#e3f2fd', color: '#1976d2', padding: '4px 12px', borderRadius: '12px' }}>{dispatches.length}</span>
-            </div>
-            
-            <div className="dispatches-list">
-              {dispatches.length > 0 ? (
-                dispatches.map(dispatch => (
-                  <div key={dispatch.id} className="dispatch-item" style={{ padding: '16px', borderBottom: '1px solid #eee' }}>
-                    <div className="dispatch-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                      <span className="dispatch-id" style={{ fontFamily: 'monospace' }}>#{dispatch.booking.id.slice(0, 8)}</span>
-                      <span style={{ padding: '4px 12px', borderRadius: '12px', color: 'white', backgroundColor: getStatusColor(dispatch.status), fontSize: '12px' }}>
-                        {dispatch.status.replace('_', ' ')}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
-                      <span style={{ color: '#ff8b00' }}>📍</span>
-                      <span>{dispatch.booking.pickupLocation}</span>
-                      <span>→</span>
-                      <span style={{ color: '#00875a' }}>📍</span>
-                      <span>{dispatch.booking.dropoffLocation}</span>
-                    </div>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#666' }}>
-                      <span>{new Date(dispatch.assignedAt).toLocaleString()}</span>
-                      {dispatch.booking.severity && (
-                        <span style={{ padding: '2px 8px', borderRadius: '8px', backgroundColor: getSeverityColor(dispatch.booking.severity), color: 'white' }}>
-                          {dispatch.booking.severity}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>
-                  <p>No dispatch history</p>
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-        <div className="dashboard-grid">
-          {/* Active Dispatch Section */}
-          <div className="card active-dispatch-card">
-            <div className="card-header">
-              <h2>Active Dispatch</h2>
-              {activeDispatch && (
-                <span 
-                  className="status-badge"
-                  style={{ backgroundColor: getStatusColor(activeDispatch.status) }}
-                >
-                  {activeDispatch.status.replace('_', ' ')}
-                </span>
-              )}
-            </div>
-            
-            {activeDispatch ? (
-              <div className="active-dispatch-content">
-                <div className="dispatch-details">
-                  <div className="detail-item">
-                    <svg viewBox="0 0 24 24" fill="none" className="detail-icon">
-                      <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="#ff8b00"/>
-                    </svg>
-                    <div>
-                      <strong>Pickup Location</strong>
-                      <p>{activeDispatch.booking.pickupLocation}</p>
-                    </div>
-                  </div>
-
-                  <div className="detail-item">
-                    <svg viewBox="0 0 24 24" fill="none" className="detail-icon">
-                      <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="#00875a"/>
-                    </svg>
-                    <div>
-                      <strong>Dropoff Location</strong>
-                      <p>{activeDispatch.booking.dropoffLocation}</p>
-                    </div>
-                  </div>
-
-                  <div className="detail-item">
-                    <svg viewBox="0 0 24 24" fill="none" className="detail-icon">
-                      <circle cx="12" cy="12" r="10" fill={getSeverityColor(activeDispatch.booking.severity)}/>
-                      <path d="M12 6v6l4 2" stroke="white" strokeWidth="2" strokeLinecap="round"/>
-                    </svg>
-                    <div>
-                      <strong>Priority</strong>
-                      <p style={{ color: getSeverityColor(activeDispatch.booking.severity) }}>
-                        {activeDispatch.booking.severity || 'STANDARD'}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="detail-item">
-                    <svg viewBox="0 0 24 24" fill="none" className="detail-icon">
-                      <rect x="3" y="4" width="18" height="18" rx="2" fill="#0066cc"/>
-                      <path d="M16 2v4M8 2v4M3 10h18" stroke="white" strokeWidth="2"/>
-                    </svg>
-                    <div>
-                      <strong>Type</strong>
-                      <p>{activeDispatch.booking.bookingType}</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="status-controls">
-                  {activeDispatch.status === 'ASSIGNED' || activeDispatch.status === 'DISPATCHED' ? (
-                    <button
-                      onClick={() => updateDispatchStatus(activeDispatch.id, 'EN_ROUTE')}
-                      className="status-btn en-route"
-                    >
-                      Start Journey
-                    </button>
-                  ) : null}
-                  {activeDispatch.status === 'EN_ROUTE' && (
-                    <button
-                      onClick={() => updateDispatchStatus(activeDispatch.id, 'AT_PICKUP')}
-                      className="status-btn arrived"
-                    >
-                      Arrived at Pickup
-                    </button>
-                  )}
-                  {activeDispatch.status === 'AT_PICKUP' && (
-                    <button
-                      onClick={() => updateDispatchStatus(activeDispatch.id, 'EN_ROUTE_HOSPITAL')}
-                      className="status-btn en-route"
-                    >
-                      En Route to Hospital
-                    </button>
-                  )}
-                  {activeDispatch.status === 'EN_ROUTE_HOSPITAL' && (
-                    <button
-                      onClick={() => updateDispatchStatus(activeDispatch.id, 'AT_HOSPITAL')}
-                      className="status-btn arrived"
-                    >
-                      Arrived at Hospital
-                    </button>
-                  )}
-                  {activeDispatch.status === 'AT_HOSPITAL' && (
-                    <button
-                      onClick={() => updateDispatchStatus(activeDispatch.id, 'COMPLETED')}
-                      className="status-btn completed"
-                    >
-                      Complete Dispatch
-                    </button>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="empty-state">
-                <svg viewBox="0 0 24 24" fill="none" className="empty-icon">
-                  <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" fill="#e0e0e0"/>
-                </svg>
-                <p>No active dispatch</p>
-                <span>You'll see your next assignment here</span>
-              </div>
-            )}
-          </div>
-
-          {/* Recent Dispatches */}
-          <div className="card history-card">
-            <div className="card-header">
-              <h2>Recent Dispatches</h2>
-              <span className="count-badge">{dispatches.length}</span>
-            </div>
-            
-            <div className="dispatches-list">
-              {dispatches.length > 0 ? (
-                dispatches.slice(0, 10).map(dispatch => (
-                  <div key={dispatch.id} className="dispatch-item">
-                    <div className="dispatch-header">
-                      <span className="dispatch-id">#{dispatch.booking.id.slice(0, 8)}</span>
-                      <span 
-                        className="dispatch-status"
-                        style={{ backgroundColor: getStatusColor(dispatch.status) }}
-                      >
-                        {dispatch.status.replace('_', ' ')}
-                      </span>
-                    </div>
-                    
-                    <div className="dispatch-locations">
-                      <div className="location-item">
-                        <svg viewBox="0 0 24 24" fill="none" className="location-icon">
-                          <circle cx="12" cy="10" r="3" fill="#ff8b00"/>
-                          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" stroke="#ff8b00" strokeWidth="2" fill="none"/>
-                        </svg>
-                        <span>{dispatch.booking.pickupLocation}</span>
-                      </div>
-                      <svg viewBox="0 0 24 24" fill="none" className="arrow-icon">
-                        <path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8-8-8z" fill="#6b778c"/>
-                      </svg>
-                      <div className="location-item">
-                        <svg viewBox="0 0 24 24" fill="none" className="location-icon">
-                          <circle cx="12" cy="10" r="3" fill="#00875a"/>
-                          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" stroke="#00875a" strokeWidth="2" fill="none"/>
-                        </svg>
-                        <span>{dispatch.booking.dropoffLocation}</span>
-                      </div>
-                    </div>
-                    
-                    <div className="dispatch-meta">
-                      <span className="dispatch-time">
-                        {new Date(dispatch.assignedAt).toLocaleString()}
-                      </span>
-                      {dispatch.booking.severity && (
-                        <span 
-                          className="severity-badge"
-                          style={{ backgroundColor: getSeverityColor(dispatch.booking.severity) }}
-                        >
-                          {dispatch.booking.severity}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="empty-state">
-                  <p>No dispatch history</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
         )}
+
       </main>
     </div>
   );

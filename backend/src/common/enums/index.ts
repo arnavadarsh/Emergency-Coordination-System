@@ -14,6 +14,7 @@ export enum UserRole {
  * Tracks the lifecycle of a booking
  */
 export enum BookingStatus {
+  PENDING = 'PENDING',
   CREATED = 'CREATED',
   ASSIGNED = 'ASSIGNED',
   IN_PROGRESS = 'IN_PROGRESS',
@@ -57,6 +58,7 @@ export enum SeverityLevel {
  */
 export enum AmbulanceStatus {
   AVAILABLE = 'AVAILABLE',
+  RESERVED = 'RESERVED',
   BUSY = 'BUSY',
   MAINTENANCE = 'MAINTENANCE',
   OFFLINE = 'OFFLINE',

@@ -10,6 +10,8 @@ import { User } from '../users/entities/user.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { BookingStatus, UserRole } from '../common/enums';
 
+const EARTH_RADIUS_KM = 6371;
+
 @Injectable()
 export class DashboardService {
   constructor(
@@ -28,6 +30,89 @@ export class DashboardService {
     @InjectRepository(AuditLog)
     private auditRepository: Repository<AuditLog>,
   ) {}
+
+  private toRadians(degrees: number): number {
+    return (degrees * Math.PI) / 180;
+  }
+
+  private calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+    const dLat = this.toRadians(lat2 - lat1);
+    const dLon = this.toRadians(lon2 - lon1);
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(this.toRadians(lat1)) * Math.cos(this.toRadians(lat2)) *
+      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return EARTH_RADIUS_KM * c;
+  }
+
+  private buildFallbackEta(originLat: number, originLng: number, destinationLat: number, destinationLng: number) {
+    const distanceKm = this.calculateDistanceKm(originLat, originLng, destinationLat, destinationLng);
+    const assumedCitySpeedKmh = 35;
+    const etaMinutes = Math.max(1, Math.round((distanceKm / assumedCitySpeedKmh) * 60));
+    const expectedAt = new Date(Date.now() + etaMinutes * 60 * 1000);
+
+    return {
+      source: 'fallback',
+      etaMinutes,
+      etaText: `${etaMinutes} min`,
+      expectedArrivalIso: expectedAt.toISOString(),
+      distanceKm: Number(distanceKm.toFixed(2)),
+    };
+  }
+
+  async getLiveEta(originLat: number, originLng: number, destinationLat: number, destinationLng: number) {
+    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+    if (!apiKey) {
+      return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
+    }
+
+    const origins = `${originLat},${originLng}`;
+    const destinations = `${destinationLat},${destinationLng}`;
+    const params = new URLSearchParams({
+      origins,
+      destinations,
+      mode: 'driving',
+      departure_time: 'now',
+      traffic_model: 'best_guess',
+      key: apiKey,
+    });
+
+    try {
+      const response = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?${params.toString()}`);
+      if (!response.ok) {
+        return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
+      }
+
+      const data: any = await response.json();
+      const element = data?.rows?.[0]?.elements?.[0];
+      const durationInTraffic = element?.duration_in_traffic;
+      const duration = element?.duration;
+      const distance = element?.distance;
+
+      if (data?.status !== 'OK' || !element || element.status !== 'OK' || (!durationInTraffic && !duration)) {
+        return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
+      }
+
+      const durationValueSec = Number(durationInTraffic?.value ?? duration?.value);
+      if (!Number.isFinite(durationValueSec) || durationValueSec <= 0) {
+        return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
+      }
+
+      const etaMinutes = Math.max(1, Math.round(durationValueSec / 60));
+      const expectedAt = new Date(Date.now() + etaMinutes * 60 * 1000);
+
+      return {
+        source: 'google',
+        etaMinutes,
+        etaText: durationInTraffic?.text || duration?.text || `${etaMinutes} min`,
+        expectedArrivalIso: expectedAt.toISOString(),
+        distanceText: distance?.text,
+      };
+    } catch {
+      return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
+    }
+  }
 
   /**
    * Get hospital dashboard stats
@@ -110,6 +195,13 @@ export class DashboardService {
     const totalHospitals = await this.hospitalRepository.count();
     const totalAmbulances = await this.ambulanceRepository.count();
 
+    // Get users by role
+    const adminUsers = await this.userRepository.count({ where: { role: UserRole.ADMIN } });
+    const hospitalUsers = await this.userRepository.count({ where: { role: UserRole.HOSPITAL } });
+    const driverUsers = await this.userRepository.count({ where: { role: UserRole.DRIVER } });
+    const regularUsers = await this.userRepository.count({ where: { role: UserRole.USER } });
+    const activeUsers = await this.userRepository.count({ where: { isActive: true } });
+
     // Get bookings
     const allBookings = await this.bookingRepository.find();
     const activeBookings = allBookings.filter(b => 
@@ -122,9 +214,41 @@ export class DashboardService {
       new Date(b.completedAt) >= today
     ).length;
 
+    const completedTotal = allBookings.filter(b => b.status === BookingStatus.COMPLETED).length;
+    const cancelledTotal = allBookings.filter(b => b.status === BookingStatus.CANCELLED).length;
+
     const emergenciesHandled = allBookings.filter(b => 
       b.severity === 'HIGH' || b.severity === 'CRITICAL'
     ).length;
+
+    // Calculate average response time (seconds)
+    const completedBookings = allBookings.filter(b => b.status === BookingStatus.COMPLETED);
+    let avgResponseTime = 0;
+    if (completedBookings.length > 0) {
+      const totalTime = completedBookings.reduce((sum, b) => {
+        if (b.completedAt && b.createdAt) {
+          return sum + (new Date(b.completedAt).getTime() - new Date(b.createdAt).getTime());
+        }
+        return sum;
+      }, 0);
+      avgResponseTime = Math.round((totalTime / completedBookings.length) / 1000); // Convert to seconds
+    }
+
+    // Get ambulance stats
+    const ambulances = await this.ambulanceRepository.find();
+    const availableAmbulances = ambulances.filter(a => a.status === 'AVAILABLE').length;
+    const busyAmbulances = ambulances.filter(a => a.status === 'BUSY').length;
+    const maintenanceAmbulances = ambulances.filter(a => a.status === 'MAINTENANCE').length;
+    const verifiedAmbulances = ambulances.filter(a => a.status !== 'PENDING').length;
+
+    // Get hospital capacity overview
+    const hospitals = await this.hospitalRepository.find({
+      relations: ['capabilities'],
+    });
+    const totalBeds = hospitals.reduce((sum, h) => sum + (h.totalBeds || 0), 0);
+    const availableBeds = hospitals.reduce((sum, h) => sum + (h.availableBeds || 0), 0);
+    const occupiedBeds = totalBeds - availableBeds;
+    const capacityUtilization = totalBeds > 0 ? ((occupiedBeds / totalBeds) * 100).toFixed(1) : '0';
 
     // Get recent audit logs
     const auditLogs = await this.auditRepository.find({
@@ -137,14 +261,6 @@ export class DashboardService {
       order: { createdAt: 'DESC' },
     });
 
-    // Get all hospitals
-    const hospitals = await this.hospitalRepository.find({
-      relations: ['capabilities'],
-    });
-
-    // Get all ambulances
-    const ambulances = await this.ambulanceRepository.find();
-
     return {
       stats: {
         totalUsers,
@@ -153,6 +269,39 @@ export class DashboardService {
         activeBookings,
         completedToday,
         emergenciesHandled,
+        avgResponseTime, // in seconds
+        usersByRole: {
+          admin: adminUsers,
+          hospital: hospitalUsers,
+          driver: driverUsers,
+          user: regularUsers,
+        },
+        activeUsers,
+        bookingStats: {
+          total: allBookings.length,
+          active: activeBookings,
+          completed: completedTotal,
+          cancelled: cancelledTotal,
+          completionRate: allBookings.length > 0 
+            ? ((completedTotal / allBookings.length) * 100).toFixed(1) 
+            : '0',
+        },
+        ambulanceStats: {
+          total: totalAmbulances,
+          available: availableAmbulances,
+          busy: busyAmbulances,
+          maintenance: maintenanceAmbulances,
+          verified: verifiedAmbulances,
+          utilization: totalAmbulances > 0 
+            ? ((busyAmbulances / totalAmbulances) * 100).toFixed(1) 
+            : '0',
+        },
+        hospitalCapacity: {
+          totalBeds,
+          availableBeds,
+          occupiedBeds,
+          utilization: capacityUtilization,
+        },
       },
       recentAudit: auditLogs.map(log => ({
         id: log.id,
@@ -187,7 +336,6 @@ export class DashboardService {
     // Get driver user info
     const driver = await this.userRepository.findOne({
       where: { id: driverId },
-      relations: ['profile'],
     });
 
     // Get dispatches - for now get all dispatches
@@ -224,6 +372,8 @@ export class DashboardService {
         vehicleNumber: assignedAmbulance.vehicleNumber,
         type: assignedAmbulance.vehicleType,
         status: assignedAmbulance.status,
+        currentLatitude: assignedAmbulance.currentLatitude,
+        currentLongitude: assignedAmbulance.currentLongitude,
       } : null,
       dispatches: dispatches.map(d => ({
         id: d.id,
@@ -237,7 +387,13 @@ export class DashboardService {
           id: d.booking.id,
           userId: d.booking.userId,
           pickupLocation: d.booking.pickupAddress,
+          pickupLatitude: d.booking.pickupLatitude,
+          pickupLongitude: d.booking.pickupLongitude,
           dropoffLocation: d.booking.destinationAddress || d.hospital?.name || 'Hospital',
+          destinationLatitude: d.booking.destinationLatitude || d.hospital?.latitude,
+          destinationLongitude: d.booking.destinationLongitude || d.hospital?.longitude,
+          selectedHospitalName: d.hospital?.name || d.booking.destinationAddress || 'Hospital',
+          selectedHospitalAddress: d.hospital?.address || d.booking.destinationAddress || 'Address unavailable',
           bookingType: d.booking.severity === 'CRITICAL' || d.booking.severity === 'HIGH' ? 'EMERGENCY' : 'SCHEDULED',
           severity: d.booking.severity,
           status: d.booking.status,
@@ -291,7 +447,11 @@ export class DashboardService {
         id: b.id,
         userId: b.userId,
         pickupLocation: b.pickupAddress,
+        pickupLatitude: b.pickupLatitude,
+        pickupLongitude: b.pickupLongitude,
         dropoffLocation: b.destinationAddress,
+        destinationLatitude: b.destinationLatitude || dispatch?.hospital?.latitude,
+        destinationLongitude: b.destinationLongitude || dispatch?.hospital?.longitude,
         bookingType: b.severity === 'CRITICAL' || b.severity === 'HIGH' ? 'EMERGENCY' : 'SCHEDULED',
         severity: b.severity,
         status: b.status,
@@ -299,9 +459,18 @@ export class DashboardService {
         description: b.description,
         dispatch: dispatch ? {
           status: dispatch.status || b.status,
+          hospital: dispatch.hospital ? {
+            id: dispatch.hospital.id,
+            name: dispatch.hospital.name,
+            address: dispatch.hospital.address,
+            latitude: dispatch.hospital.latitude,
+            longitude: dispatch.hospital.longitude,
+          } : undefined,
           ambulance: dispatch.ambulance ? {
             vehicleNumber: dispatch.ambulance.vehicleNumber,
-            type: dispatch.ambulance.type,
+            type: dispatch.ambulance.vehicleType,
+            currentLatitude: dispatch.ambulance.currentLatitude,
+            currentLongitude: dispatch.ambulance.currentLongitude,
           } : undefined,
         } : undefined,
         hospital: dispatch?.hospital ? {

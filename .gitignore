@@ -60,6 +60,9 @@ Thumbs.db
 *.swp
 *.swo
 *~
+# Global ignores
+node_modules/
+.env
 
 # Logs
 *.log

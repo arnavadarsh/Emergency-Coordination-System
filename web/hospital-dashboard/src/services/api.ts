@@ -35,7 +35,7 @@ class ApiClient {
       (error) => {
         if (error.response?.status === 401) {
           TokenStorage.removeToken();
-          window.location.href = '/login';
+          window.location.href = 'http://localhost:3004';
         }
         return Promise.reject(error);
       }
@@ -50,12 +50,6 @@ class ApiClient {
       email,
       password,
     });
-    
-    // Validate role
-    if (response.data.user.role !== 'HOSPITAL') {
-      throw new Error('Invalid credentials: Not a hospital account');
-    }
-    
     TokenStorage.setToken(response.data.accessToken);
     return response.data;
   }

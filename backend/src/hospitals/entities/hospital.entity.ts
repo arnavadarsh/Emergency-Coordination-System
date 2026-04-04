@@ -9,6 +9,7 @@ import {
 } from 'typeorm';
 import { HospitalStatus } from '../../common/enums';
 import { HospitalCapability } from './hospital-capability.entity';
+import { Booking } from '../../bookings/entities/booking.entity';
 
 /**
  * Hospital entity
@@ -54,6 +55,9 @@ export class Hospital {
 
   @OneToMany(() => HospitalCapability, (capability) => capability.hospital, { cascade: true })
   capabilities: HospitalCapability[];
+
+  @OneToMany(() => Booking, booking => booking.hospital)
+  bookings: Booking[];
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

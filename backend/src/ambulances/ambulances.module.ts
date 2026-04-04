@@ -1,13 +1,17 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { AmbulancesService } from './ambulances.service';
 import { AmbulancesController } from './ambulances.controller';
-import { Ambulance } from './entities';
+import { AmbulancesService } from './ambulances.service';
+import { Ambulance } from './entities/ambulance.entity';
+import { DispatchModule } from '../dispatch/dispatch.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Ambulance])],
+  imports: [
+    TypeOrmModule.forFeature([Ambulance]),
+    forwardRef(() => DispatchModule),
+  ],
   controllers: [AmbulancesController],
   providers: [AmbulancesService],
-  exports: [AmbulancesService],
+  exports: [AmbulancesService, TypeOrmModule],
 })
 export class AmbulancesModule {}

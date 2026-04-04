@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { BadRequestException, Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { DashboardService } from './dashboard.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -48,5 +48,38 @@ export class DashboardController {
   @Roles(UserRole.USER)
   async getUserStats(@CurrentUser() user: any) {
     return this.dashboardService.getUserStats(user.id);
+  }
+
+  /**
+   * Get live ETA between two coordinates
+   */
+  @Get('eta')
+  @Roles(UserRole.USER, UserRole.DRIVER, UserRole.ADMIN, UserRole.HOSPITAL)
+  async getLiveEta(
+    @Query('originLat') originLat: string,
+    @Query('originLng') originLng: string,
+    @Query('destinationLat') destinationLat: string,
+    @Query('destinationLng') destinationLng: string,
+  ) {
+    const parsedOriginLat = Number(originLat);
+    const parsedOriginLng = Number(originLng);
+    const parsedDestinationLat = Number(destinationLat);
+    const parsedDestinationLng = Number(destinationLng);
+
+    if (
+      !Number.isFinite(parsedOriginLat) ||
+      !Number.isFinite(parsedOriginLng) ||
+      !Number.isFinite(parsedDestinationLat) ||
+      !Number.isFinite(parsedDestinationLng)
+    ) {
+      throw new BadRequestException('Invalid coordinates for ETA calculation');
+    }
+
+    return this.dashboardService.getLiveEta(
+      parsedOriginLat,
+      parsedOriginLng,
+      parsedDestinationLat,
+      parsedDestinationLng,
+    );
   }
 }

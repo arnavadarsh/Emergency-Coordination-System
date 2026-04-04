@@ -13,6 +13,35 @@ interface SystemStats {
   activeBookings: number;
   completedToday: number;
   emergenciesHandled: number;
+  avgResponseTime?: number;
+  usersByRole?: {
+    admin: number;
+    hospital: number;
+    driver: number;
+    user: number;
+  };
+  activeUsers?: number;
+  bookingStats?: {
+    total: number;
+    active: number;
+    completed: number;
+    cancelled: number;
+    completionRate: string;
+  };
+  ambulanceStats?: {
+    total: number;
+    available: number;
+    busy: number;
+    maintenance: number;
+    verified: number;
+    utilization: string;
+  };
+  hospitalCapacity?: {
+    totalBeds: number;
+    availableBeds: number;
+    occupiedBeds: number;
+    utilization: string;
+  };
 }
 
 interface AuditLog {

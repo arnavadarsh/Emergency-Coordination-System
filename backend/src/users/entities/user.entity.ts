@@ -77,6 +77,16 @@ export class User {
   @Column({ type: 'uuid', nullable: true, name: 'ambulance_id' })
   ambulanceId: string;
 
+  // Notification preferences
+  @Column({ type: 'boolean', default: true, name: 'email_notifications' })
+  emailNotifications: boolean;
+
+  @Column({ type: 'boolean', default: true, name: 'sms_notifications' })
+  smsNotifications: boolean;
+
+  @Column({ type: 'boolean', default: true, name: 'push_notifications' })
+  pushNotifications: boolean;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
