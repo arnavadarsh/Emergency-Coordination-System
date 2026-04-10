@@ -492,13 +492,9 @@ body {
 }
 
 @media (max-width: 768px) {
-  .sidebar {
-    width: 240px;
-  }
-
   .main-content {
-    margin-left: 240px;
-    padding: 20px;
+    margin-left: 0;
+    padding: 16px;
   }
 
   .dashboard-header {
@@ -521,29 +517,13 @@ body {
   .status-btn {
     width: 100%;
   }
-}
-
-@media (max-width: 640px) {
-  .sidebar {
-    transform: translateX(-100%);
-    transition: transform 0.3s;
-  }
-
-  .main-content {
-    margin-left: 0;
-    padding: 16px;
-  }
-
-  .dashboard-header h1 {
-    font-size: 24px;
-  }
 
   .dispatch-locations {
     flex-direction: column;
     align-items: flex-start;
   }
 
-  .arrow-icon {
-    transform: rotate(90deg);
+  .dashboard-header h1 {
+    font-size: 22px;
   }
 }

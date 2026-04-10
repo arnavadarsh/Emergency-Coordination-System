@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { io } from 'socket.io-client';
+import toast from 'react-hot-toast';
 import { tokenStorage } from '../utils/tokenStorage';
 import { DriverRouteMap } from '../components/DriverRouteMap';
 import ActiveCaseCard from '../components/ActiveCaseCard';
@@ -137,6 +138,8 @@ function Dashboard() {
   const [historySearch, setHistorySearch] = useState('');
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileForm, setProfileForm] = useState({ firstName: '', lastName: '', phoneNumber: '', address: '' });
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   const fetchData = async () => {
     try {
@@ -192,10 +195,15 @@ function Dashboard() {
 
   useEffect(() => { fetchData(); const t = setInterval(fetchData, 30000); return () => clearInterval(t); }, []);
   useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+  useEffect(() => {
     const socket = io('http://localhost:3000', { transports: ['websocket'] });
     socket.on('dispatch_assigned', fetchData);
     socket.on('dispatch_status_updated', fetchData);
-    socket.on('dispatch_diverted', (p: any) => { if (p?.newHospital) alert(`Diverted to ${p.newHospital.name}`); fetchData(); });
+    socket.on('dispatch_diverted', (p: any) => { if (p?.newHospital) toast(`🔀 Diverted to ${p.newHospital.name}`); fetchData(); });
     return () => { socket.off('dispatch_assigned', fetchData); socket.off('dispatch_status_updated', fetchData); socket.disconnect(); };
   }, []);
 
@@ -204,7 +212,7 @@ function Dashboard() {
       const token = tokenStorage.getToken();
       await axios.patch(`${API_BASE_URL}/dispatch/${dispatchId}/status`, { status: newStatus }, { headers: { Authorization: `Bearer ${token}` } });
       await fetchData();
-    } catch { alert('Failed to update status'); }
+    } catch { toast.error('Failed to update status'); }
   };
 
   const handleUpdateProfile = async () => {
@@ -212,23 +220,30 @@ function Dashboard() {
       const token = tokenStorage.getToken();
       await axios.patch(`${API_BASE_URL}/users/profile`, profileForm, { headers: { Authorization: `Bearer ${token}` } });
       setEditingProfile(false); await fetchData();
-    } catch { alert('Failed to update profile'); }
+      toast.success('Profile updated successfully!');
+    } catch { toast.error('Failed to update profile'); }
   };
 
   const handleLogout = () => { tokenStorage.clearToken(); navigate('/'); };
 
   if (loading) return (
     <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background: C.pageBg, flexDirection:'column', gap:'16px' }}>
-      <div style={{ width:'36px', height:'36px', borderRadius:'50%', border:`3px solid ${C.accentSoft}`, borderTopColor: C.accent, animation:'spin 0.8s linear infinite' }} />
-      <div style={{ fontSize:'14px', color: C.textSecondary }}>Loading dashboard…</div>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
+      <div style={{ width:'44px', height:'44px', borderRadius:'50%', border:`3px solid ${C.accentSoft}`, borderTopColor: C.accent, animation:'spin 0.8s linear infinite' }} />
+      <div style={{ fontSize:'15px', color: C.textSecondary, fontWeight:500 }}>Loading dashboard…</div>
+      {/* Skeleton cards */}
+      <div style={{ display:'flex', flexDirection:'column', gap:'12px', width:'min(400px,90vw)', marginTop:'8px' }}>
+        {[1,2,3].map(i => (
+          <div key={i} style={{ height:'64px', borderRadius:'10px', background: C.cardBorder, animation:'pulse 1.6s ease-in-out infinite', animationDelay:`${i*0.15}s` }} />
+        ))}
+      </div>
     </div>
   );
 
   if (error) return (
-    <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background: C.pageBg, flexDirection:'column', gap:'12px' }}>
-      <div style={{ fontSize:'36px' }}>⚠️</div>
-      <div style={{ fontSize:'16px', color: C.red, fontWeight:600 }}>{error}</div>
+    <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background: C.pageBg, flexDirection:'column', gap:'12px', padding:'24px' }}>
+      <div style={{ fontSize:'40px' }}>⚠️</div>
+      <div style={{ fontSize:'16px', color: C.red, fontWeight:600, textAlign:'center' }}>{error}</div>
       <button onClick={fetchData} style={{ padding:'10px 24px', background: C.accent, color:'white', border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600 }}>Retry</button>
     </div>
   );
@@ -262,16 +277,33 @@ function Dashboard() {
         />
       )}
 
+      {/* Mobile overlay backdrop */}
+      {isMobile && sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)} style={{
+          position:'fixed', inset:0, background:'rgba(0,0,0,0.45)', zIndex:998,
+        }} />
+      )}
+
       {/* ── Sidebar ─────────────────────────────── */}
       <aside style={{ width:'260px', flexShrink:0, background: C.sidebar, borderRight:`1px solid ${C.sidebarBorder}`,
-        display:'flex', flexDirection:'column', position:'sticky', top:0, height:'100vh',
+        display:'flex', flexDirection:'column',
+        position: isMobile ? 'fixed' : 'sticky',
+        top:0, height:'100vh', zIndex: isMobile ? 999 : 'auto',
+        transform: isMobile ? (sidebarOpen ? 'translateX(0)' : 'translateX(-100%)') : 'none',
+        transition:'transform 0.3s ease',
         boxShadow:'2px 0 8px rgba(0,0,0,0.05)' }}>
 
         {/* Logo */}
         <div style={{ padding:'24px', borderBottom:`1px solid ${C.sidebarBorder}` }}>
           <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'12px' }}>
             <span style={{ fontSize:'28px' }}>🚑</span>
-            <span style={{ fontSize:'20px', fontWeight:700, color: C.textPrimary }}>ECS Driver</span>
+            <span style={{ fontSize:'20px', fontWeight:700, color: C.textPrimary, flex:1 }}>ECS Driver</span>
+            {isMobile && (
+              <button onClick={() => setSidebarOpen(false)} style={{
+                background:'none', border:'none', cursor:'pointer', fontSize:'20px',
+                color: C.textSecondary, padding:'4px', lineHeight:1,
+              }}>✕</button>
+            )}
           </div>
           <div style={{ display:'inline-flex', alignItems:'center', gap:'6px',
             padding:'5px 12px', borderRadius:'12px', fontSize:'12px', fontWeight:600,
@@ -292,7 +324,7 @@ function Dashboard() {
 
         {/* Nav */}
         <nav style={{ flex:1, padding:'16px', display:'flex', flexDirection:'column', gap:'4px' }}>
-          {NAV.map(n => <NavItem key={n.id} icon={n.icon} label={n.label} active={activeTab===n.id} onClick={() => setActiveTab(n.id)} />)}
+          {NAV.map(n => <NavItem key={n.id} icon={n.icon} label={n.label} active={activeTab===n.id} onClick={() => { setActiveTab(n.id); if (isMobile) setSidebarOpen(false); }} />)}
         </nav>
 
         {/* Driver info + logout */}
@@ -311,7 +343,28 @@ function Dashboard() {
       </aside>
 
       {/* ── Main ────────────────────────────────── */}
-      <main style={{ flex:1, overflowY:'auto', padding:'32px' }}>
+      <main style={{ flex:1, overflowY:'auto', padding: isMobile ? '16px' : '32px', minWidth:0 }}>
+
+        {/* Mobile top bar */}
+        {isMobile && (
+          <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'20px',
+            padding:'12px 16px', background: C.sidebar, borderRadius:'12px', border:`1px solid ${C.cardBorder}`,
+            boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
+            <button onClick={() => setSidebarOpen(true)} style={{
+              background:'none', border:'none', cursor:'pointer', fontSize:'22px',
+              color: C.textPrimary, padding:'4px', lineHeight:1, flexShrink:0,
+            }}>☰</button>
+            <span style={{ fontSize:'18px' }}>🚑</span>
+            <span style={{ fontWeight:700, fontSize:'16px', color: C.textPrimary, flex:1 }}>ECS Driver</span>
+            <div style={{ display:'inline-flex', alignItems:'center', gap:'6px',
+              padding:'4px 10px', borderRadius:'12px', fontSize:'11px', fontWeight:600,
+              background: !activeDispatch ? C.greenSoft : C.redSoft,
+              color: !activeDispatch ? C.green : C.red }}>
+              <div style={{ width:'6px', height:'6px', borderRadius:'50%', background: !activeDispatch ? C.green : C.red }} />
+              {!activeDispatch ? 'AVAILABLE' : 'ON DISPATCH'}
+            </div>
+          </div>
+        )}
 
         {/* Active Dispatch */}
         {activeTab==='active' && (

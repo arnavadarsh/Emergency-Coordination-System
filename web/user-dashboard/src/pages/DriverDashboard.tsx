@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import toast from 'react-hot-toast';
 import { tokenStorage } from '../utils/tokenStorage';
 import '../styles/DriverDashboard.css';
 
@@ -160,7 +161,7 @@ function Dashboard() {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update dispatch status:', err);
-      alert('Failed to update status');
+      toast.error('Failed to update status');
     }
   };
 
@@ -174,10 +175,10 @@ function Dashboard() {
       );
       setEditingProfile(false);
       await fetchDashboardData();
-      alert('Profile updated successfully!');
+      toast.success('Profile updated successfully!');
     } catch (err) {
       console.error('Failed to update profile:', err);
-      alert('Failed to update profile');
+      toast.error('Failed to update profile');
     }
   };
 

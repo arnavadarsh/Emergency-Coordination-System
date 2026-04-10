@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import toast from 'react-hot-toast';
 import TokenStorage from '../utils/tokenStorage';
 import '../styles/AdminDashboard.css';
 
@@ -281,27 +282,36 @@ const Dashboard = () => {
       );
       await fetchPendingAmbulances();
       await fetchDashboardData();
-      alert('Ambulance verified successfully!');
+      toast.success('Ambulance verified!');
     } catch (err) {
       console.error('Failed to verify ambulance:', err);
-      alert('Failed to verify ambulance');
+      toast.error('Failed to verify ambulance');
     }
   };
 
-  const handleRejectAmbulance = async (ambulanceId: string) => {
-    if (!window.confirm('Are you sure you want to reject this registration?')) return;
-    try {
-      const token = TokenStorage.getToken();
-      await axios.delete(
-        `${API_BASE_URL}/ambulances/${ambulanceId}/reject`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      await fetchPendingAmbulances();
-      alert('Ambulance registration rejected');
-    } catch (err) {
-      console.error('Failed to reject ambulance:', err);
-      alert('Failed to reject ambulance');
-    }
+  const handleRejectAmbulance = (ambulanceId: string) => {
+    toast((t: { id: string }) => (
+      <span style={{ display:'flex', alignItems:'center', gap:'10px' }}>
+        <span>Reject this registration?</span>
+        <button onClick={async () => {
+          toast.dismiss(t.id);
+          try {
+            const token = TokenStorage.getToken();
+            await axios.delete(`${API_BASE_URL}/ambulances/${ambulanceId}/reject`, { headers: { Authorization: `Bearer ${token}` } });
+            await fetchPendingAmbulances();
+            toast.success('Registration rejected.');
+          } catch (err) {
+            console.error('Failed to reject ambulance:', err);
+            toast.error('Failed to reject ambulance');
+          }
+        }} style={{ padding:'4px 10px', background:'#de350b', color:'white', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+          Reject
+        </button>
+        <button onClick={() => toast.dismiss(t.id)} style={{ padding:'4px 10px', background:'#f4f5f7', color:'#172b4d', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+          Cancel
+        </button>
+      </span>
+    ), { duration: 8000 });
   };
 
   const handleUpdateUserStatus = async (userId: string, isActive: boolean) => {
@@ -315,7 +325,7 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update user status:', err);
-      alert('Failed to update user status');
+      toast.error('Failed to update user status');
     }
   };
 
@@ -330,7 +340,7 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update user role:', err);
-      alert('Failed to update user role');
+      toast.error('Failed to update user role');
     }
   };
 
@@ -345,7 +355,7 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update hospital status:', err);
-      alert('Failed to update hospital status');
+      toast.error('Failed to update hospital status');
     }
   };
 
@@ -360,7 +370,7 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update ambulance status:', err);
-      alert('Failed to update ambulance status');
+      toast.error('Failed to update ambulance status');
     }
   };
 

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import toast from 'react-hot-toast';
 
 const API_BASE_URL = 'http://localhost:3000/api';
 
@@ -57,7 +58,7 @@ export function SavedLocationsTab({ token }: SavedLocationsTabProps) {
       resetForm();
     } catch (error) {
       console.error('Error adding location:', error);
-      alert('Failed to add location');
+      toast.error('Failed to add location');
     }
   };
 
@@ -71,22 +72,32 @@ export function SavedLocationsTab({ token }: SavedLocationsTabProps) {
       resetForm();
     } catch (error) {
       console.error('Error updating location:', error);
-      alert('Failed to update location');
+      toast.error('Failed to update location');
     }
   };
 
-  const handleDeleteLocation = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this location?')) return;
-    
-    try {
-      await axios.delete(`${API_BASE_URL}/users/saved-locations/${id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      await fetchLocations();
-    } catch (error) {
-      console.error('Error deleting location:', error);
-      alert('Failed to delete location');
-    }
+  const handleDeleteLocation = (id: string) => {
+    toast((t: { id: string }) => (
+      <span style={{ display:'flex', alignItems:'center', gap:'10px' }}>
+        <span>Delete this location?</span>
+        <button onClick={async () => {
+          toast.dismiss(t.id);
+          try {
+            await axios.delete(`${API_BASE_URL}/users/saved-locations/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+            await fetchLocations();
+            toast.success('Location deleted.');
+          } catch (error) {
+            console.error('Error deleting location:', error);
+            toast.error('Failed to delete location');
+          }
+        }} style={{ padding:'4px 10px', background:'#de350b', color:'white', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+          Delete
+        </button>
+        <button onClick={() => toast.dismiss(t.id)} style={{ padding:'4px 10px', background:'#f4f5f7', color:'#172b4d', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+          Keep
+        </button>
+      </span>
+    ), { duration: 8000 });
   };
 
   const handleSetDefault = async (id: string) => {

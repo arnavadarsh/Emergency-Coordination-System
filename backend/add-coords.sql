@@ -1,2 +1,0 @@
-ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS latitude DECIMAL(10,8);
-ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS longitude DECIMAL(11,8);

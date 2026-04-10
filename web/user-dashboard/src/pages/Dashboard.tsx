@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { io } from 'socket.io-client';
+import toast from 'react-hot-toast';
 import { tokenStorage } from '../utils/tokenStorage';
 import '../styles/Dashboard.css';
 import L from 'leaflet';
@@ -150,6 +151,7 @@ function Dashboard() {
   const [editingProfile, setEditingProfile] = useState(false);
   const [showSOSConfirm, setShowSOSConfirm] = useState(false);
   const [sosActivating, setSosActivating] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [trackingBooking, setTrackingBooking] = useState<Booking | null>(null);
   const [liveEta, setLiveEta] = useState<LiveEtaResponse | null>(null);
   const [profileForm, setProfileForm] = useState({
@@ -590,7 +592,7 @@ function Dashboard() {
           const ipSuccess = await getLocationByIP();
           
           if (!ipSuccess) {
-            alert('Unable to get your location. Please search for your address manually or click on the map.');
+            toast.error('Unable to get location. Please search for your address or click on the map.');
           }
           setGettingLocation(false);
         },
@@ -600,7 +602,7 @@ function Dashboard() {
       // No browser geolocation, try IP
       const ipSuccess = await getLocationByIP();
       if (!ipSuccess) {
-        alert('Geolocation is not available. Please search for your address manually.');
+        toast.error('Geolocation unavailable. Please search for your address manually.');
       }
       setGettingLocation(false);
     }
@@ -733,7 +735,7 @@ function Dashboard() {
 
       const oldName = payload?.oldHospital?.name || 'previous hospital';
       const newName = payload?.newHospital?.name || 'new hospital';
-      alert(`Hospital update: ${oldName} is unavailable. Ambulance diverted to ${newName}.`);
+      toast(`🔀 ${oldName} is unavailable. Ambulance diverted to ${newName}.`, { duration: 6000 });
       fetchDashboardData();
     };
 
@@ -749,12 +751,12 @@ function Dashboard() {
     try {
       // Validate required fields
       if (!pickupLocation && !pickupCoords) {
-        alert('Please select a pickup location');
+        toast.error('Please select a pickup location');
         return;
       }
 
       if (bookingType === 'SCHEDULED' && (!dropoffLocation || !scheduledTime)) {
-        alert('Please provide dropoff location and scheduled time for scheduled transport');
+        toast.error('Please provide dropoff location and scheduled time for scheduled transport');
         return;
       }
 
@@ -818,11 +820,11 @@ function Dashboard() {
       setTriageResultData(null);
 
       await fetchDashboardData();
-      alert('Booking created successfully! An ambulance will be assigned shortly.');
+      toast.success('Booking created! An ambulance will be assigned shortly.');
     } catch (err: any) {
       console.error('Failed to create booking:', err);
       const errorMessage = err.response?.data?.message || err.message || 'Failed to create booking';
-      alert(`Error: ${errorMessage}`);
+      toast.error(errorMessage);
     }
   };
 
@@ -887,15 +889,15 @@ function Dashboard() {
 
       await fetchDashboardData();
       setShowSOSConfirm(false);
-      alert('🚨 SOS ACTIVATED! Emergency ambulance dispatched to your location. Stay calm, help is on the way!');
-      
+      toast.success('🚨 SOS activated! Ambulance dispatched — stay calm, help is on the way!', { duration: 6000 });
+
       // Start tracking the new booking
       const newBooking = response.data;
       setTrackingBooking(newBooking);
-      
+
     } catch (err) {
       console.error('SOS Emergency failed:', err);
-      alert('Failed to activate SOS. Please try again or call emergency services directly.');
+      toast.error('Failed to activate SOS. Please try again or call emergency services directly.');
     } finally {
       setSosActivating(false);
     }
@@ -908,32 +910,31 @@ function Dashboard() {
   };
 
   const handleCancelBooking = async (bookingId: string) => {
-    if (!confirm('Are you sure you want to cancel this booking?')) {
-      return;
-    }
-    
-    try {
-      const token = tokenStorage.getToken();
-      try {
-        await axios.patch(
-          `${API_BASE_URL}/bookings/${bookingId}/cancel`,
-          {},
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-      } catch (cancelErr: any) {
-        // Fallback for deployments where cancel route can fail but generic status update works.
-        await axios.patch(
-          `${API_BASE_URL}/bookings/${bookingId}`,
-          { status: 'CANCELLED' },
-          { headers: { Authorization: `Bearer ${token}` } }
-        );
-      }
-      await fetchDashboardData();
-      alert('Booking cancelled successfully.');
-    } catch (err: any) {
-      console.error('Failed to cancel booking:', err);
-      alert(err.response?.data?.message || 'Failed to cancel booking');
-    }
+    toast((t: { id: string }) => (
+      <span style={{ display:'flex', alignItems:'center', gap:'12px' }}>
+        <span>Cancel this booking?</span>
+        <button onClick={async () => {
+          toast.dismiss(t.id);
+          try {
+            const token = tokenStorage.getToken();
+            try {
+              await axios.patch(`${API_BASE_URL}/bookings/${bookingId}/cancel`, {}, { headers: { Authorization: `Bearer ${token}` } });
+            } catch {
+              await axios.patch(`${API_BASE_URL}/bookings/${bookingId}`, { status: 'CANCELLED' }, { headers: { Authorization: `Bearer ${token}` } });
+            }
+            await fetchDashboardData();
+            toast.success('Booking cancelled.');
+          } catch (err: any) {
+            toast.error(err.response?.data?.message || 'Failed to cancel booking');
+          }
+        }} style={{ padding:'4px 12px', background:'#de350b', color:'white', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+          Yes, cancel
+        </button>
+        <button onClick={() => toast.dismiss(t.id)} style={{ padding:'4px 12px', background:'#f4f5f7', color:'#172b4d', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+          Keep
+        </button>
+      </span>
+    ), { duration: 8000 });
   };
 
   const handleUpdateProfile = async () => {
@@ -946,10 +947,10 @@ function Dashboard() {
       );
       setEditingProfile(false);
       await fetchDashboardData();
-      alert('Profile updated successfully!');
+      toast.success('Profile updated successfully!');
     } catch (err) {
       console.error('Failed to update profile:', err);
-      alert('Failed to update profile');
+      toast.error('Failed to update profile');
     }
   };
 
@@ -1021,10 +1022,14 @@ function Dashboard() {
 
   if (loading) {
     return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Loading...</div>
-          <div style={{ color: '#666' }}>Fetching data from server</div>
+      <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background:'#f5f7fa', flexDirection:'column', gap:'16px' }}>
+        <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
+        <div style={{ width:'44px', height:'44px', borderRadius:'50%', border:'3px solid #e6f7f9', borderTopColor:'#00a3bf', animation:'spin 0.8s linear infinite' }} />
+        <div style={{ fontSize:'15px', color:'#6b778c', fontWeight:500 }}>Loading dashboard…</div>
+        <div style={{ display:'flex', flexDirection:'column', gap:'12px', width:'min(420px,90vw)', marginTop:'8px' }}>
+          {[1,2,3].map(i => (
+            <div key={i} style={{ height:'68px', borderRadius:'12px', background:'#e0e0e0', animation:'pulse 1.6s ease-in-out infinite', animationDelay:`${i*0.15}s` }} />
+          ))}
         </div>
       </div>
     );
@@ -1032,19 +1037,20 @@ function Dashboard() {
 
   if (error) {
     return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center', color: '#ff4444' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Error</div>
-          <div>{error}</div>
-          <button onClick={fetchDashboardData} style={{ marginTop: '20px', padding: '10px 20px', cursor: 'pointer' }}>Retry</button>
-        </div>
+      <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background:'#f5f7fa', flexDirection:'column', gap:'12px', padding:'24px' }}>
+        <div style={{ fontSize:'40px' }}>⚠️</div>
+        <div style={{ fontSize:'16px', color:'#de350b', fontWeight:600, textAlign:'center' }}>{error}</div>
+        <button onClick={fetchDashboardData} style={{ padding:'10px 24px', background:'#00a3bf', color:'white', border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'14px' }}>Retry</button>
       </div>
     );
   }
 
   return (
     <div className="dashboard-container">
-      <aside className="sidebar">
+      {/* Mobile overlay */}
+      <div className={`sidebar-overlay ${sidebarOpen ? 'overlay--visible' : ''}`} onClick={() => setSidebarOpen(false)} />
+
+      <aside className={`sidebar ${sidebarOpen ? 'sidebar--open' : ''}`}>
         <div className="sidebar-header">
           <div className="logo-section">
             <svg className="logo-icon" viewBox="0 0 24 24" fill="none">
@@ -1052,26 +1058,27 @@ function Dashboard() {
               <path d="M12 8v8m-4-4h8" stroke="white" strokeWidth="2" strokeLinecap="round"/>
             </svg>
             <span className="logo-text">ECS User</span>
+            <button className="sidebar-close-btn" onClick={() => setSidebarOpen(false)} aria-label="Close menu">✕</button>
           </div>
           <div className="user-badge">User Portal</div>
         </div>
 
         <nav className="nav-menu">
-          <a href="#" className={`nav-item ${activeTab === 'bookings' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('bookings'); setShowBookingForm(false); }}>
+          <a href="#" className={`nav-item ${activeTab === 'bookings' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('bookings'); setShowBookingForm(false); setSidebarOpen(false); }}>
             <svg viewBox="0 0 24 24" fill="none">
               <rect x="3" y="4" width="18" height="18" rx="2" fill="currentColor"/>
               <path d="M16 2v4M8 2v4M3 10h18" stroke="white" strokeWidth="2"/>
             </svg>
             <span>My Bookings</span>
           </a>
-          <a href="#" className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('profile'); setShowBookingForm(false); }}>
+          <a href="#" className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('profile'); setShowBookingForm(false); setSidebarOpen(false); }}>
             <svg viewBox="0 0 24 24" fill="none">
               <circle cx="12" cy="8" r="4" fill="currentColor"/>
               <path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2" fill="currentColor"/>
             </svg>
             <span>Profile</span>
           </a>
-          <a href="#" className={`nav-item ${activeTab === 'locations' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('locations'); setShowBookingForm(false); }}>
+          <a href="#" className={`nav-item ${activeTab === 'locations' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('locations'); setShowBookingForm(false); setSidebarOpen(false); }}>
             <svg viewBox="0 0 24 24" fill="none">
               <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="currentColor"/>
             </svg>
@@ -1088,6 +1095,17 @@ function Dashboard() {
       </aside>
 
       <main className="main-content">
+        {/* Mobile top bar */}
+        <div className="mobile-topbar">
+          <button className="hamburger-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">☰</button>
+          <svg style={{ width:28, height:28, flexShrink:0 }} viewBox="0 0 24 24" fill="none">
+            <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" fill="#00a3bf"/>
+            <path d="M12 8v8m-4-4h8" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
+          <span style={{ fontWeight:700, fontSize:16, color:'#172b4d', flex:1 }}>ECS User</span>
+          {userProfile && <span style={{ fontSize:13, color:'#6b778c' }}>{userProfile.name}</span>}
+        </div>
+
         <header className="dashboard-header">
           <div>
             <h1>{activeTab === 'bookings' ? 'My Bookings' : activeTab === 'profile' ? 'My Profile' : 'Saved Locations'}</h1>
@@ -1903,7 +1921,7 @@ function Dashboard() {
                 <button 
                   onClick={() => handleCreateBooking()} 
                   className="submit-btn"
-                  disabled={bookingType === 'EMERGENCY' ? (!pickupLocation || !triageCompleted) : (!pickupLocation || !dropoffLocation || !scheduledTime)}
+                  disabled={bookingType === 'EMERGENCY' ? (!triageCompleted) : (!pickupLocation && !pickupCoords) || !dropoffLocation || !scheduledTime}
                 >
                   {bookingType === 'EMERGENCY' ? '🚑 Request Emergency Ambulance' : '📅 Schedule Transport'}
                 </button>

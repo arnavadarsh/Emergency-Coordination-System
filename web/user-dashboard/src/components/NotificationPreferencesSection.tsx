@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
+import toast from 'react-hot-toast';
 
 const API_BASE_URL = 'http://localhost:3000/api';
 
@@ -50,7 +51,7 @@ export function NotificationPreferencesSection({ token }: NotificationPreference
       setTimeout(() => setSaved(false), 3000);
     } catch (error) {
       console.error('Error saving preferences:', error);
-      alert('Failed to save preferences');
+      toast.error('Failed to save preferences');
     } finally {
       setSaving(false);
     }

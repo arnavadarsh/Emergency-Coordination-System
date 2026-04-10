@@ -1,0 +1,132 @@
+================================================================================
+EMERGENCY COORDINATION SYSTEM (ECS) - COMPREHENSIVE FEATURE DOCUMENTATION
+================================================================================
+
+This document provides a highly detailed, component-level breakdown of every feature, workflow, and technical mechanism currently implemented within the Emergency Coordination System (ECS).
+
+--------------------------------------------------------------------------------
+1. GLOBAL ARCHITECTURE & TECH STACK
+--------------------------------------------------------------------------------
+1.1 Backend Environment
+- Framework: NestJS (Node.js) using TypeScript.
+- Database: PostgreSQL, managed via TypeORM.
+- Authentication: JWT (JSON Web Tokens) with AuthGuards and Role-Based Access Control (Admin, Hospital, Driver, User roles).
+- Real-Time Communication: Socket.io Gateway enabling low-latency duplex communication between services.
+- Data Validation: `class-validator` and `class-transformer` embedded in Data Transfer Objects (DTOs) for strict request validation.
+
+1.2 Frontend Environment
+- Framework: React 18, Vite, TypeScript.
+- Dashboards: 4 distinct Single Page Applications (User, Driver, Hospital, Admin).
+- Styling Architecture: Vanilla CSS utilizing modern variables, flexbox/grid, and a shared glassmorphism/premium UI design system.
+- Mapping & Geolocation: Leaflet.js with OpenStreetMap tiles.
+- API Client: Axios configured with interceptors for global JWT management.
+
+--------------------------------------------------------------------------------
+2. USER DASHBOARD IN-DEPTH
+--------------------------------------------------------------------------------
+2.1 Profile & Medical Information Management
+- Users can update their personal and medical profiles dynamically.
+- Data captured includes: First & Last Name, Phone Number, Emergency Contact Number, Date of Birth, Full Address, Live GPS Coordinates, Blood Type, and specific Medical Notes (e.g., allergies, chronic conditions).
+- Security configurations allowing users to toggle email, SMS, and push notification preferences.
+- Management of a "Saved Locations" list allowing quick 1-click retrieval of commonly used pickup/dropoff points.
+
+2.2 Artificial Intelligence Emergency Triage (The "Triage Engine")
+- The system operates via a deterministic pure TypeScript state machine that runs entirely on the client side (zero-latency).
+- Conversational Auto-Flow:
+  * The bot asks conditional questions (e.g., If the user answers "Yes" to "Chest pain", it branches into "How long has it lasted?" and "Is it a heavy pressure?").
+  * Step-By-Step UI features dynamic input methods (Yes/No buttons, Multiple Choice arrays, a visual 1-10 Pain Scale slider, and a Text input for descriptions).
+- Real-Time Inference:
+  * Severity Engine: Automatically tags cases as CRITICAL, HIGH, MODERATE, or LOW based on rigid rules (e.g., unresponsiveness or lack of breathing immediately flags CRITICAL).
+  * Staff Routing: Automatically dictates whether the ambulance requires a standard EMT, Paramedic, or Critical Care Specialist.
+  * Ambulance Selection: Determines if the necessary transport is BLS (Basic Life Support), ALS (Advanced Life Support), ICU (Mobile Intensive Care Unit), or NEONATAL.
+  * Real-Time Clinical Reasoning: The engine generates a localized breakdown for the doctor/user explaining exactly *why* the severity was rated the way it was (e.g., "⚠️ Severe bleeding detected — hemorrhage control required").
+  * Hospital Recommendation Logic: Cross-references the emergency type with hospital capabilities to recommend specific receiving locations (e.g., "Level 1 Trauma Center with Burn Unit").
+
+2.3 Map-Based Smart Booking System
+- Interactive Leaflet integration: Users can drag map markers to pinpoint exact pickup locations.
+- Reverse Geocoding support translating raw lat/long coordinates into human-readable street addresses.
+- Auto-Detect Location button utilizing the native Browser Geolocation API.
+- Support for Two Booking Types:
+  * EMERGENCY: Relies on the AI Triage data to bypass manual location entry.
+  * SCHEDULED: Standard point A to point B coordination allowing users to pick future date/times and specify specific specialized vehicle requirements.
+
+2.4 Live Real-Time Tracking & SOS
+- One-Click SOS: A dedicated button bypassing all questions to instantly dispatch a Critical-level ambulance to the user's current GPS location.
+- Live Tracking Component: An interactive dashboard rendering real-time movements.
+  * Real-time ETA calculations.
+  * Progress timeline representing exact states (Assigned -> Dispatched -> Arrived -> Completed).
+  * Cancellation controls allowing users to void an active dispatch.
+
+--------------------------------------------------------------------------------
+3. DRIVER DASHBOARD IN-DEPTH
+--------------------------------------------------------------------------------
+3.1 Live Dispatch & Case Routing
+- Actively listens via WebSocket to incoming dispatches tied to that specific driver's ambulance ID.
+- The "Active Case Card" dynamically loads Patient Name, Emergency description, Triage Severity with color-coded stripes, Pickup Location, and Dropoff Hospital.
+- 1-Click Patient Calling: Connects directly via the device's native phone application based on the user's registered phone number.
+- Navigation sequence controlling the dispatch workflow.
+
+3.2 Dynamic Medical Checklist (Pre-Flight Protocol)
+- Before the driver is allowed to officially start an emergency route, a mandatory modal triggers.
+- AI-Synchronized Checklist: Uses the data strictly passed via the Triage Engine. If the Triage determines "Patient has Severe Bleeding", the Checklist automatically updates to flag "Tourniquet" and "Hemostatic Gauze" as "REQUIRED".
+- Responsive Visuals: Features progress bars and verification ticks ensuring the driver manually checks off everything physically loaded onto the truck before the system proceeds.
+
+3.3 Driver Map & Live Feed
+- Simulates real-time GPS telemetry rendering the route from the ambulance's current location to the patient, and then from the patient to the hospital.
+
+--------------------------------------------------------------------------------
+4. HOSPITAL DASHBOARD IN-DEPTH
+--------------------------------------------------------------------------------
+4.1 Capacity Control Tower
+- Real-time synchronization of the hospital’s operational state.
+- Live modifiers allowing administration staff to update their Total Bed Capacity vs. Available Bed count.
+- Service State Toggle: Allows hospitals to manually switch from "Active" to "Diverted" or "Full Capacity", influencing the Triage Engine's destination selection algorithm.
+
+4.2 Incident Reception Hub
+- A dedicated feed tracking all incoming ambulances currently assigned to that specific hospital ID.
+- Pre-Arrival Setup: Enables hospital staff to read the full AI Triage Clinical reasoning notes minutes before the patient arrives out of the ambulance doors, ensuring the correct doctors (e.g. neurosurgeon vs trauma surgeon) are standing by.
+
+--------------------------------------------------------------------------------
+5. ADMIN DASHBOARD IN-DEPTH
+--------------------------------------------------------------------------------
+5.1 High-Level Analytics & Metrics
+- The `SystemStats` generation system calculates deep operational metrics:
+  * Overall platform volume tracking (Active vs Completed vs Cancelled bookings).
+  * Dynamic calculation of the "Completion Success Rate" and average network-wide "Ambulance Response Time".
+  * Deep breakdowns grouping users by exact application Role (Number of Drivers vs Patients).
+  * Fleet Utilization statistics (percentage of ambulances currently active vs standing by vs in maintenance).
+  * National/Network bed utilization rates across all hospitals.
+
+5.2 Resource Approval Workflow
+- When a new ambulance driver signs up, the Admin dashboard traps their registration in an "Unverified" state.
+- Admins can review vehicle numbers, equipment lists, and assign specific drivers to specific hospitals, completing the provisioning process.
+
+5.3 Global User Management
+- Complete List, Search, and Status toggle overriding.
+- Capable of altering role levels and instantly banning accounts (is_active boolean switches).
+
+5.4 Audit Log Viewer
+- Security & Compliance tracing logs every significant action across the entire ECS platform.
+- Records WHO did WHAT and WHEN (e.g., User 'John' cancelled Booking 'xyz' at 12:04PM).
+- Sophisticated front-end filtering arrays allowing admins to search strictly for 'DELETE' events, or sorting strictly by modifications to the 'ambulances' database table.
+
+--------------------------------------------------------------------------------
+6. BACKEND API MODULES & SCHEMA IN-DEPTH
+--------------------------------------------------------------------------------
+6.1 Database ER Schema
+- Books Entity: Core routing unit holding `pickup_latitude`, `pickup_longitude`, `status`, `triage_data` JSON objects.
+- Dispatches Entity: Links a User Booking to a designated Hospital and Ambulance, tracking all timestamps (`dispatched_at`, `arrived_at_pickup`, `arrived_at_hospital`, `completed_at`).
+- Ambulances Entity: Tracks `current_latitude`, `current_longitude`, and complex `equipment_list` JSON payloads dictating what capabilities the vehicle possesses.
+- Hospitals Entity: Tracking real-time `available_beds` and `service_status`.
+- Users Entity: Primary authentication unit with embedded notification preferences.
+
+6.2 REST Controllers
+- `/api/bookings`: CRUD operations for all user-generated requests, fetching active tracking timelines.
+- `/api/triage/assess`: An internal server-side validation mirror that double-checks the frontend AI logic to guarantee maximum database integrity before allowing the creation of high-priority dispatch sequences.
+- `/api/dashboard/*`: Pre-calculated reporting routes combining thousands of calculations from the database into instantaneous JSON objects for the dashboards.
+- `/api/audit`: The core logging controller aggregating event data for the Admin view.
+
+--------------------------------------------------------------------------------
+CONCLUSION
+--------------------------------------------------------------------------------
+The ECS implementation successfully covers the full lifecycle of an emergency medical response. It integrates predictive triage, live GIS mapping, intelligent routing, rigorous auditing, and a unified aesthetic experience across four parallel applications representing the patient, the responding driver, the receiving hospital, and the network administrator.

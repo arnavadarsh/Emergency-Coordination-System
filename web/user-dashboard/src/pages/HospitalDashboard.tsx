@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import toast from 'react-hot-toast';
 import TokenStorage from '../utils/tokenStorage';
 import '../styles/HospitalDashboard.css';
 
@@ -169,7 +170,7 @@ const Dashboard = () => {
       const hospitalId = userResponse.data.hospitalId;
       
       if (!hospitalId) {
-        alert('Hospital ID not found');
+        toast.error('Hospital ID not found');
         return;
       }
       
@@ -182,7 +183,7 @@ const Dashboard = () => {
       setHospitalInfo(prev => ({ ...prev, status: newStatus }));
     } catch (err) {
       console.error('Failed to update hospital status:', err);
-      alert('Failed to update hospital status');
+      toast.error('Failed to update hospital status');
     }
   };
 
@@ -204,7 +205,7 @@ const Dashboard = () => {
       const hospitalId = userResponse.data.hospitalId;
       
       if (!hospitalId) {
-        alert('Hospital ID not found');
+        toast.error('Hospital ID not found');
         return;
       }
       
@@ -221,7 +222,7 @@ const Dashboard = () => {
       }));
     } catch (err) {
       console.error('Failed to update bed count:', err);
-      alert('Failed to update bed count');
+      toast.error('Failed to update bed count');
     }
   };
 
