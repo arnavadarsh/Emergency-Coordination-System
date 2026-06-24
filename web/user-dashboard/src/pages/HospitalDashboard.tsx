@@ -1,7 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { io, Socket } from 'socket.io-client';
 import TokenStorage from '../utils/tokenStorage';
 import '../styles/HospitalDashboard.css';
 
@@ -39,7 +40,27 @@ interface HospitalInfo {
   phoneNumber?: string;
 }
 
-type TabType = 'dashboard' | 'beds' | 'emergencies' | 'history';
+interface PreArrivalAlert {
+  dispatchId: string;
+  bookingId: string;
+  ambulanceId: string;
+  ambulanceVehicleNumber: string;
+  ambulanceLocation: { latitude: number | null; longitude: number | null };
+  patientSeverity: string;
+  emergencyType: string | null;
+  triage: {
+    breathing: boolean;
+    bleeding: boolean;
+    conscious: boolean;
+    painLevel: number;
+    pregnancy: boolean;
+  } | null;
+  etaMinutes: number | null;
+  status: string;
+  alertedAt: string;
+}
+
+type TabType = 'dashboard' | 'beds' | 'emergencies' | 'history' | 'prearrivals';
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -62,6 +83,9 @@ const Dashboard = () => {
   });
   const [recentBookings, setRecentBookings] = useState<Booking[]>([]);
   const [bedUpdateValue, setBedUpdateValue] = useState(0);
+  const [preArrivalAlerts, setPreArrivalAlerts] = useState<PreArrivalAlert[]>([]);
+  const socketRef = useRef<Socket | null>(null);
+  const hospitalIdRef = useRef<string | undefined>(undefined);
 
   const fetchDashboardData = async () => {
     try {
@@ -69,10 +93,9 @@ const Dashboard = () => {
       const response = await axios.get(`${API_BASE_URL}/dashboard/hospital`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      
+
       const data = response.data;
-      
-      // Set hospital info
+
       if (data.hospital) {
         setHospitalInfo({
           id: data.hospital.id,
@@ -83,8 +106,7 @@ const Dashboard = () => {
         });
         setBedUpdateValue(data.stats?.availableBeds || data.hospital?.availableBeds || 0);
       }
-      
-      // Set capabilities
+
       if (data.capabilities && data.capabilities.length > 0) {
         setCapabilities(data.capabilities.map((cap: any) => ({
           type: cap.type || cap.capabilityType || 'GENERAL',
@@ -92,8 +114,7 @@ const Dashboard = () => {
           status: cap.status || 'ACCEPTING'
         })));
       }
-      
-      // Set stats
+
       setStats({
         totalBeds: data.stats?.totalBeds || data.hospital?.totalBeds || 0,
         availableBeds: data.stats?.availableBeds || data.hospital?.availableBeds || 0,
@@ -102,8 +123,7 @@ const Dashboard = () => {
         activeEmergencies: data.stats?.activeEmergencies || data.activeBookings?.length || 0,
         completedToday: data.stats?.completedToday || data.completedBookings?.length || 0
       });
-      
-      // Set recent bookings
+
       if (data.recentBookings && data.recentBookings.length > 0) {
         setRecentBookings(data.recentBookings.map((b: any) => ({
           id: `BK-${b.id?.toString().slice(-4) || Math.random().toString(36).substr(2, 4)}`,
@@ -114,7 +134,7 @@ const Dashboard = () => {
           time: formatTimeAgo(b.createdAt)
         })));
       }
-      
+
       setLoading(false);
       setError(null);
     } catch (err: any) {
@@ -130,7 +150,7 @@ const Dashboard = () => {
     const now = new Date();
     const diffMs = now.getTime() - date.getTime();
     const diffMins = Math.floor(diffMs / 60000);
-    
+
     if (diffMins < 1) return 'Just now';
     if (diffMins < 60) return `${diffMins} min ago`;
     const diffHrs = Math.floor(diffMins / 60);
@@ -140,14 +160,9 @@ const Dashboard = () => {
 
   useEffect(() => {
     fetchDashboardData();
-    
-    // Refresh data every 30 seconds
+
     const refreshInterval = setInterval(fetchDashboardData, 30000);
-    
-    // Update clock every second
-    const clockTimer = setInterval(() => {
-      setCurrentTime(new Date());
-    }, 1000);
+    const clockTimer = setInterval(() => setCurrentTime(new Date()), 1000);
 
     return () => {
       clearInterval(refreshInterval);
@@ -155,31 +170,86 @@ const Dashboard = () => {
     };
   }, []);
 
+  // Keep ref in sync for use inside socket closure
+  useEffect(() => {
+    hospitalIdRef.current = hospitalInfo.id;
+  }, [hospitalInfo.id]);
+
+  // Socket.IO for pre-arrival alerts
+  useEffect(() => {
+    const socket = io('http://localhost:3000', {
+      auth: { token: TokenStorage.getToken() },
+    });
+    socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('[PreArrival] Socket connected, id=', socket.id);
+      if (hospitalIdRef.current) {
+        console.log('[PreArrival] Joining hospital room on connect, hospitalId=', hospitalIdRef.current);
+        socket.emit('join_hospital', { hospitalId: hospitalIdRef.current });
+      } else {
+        console.log('[PreArrival] Connected but hospitalId not known yet — will join after data loads');
+      }
+    });
+
+    socket.on('connect_error', (err) => {
+      console.error('[PreArrival] Socket connection error:', err.message);
+    });
+
+    socket.on('disconnect', (reason) => {
+      console.warn('[PreArrival] Socket disconnected:', reason);
+    });
+
+    socket.on('pre_arrival_alert', (alert: PreArrivalAlert) => {
+      console.log('[PreArrival] Received pre_arrival_alert:', JSON.stringify(alert, null, 2));
+      setPreArrivalAlerts(prev => {
+        const existingIndex = prev.findIndex(a => a.dispatchId === alert.dispatchId);
+        if (existingIndex !== -1) {
+          const updated = [...prev];
+          updated[existingIndex] = { ...updated[existingIndex], ...alert };
+          return updated;
+        }
+        return [alert, ...prev];
+      });
+    });
+
+    socket.on('dispatch_status_updated', (data: { dispatchId: string; status: string }) => {
+      console.log('[PreArrival] dispatch_status_updated received:', data);
+      setPreArrivalAlerts(prev =>
+        prev.map(a => a.dispatchId === data.dispatchId ? { ...a, status: data.status } : a)
+      );
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, []);
+
+  // Join hospital room once hospitalId is available (handles async data load)
+  useEffect(() => {
+    if (!hospitalInfo.id || !socketRef.current) return;
+    console.log('[PreArrival] Emitting join_hospital, hospitalId=', hospitalInfo.id, 'connected=', socketRef.current.connected);
+    socketRef.current.emit('join_hospital', { hospitalId: hospitalInfo.id });
+  }, [hospitalInfo.id]);
+
   const handleLogout = () => {
     TokenStorage.removeToken();
     navigate('/login');
   };
-  
+
   const handleStatusChange = async (newStatus: string) => {
+    const hospitalId = hospitalInfo.id;
+    if (!hospitalId) {
+      toast.error('Hospital data not loaded yet, please wait');
+      return;
+    }
     try {
       const token = TokenStorage.getToken();
-      // Get hospital ID from current user context
-      const userResponse = await axios.get(`${API_BASE_URL}/users/me`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const hospitalId = userResponse.data.hospitalId;
-      
-      if (!hospitalId) {
-        toast.error('Hospital ID not found');
-        return;
-      }
-      
       await axios.patch(
         `${API_BASE_URL}/hospitals/${hospitalId}/status`,
         { status: newStatus },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      
       setHospitalInfo(prev => ({ ...prev, status: newStatus }));
     } catch (err) {
       console.error('Failed to update hospital status:', err);
@@ -188,33 +258,42 @@ const Dashboard = () => {
   };
 
   const handleCapabilityStatusChange = async (capabilityType: string, newStatus: string) => {
-    // For now, update local state. Backend capability update can be added later
-    setCapabilities(prev => 
-      prev.map(cap => 
-        cap.type === capabilityType ? { ...cap, status: newStatus } : cap
-      )
-    );
-  };
-  
-  const handleUpdateBeds = async (availableBeds: number) => {
+    const hospitalId = hospitalInfo.id;
+    if (!hospitalId) {
+      toast.error('Hospital data not loaded yet, please wait');
+      return;
+    }
     try {
       const token = TokenStorage.getToken();
-      const userResponse = await axios.get(`${API_BASE_URL}/users/me`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const hospitalId = userResponse.data.hospitalId;
-      
-      if (!hospitalId) {
-        toast.error('Hospital ID not found');
-        return;
-      }
-      
+      await axios.patch(
+        `${API_BASE_URL}/hospitals/${hospitalId}/capability`,
+        { capabilityType, status: newStatus },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setCapabilities(prev =>
+        prev.map(cap =>
+          cap.type === capabilityType ? { ...cap, status: newStatus } : cap
+        )
+      );
+    } catch (err) {
+      console.error('Failed to update capability status:', err);
+      toast.error('Failed to update capability status');
+    }
+  };
+
+  const handleUpdateBeds = async (availableBeds: number) => {
+    const hospitalId = hospitalInfo.id;
+    if (!hospitalId) {
+      toast.error('Hospital data not loaded yet, please wait');
+      return;
+    }
+    try {
+      const token = TokenStorage.getToken();
       await axios.patch(
         `${API_BASE_URL}/hospitals/${hospitalId}/beds`,
         { availableBeds },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      
       setStats(prev => ({
         ...prev,
         availableBeds,
@@ -227,7 +306,7 @@ const Dashboard = () => {
   };
 
   const bedUtilization = stats.totalBeds > 0 ? Math.round((stats.occupiedBeds / stats.totalBeds) * 100) : 0;
-  
+
   if (loading) {
     return (
       <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
@@ -265,7 +344,7 @@ const Dashboard = () => {
             {hospitalInfo.status}
           </div>
         </div>
-        
+
         <nav className="sidebar-nav">
           <a href="#" className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
@@ -283,8 +362,17 @@ const Dashboard = () => {
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
             History
           </a>
+          <a href="#" className={`nav-item ${activeTab === 'prearrivals' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('prearrivals'); }} style={{ position: 'relative' }}>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z"/></svg>
+            Pre-Arrival
+            {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length > 0 && (
+              <span style={{ position: 'absolute', top: '6px', right: '8px', background: '#de350b', color: 'white', borderRadius: '50%', width: '18px', height: '18px', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
+                {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length}
+              </span>
+            )}
+          </a>
         </nav>
-        
+
         <div className="sidebar-footer">
           <button onClick={handleLogout} className="logout-btn">
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
@@ -296,27 +384,27 @@ const Dashboard = () => {
       <main className="main-content">
         <div className="top-bar">
           <div className="top-bar-left">
-            <h1>{activeTab === 'dashboard' ? 'Dashboard Overview' : activeTab === 'beds' ? 'Bed Management' : activeTab === 'emergencies' ? 'Emergency Cases' : 'Booking History'}</h1>
-            <div className="time">{currentTime.toLocaleString('en-US', { 
-              weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', 
-              hour: '2-digit', minute: '2-digit' 
+            <h1>{activeTab === 'dashboard' ? 'Dashboard Overview' : activeTab === 'beds' ? 'Bed Management' : activeTab === 'emergencies' ? 'Emergency Cases' : activeTab === 'prearrivals' ? 'Pre-Arrival Alerts' : 'Booking History'}</h1>
+            <div className="time">{currentTime.toLocaleString('en-US', {
+              weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+              hour: '2-digit', minute: '2-digit'
             })}</div>
           </div>
           <div className="top-bar-right">
             <div className="status-buttons">
-              <button 
+              <button
                 className={`status-btn ${hospitalInfo.status === 'ACCEPTING' ? 'active' : ''}`}
                 onClick={() => handleStatusChange('ACCEPTING')}
               >
                 Accepting
               </button>
-              <button 
+              <button
                 className={`status-btn ${hospitalInfo.status === 'LIMITED' ? 'active' : ''}`}
                 onClick={() => handleStatusChange('LIMITED')}
               >
                 Limited
               </button>
-              <button 
+              <button
                 className={`status-btn ${hospitalInfo.status === 'DIVERT' ? 'active' : ''}`}
                 onClick={() => handleStatusChange('DIVERT')}
               >
@@ -350,15 +438,15 @@ const Dashboard = () => {
             <div style={{ padding: '20px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
               <h3 style={{ marginTop: 0 }}>Update Available Beds</h3>
               <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                <input 
-                  type="number" 
-                  value={bedUpdateValue} 
+                <input
+                  type="number"
+                  value={bedUpdateValue}
                   onChange={(e) => setBedUpdateValue(parseInt(e.target.value) || 0)}
                   min={0}
                   max={stats.totalBeds}
                   style={{ padding: '12px', fontSize: '16px', border: '1px solid #ddd', borderRadius: '8px', width: '120px' }}
                 />
-                <button 
+                <button
                   onClick={() => handleUpdateBeds(bedUpdateValue)}
                   style={{ padding: '12px 24px', backgroundColor: '#00875a', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '16px' }}
                 >
@@ -398,6 +486,104 @@ const Dashboard = () => {
                 <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>No active emergency cases</div>
               )}
             </div>
+          </div>
+        ) : activeTab === 'prearrivals' ? (
+          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+              <div>
+                <h2 style={{ margin: 0 }}>Incoming Ambulances</h2>
+                <p style={{ margin: '4px 0 0', color: '#666', fontSize: '14px' }}>Real-time pre-arrival patient alerts via Socket.IO</p>
+              </div>
+              {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length > 0 && (
+                <span style={{ background: '#ffebee', color: '#c62828', padding: '8px 16px', borderRadius: '20px', fontWeight: '600' }}>
+                  {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length} Active
+                </span>
+              )}
+            </div>
+            {preArrivalAlerts.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '60px 40px', color: '#888' }}>
+                <svg viewBox="0 0 24 24" fill="currentColor" style={{ width: '48px', height: '48px', color: '#ccc', marginBottom: '16px', display: 'block', margin: '0 auto 16px' }}>
+                  <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99z"/>
+                </svg>
+                <div style={{ fontSize: '16px', fontWeight: '500' }}>No incoming ambulances</div>
+                <div style={{ fontSize: '13px', marginTop: '6px' }}>Pre-arrival alerts will appear here when ambulances are dispatched to this hospital</div>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {preArrivalAlerts.map(alert => {
+                  const isActive = alert.status !== 'COMPLETED' && alert.status !== 'CANCELLED';
+                  const severityColor = alert.patientSeverity === 'CRITICAL' ? '#de350b' : alert.patientSeverity === 'HIGH' ? '#ff8b00' : alert.patientSeverity === 'MEDIUM' ? '#ffab00' : '#36b37e';
+                  const statusColor = alert.status === 'COMPLETED' ? '#36b37e' : alert.status === 'CANCELLED' ? '#97a0af' : '#de350b';
+                  return (
+                    <div key={alert.dispatchId} style={{ border: `2px solid ${isActive ? severityColor : '#e0e0e0'}`, borderRadius: '10px', padding: '20px', background: isActive ? `${severityColor}08` : '#fafafa' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+                        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+                          <span style={{ background: severityColor, color: 'white', padding: '4px 12px', borderRadius: '12px', fontWeight: '700', fontSize: '13px' }}>
+                            {alert.patientSeverity}
+                          </span>
+                          {alert.emergencyType && (
+                            <span style={{ background: '#e3f2fd', color: '#1565c0', padding: '4px 12px', borderRadius: '12px', fontSize: '13px' }}>
+                              {alert.emergencyType}
+                            </span>
+                          )}
+                          <span style={{ background: `${statusColor}20`, color: statusColor, padding: '4px 12px', borderRadius: '12px', fontSize: '13px', fontWeight: '600' }}>
+                            {alert.status.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                        {alert.etaMinutes != null && (
+                          <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                            <div style={{ fontSize: '28px', fontWeight: '700', color: isActive ? severityColor : '#666', lineHeight: 1 }}>{alert.etaMinutes}</div>
+                            <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>min ETA</div>
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: alert.triage ? '16px' : 0 }}>
+                        <div style={{ background: 'white', borderRadius: '8px', padding: '12px', border: '1px solid #eee' }}>
+                          <div style={{ fontSize: '11px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Ambulance</div>
+                          <div style={{ fontWeight: '600', fontSize: '15px' }}>{alert.ambulanceVehicleNumber}</div>
+                          {alert.ambulanceLocation.latitude && (
+                            <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
+                              {Number(alert.ambulanceLocation.latitude).toFixed(4)}, {Number(alert.ambulanceLocation.longitude).toFixed(4)}
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ background: 'white', borderRadius: '8px', padding: '12px', border: '1px solid #eee' }}>
+                          <div style={{ fontSize: '11px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Alerted</div>
+                          <div style={{ fontWeight: '500', fontSize: '14px' }}>{formatTimeAgo(alert.alertedAt)}</div>
+                          <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>{new Date(alert.alertedAt).toLocaleTimeString()}</div>
+                        </div>
+                      </div>
+
+                      {alert.triage && (
+                        <div style={{ background: 'white', borderRadius: '8px', padding: '14px', border: '1px solid #eee' }}>
+                          <div style={{ fontSize: '12px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '10px', fontWeight: '600' }}>Triage Notes</div>
+                          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: alert.triage.breathing ? '#e8f5e9' : '#ffebee', color: alert.triage.breathing ? '#2e7d32' : '#c62828' }}>
+                              Breathing: {alert.triage.breathing ? 'Yes' : 'No'}
+                            </span>
+                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: alert.triage.bleeding ? '#ffebee' : '#e8f5e9', color: alert.triage.bleeding ? '#c62828' : '#2e7d32' }}>
+                              Bleeding: {alert.triage.bleeding ? 'Yes' : 'No'}
+                            </span>
+                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: alert.triage.conscious ? '#e8f5e9' : '#ffebee', color: alert.triage.conscious ? '#2e7d32' : '#c62828' }}>
+                              Conscious: {alert.triage.conscious ? 'Yes' : 'No'}
+                            </span>
+                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: '#fff3e0', color: '#e65100' }}>
+                              Pain: {alert.triage.painLevel}/10
+                            </span>
+                            {alert.triage.pregnancy && (
+                              <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: '#fce4ec', color: '#880e4f' }}>
+                                Pregnancy
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ) : activeTab === 'history' ? (
           <div style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
@@ -504,7 +690,7 @@ const Dashboard = () => {
               <h3>Capability Status Management</h3>
               <span className="help-text">Set individual status for each capability</span>
             </div>
-            
+
             <div className="capabilities-list">
               {capabilities.map(capability => (
                 <div key={capability.type} className="capability-item">
@@ -513,19 +699,19 @@ const Dashboard = () => {
                     <div className="capability-type">{capability.type}</div>
                   </div>
                   <div className="capability-status-controls">
-                    <button 
+                    <button
                       className={`capability-status-btn accepting ${capability.status === 'ACCEPTING' ? 'active' : ''}`}
                       onClick={() => handleCapabilityStatusChange(capability.type, 'ACCEPTING')}
                     >
                       Accepting
                     </button>
-                    <button 
+                    <button
                       className={`capability-status-btn limited ${capability.status === 'LIMITED' ? 'active' : ''}`}
                       onClick={() => handleCapabilityStatusChange(capability.type, 'LIMITED')}
                     >
                       Limited
                     </button>
-                    <button 
+                    <button
                       className={`capability-status-btn divert ${capability.status === 'DIVERT' ? 'active' : ''}`}
                       onClick={() => handleCapabilityStatusChange(capability.type, 'DIVERT')}
                     >
@@ -542,7 +728,7 @@ const Dashboard = () => {
               <h3>Recent Bookings</h3>
               <a href="#" className="view-all">View All</a>
             </div>
-            
+
             <div className="bookings-list">
               {recentBookings.map(booking => (
                 <div key={booking.id} className={`booking-item severity-${booking.severity.toLowerCase()}`}>

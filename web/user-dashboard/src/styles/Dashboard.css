@@ -525,9 +525,9 @@ body {
 /* Triage Section */
 .triage-section {
   padding: 20px;
-  background: #fff4e6;
+  background: transparent;
   border-radius: 8px;
-  border: 1px solid #ffab00;
+  border: none;
 }
 
 .triage-section h3 {

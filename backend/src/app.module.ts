@@ -18,6 +18,7 @@ import { TriageModule } from './triage/triage.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { AuditModule } from './audit/audit.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { ChatModule } from './chat/chat.module';
 
 /**
  * Main Application Module
@@ -79,6 +80,7 @@ import { DashboardModule } from './dashboard/dashboard.module';
     RealtimeModule,
     AuditModule,
     DashboardModule,
+    ChatModule,
   ],
 })
 export class AppModule {}

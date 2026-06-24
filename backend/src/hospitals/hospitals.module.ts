@@ -6,11 +6,12 @@ import { Hospital, HospitalCapability } from './entities';
 import { Dispatch } from '../dispatch/entities/dispatch.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { HospitalRankingService } from './hospital-ranking.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Hospital, HospitalCapability, Dispatch, Booking]), RealtimeModule],
   controllers: [HospitalsController],
-  providers: [HospitalsService],
-  exports: [HospitalsService],
+  providers: [HospitalsService, HospitalRankingService],
+  exports: [HospitalsService, HospitalRankingService],
 })
 export class HospitalsModule {}

@@ -93,6 +93,7 @@ export class Booking {
   requirements?: any;
 
   @OneToOne(() => TriageReport, triageReport => triageReport.booking)
+  @JoinColumn({ name: 'triage_report_id' })
   triageReport: TriageReport;
 
   // NOTE: Current deployed DB schema does not include ambulance/hospital FK columns on bookings.

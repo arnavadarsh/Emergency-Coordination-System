@@ -40,7 +40,7 @@ export class AuthService {
     await this.usersService.updateLastLogin(user.id);
 
     // Generate JWT token
-    const payload = { sub: user.id, email: user.email, role: user.role };
+    const payload = { sub: user.id, email: user.email, role: user.role, hospitalId: user.hospitalId ?? null };
     const token = this.jwtService.sign(payload);
 
     return {

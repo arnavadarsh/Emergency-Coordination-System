@@ -1,6 +1,7 @@
 import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { TriageService } from './triage.service';
+import { TriageLlmService } from './triage-llm.service';
 import { TriageController } from './triage.controller';
 import { Booking } from '../bookings/entities/booking.entity';
 import { TriageReport } from './entities/triage.entity';
@@ -16,7 +17,7 @@ import { BookingsModule } from '../bookings/bookings.module';
     forwardRef(() => BookingsModule),
   ],
   controllers: [TriageController],
-  providers: [TriageService],
-  exports: [TriageService],
+  providers: [TriageService, TriageLlmService],
+  exports: [TriageService, TriageLlmService],
 })
 export class TriageModule {}

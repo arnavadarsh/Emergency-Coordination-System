@@ -69,6 +69,60 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   }
 
   /**
+   * Join hospital room
+   * Hospital dashboards call this to receive events scoped to their hospital
+   */
+  @SubscribeMessage('join_hospital')
+  handleJoinHospital(@ConnectedSocket() client: Socket, @MessageBody() data: { hospitalId: string }) {
+    if (data?.hospitalId) {
+      client.join(`hospital:${data.hospitalId}`);
+      this.logger.log(`Client ${client.id} joined hospital room: ${data.hospitalId}`);
+    }
+    return { event: 'joined_hospital', data: { hospitalId: data?.hospitalId } };
+  }
+
+  /**
+   * Join a booking's chat room. Both the patient and the assigned driver call
+   * this so they receive `chat:message` events for that booking in realtime.
+   */
+  @SubscribeMessage('chat:join')
+  handleChatJoin(@ConnectedSocket() client: Socket, @MessageBody() data: { bookingId: string }) {
+    if (data?.bookingId) {
+      client.join(`booking:${data.bookingId}`);
+      this.logger.log(`Client ${client.id} joined booking room: ${data.bookingId}`);
+    }
+    return { event: 'chat:joined', data: { bookingId: data?.bookingId } };
+  }
+
+  @SubscribeMessage('chat:leave')
+  handleChatLeave(@ConnectedSocket() client: Socket, @MessageBody() data: { bookingId: string }) {
+    if (data?.bookingId) client.leave(`booking:${data.bookingId}`);
+    return { event: 'chat:left', data: { bookingId: data?.bookingId } };
+  }
+
+  /** Relay a transient "typing…" indicator to the other party (not persisted). */
+  @SubscribeMessage('chat:typing')
+  handleChatTyping(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { bookingId: string; role: string },
+  ) {
+    if (data?.bookingId) {
+      client.to(`booking:${data.bookingId}`).emit('chat:typing', {
+        bookingId: data.bookingId,
+        role: data.role,
+      });
+    }
+  }
+
+  /** Emit an event to everyone in a booking's room (patient + driver). */
+  emitToBooking(bookingId: string, event: string, data: any) {
+    const room = `booking:${bookingId}`;
+    const roomSize = this.server.sockets.adapter.rooms.get(room)?.size ?? 0;
+    this.logger.log(`[emitToBooking] event="${event}" room="${room}" clients=${roomSize}`);
+    this.server.to(room).emit(event, data);
+  }
+
+  /**
    * Broadcast message to all connected clients
    * Utility method for future use
    */
@@ -82,5 +136,15 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
    */
   sendToClient(clientId: string, event: string, data: any) {
     this.server.to(clientId).emit(event, data);
+  }
+
+  /**
+   * Emit event to all clients in a hospital's room
+   */
+  emitToHospital(hospitalId: string, event: string, data: any) {
+    const room = `hospital:${hospitalId}`;
+    const roomSize = this.server.sockets.adapter.rooms.get(room)?.size ?? 0;
+    this.logger.log(`[emitToHospital] event="${event}" room="${room}" clients=${roomSize}`);
+    this.server.to(room).emit(event, data);
   }
 }

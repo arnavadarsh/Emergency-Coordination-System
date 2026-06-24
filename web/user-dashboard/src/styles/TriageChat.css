@@ -8,13 +8,16 @@
 .triage-chat-wrapper {
   display: flex;
   gap: 0;
-  border-radius: 12px;
+  border-radius: 16px;
   overflow: hidden;
   background: #f5f7fa;
-  border: 1px solid #e0e0e0;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  border: 1px solid #e6ebf0;
+  box-shadow: 0 8px 28px rgba(23, 43, 77, 0.08), 0 1px 3px rgba(23, 43, 77, 0.04);
   min-height: 480px;
-  max-height: 640px;
+  /* Stay bounded to the viewport so the message list scrolls internally
+     instead of the whole panel growing taller. */
+  height: 80vh;
+  max-height: 660px;
 }
 
 /* ── Chat Panel (Left) ─────────────────────────────────────────────────────── */
@@ -25,16 +28,20 @@
   flex-direction: column;
   background: #f5f7fa;
   min-width: 0;
+  /* Allow the flex column to shrink so the inner messages list can scroll
+     instead of the whole panel growing taller. */
+  min-height: 0;
 }
 
 .triage-chat-header {
-  padding: 16px 20px;
-  background: linear-gradient(135deg, #00a3bf 0%, #008a9e 100%);
+  padding: 15px 18px;
+  background: linear-gradient(135deg, #00b4d2 0%, #008a9e 100%);
   color: white;
   display: flex;
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(0, 138, 158, 0.18);
 }
 
 .triage-chat-header-icon {
@@ -47,6 +54,8 @@
   justify-content: center;
   font-size: 18px;
 }
+
+.triage-header-titles { min-width: 0; }
 
 .triage-chat-header h3 {
   margin: 0;
@@ -61,6 +70,125 @@
   font-weight: 500;
 }
 
+/* Header right-side controls */
+.triage-header-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.triage-header-sevpill {
+  padding: 4px 11px;
+  border-radius: 14px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  background: rgba(255,255,255,0.2);
+  color: white;
+  white-space: nowrap;
+}
+.triage-header-sevpill.critical { background: rgba(0,0,0,0.18); box-shadow: 0 0 0 1.5px rgba(255,255,255,0.55); animation: triagePulseCritical 1.6s ease-in-out infinite; }
+
+/* Segmented Text / Voice mode switch */
+.triage-mode-switch {
+  display: inline-flex;
+  background: rgba(0,0,0,0.14);
+  border-radius: 999px;
+  padding: 3px;
+  gap: 2px;
+}
+.triage-mode-seg {
+  padding: 6px 13px;
+  border: none;
+  background: transparent;
+  color: rgba(255,255,255,0.82);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: 999px;
+  transition: all 0.18s ease;
+  white-space: nowrap;
+  line-height: 1;
+}
+.triage-mode-seg:hover { color: white; }
+.triage-mode-seg.active {
+  background: white;
+  color: #008a9e;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.18);
+}
+
+/* Fast-track dispatch banner */
+.triage-fasttrack-banner {
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #de350b 0%, #bf2600 100%);
+  color: white;
+  font-size: 12.5px;
+  font-weight: 700;
+  text-align: center;
+  flex-shrink: 0;
+  animation: triageFastFlash 1.8s ease-in-out infinite;
+}
+@keyframes triageFastFlash {
+  0%, 100% { background: linear-gradient(135deg, #de350b 0%, #bf2600 100%); }
+  50% { background: linear-gradient(135deg, #ff4d22 0%, #de350b 100%); }
+}
+
+/* Always-visible emergency call escape hatch */
+.triage-emergency-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 16px;
+  background: #fff4f2;
+  border-bottom: 1px solid #ffd9d1;
+  flex-shrink: 0;
+}
+
+.triage-emergency-bar-text {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8a2a17;
+  line-height: 1.35;
+  min-width: 0;
+}
+
+.triage-emergency-call {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 16px;
+  background: #de350b;
+  color: #fff;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(222, 53, 11, 0.32);
+  transition: transform 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+.triage-emergency-call:hover {
+  background: #bf2600;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(222, 53, 11, 0.4);
+}
+
+.triage-emergency-call:active {
+  transform: translateY(0);
+  box-shadow: 0 1px 4px rgba(222, 53, 11, 0.4);
+}
+
+.triage-emergency-call svg {
+  width: 15px;
+  height: 15px;
+}
+
 .triage-step-indicator {
   margin-left: auto;
   padding: 4px 12px;
@@ -71,17 +199,297 @@
   color: rgba(255,255,255,0.9);
 }
 
+/* ── Mode Toggle ───────────────────────────────────────────────────────────── */
+
+.triage-mode-toggle {
+  display: flex;
+  gap: 6px;
+  padding: 10px 16px;
+  background: white;
+  border-bottom: 1px solid #e0e0e0;
+  flex-shrink: 0;
+}
+
+.triage-mode-btn {
+  flex: 1;
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s;
+  background: #f5f7fa;
+  color: #6b778c;
+  border: 1px solid #e0e0e0;
+}
+
+.triage-mode-btn:hover {
+  border-color: #00a3bf;
+  color: #00a3bf;
+}
+
+.triage-mode-btn.active {
+  background: #e6f7f9;
+  color: #008a9e;
+  border-color: #00a3bf;
+  box-shadow: 0 1px 4px rgba(0, 163, 191, 0.15);
+}
+
+/* ── Extracted Keyword Chips ───────────────────────────────────────────────── */
+
+.triage-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 10px;
+}
+
+.triage-chip {
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  line-height: 1.4;
+  white-space: nowrap;
+  animation: triageSlideIn 0.3s ease-out;
+}
+
+/* ── NLP Free-text Input ───────────────────────────────────────────────────── */
+
+.triage-nlp-input-group {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  align-items: flex-end;
+}
+
+.triage-nlp-textarea {
+  flex: 1;
+  padding: 11px 14px;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #172b4d;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  outline: none;
+  font-family: inherit;
+  resize: vertical;
+  min-height: 44px;
+  max-height: 140px;
+  line-height: 1.45;
+}
+
+.triage-nlp-textarea:focus {
+  border-color: #00a3bf;
+  box-shadow: 0 0 0 3px rgba(0, 163, 191, 0.1);
+}
+
+.triage-nlp-send {
+  height: 44px;
+}
+
+.triage-nlp-send:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* ── Input dock (quick replies + mic + text + send) ────────────────────────── */
+
+.triage-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.triage-inputbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: white;
+  border: 1.5px solid #e0e0e0;
+  border-radius: 26px;
+  padding: 5px 6px 5px 8px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.triage-inputbar:focus-within { border-color: #00a3bf; box-shadow: 0 0 0 3px rgba(0,163,191,0.1); }
+.triage-inputbar.listening { border-color: #de350b; box-shadow: 0 0 0 3px rgba(222,53,11,0.12); }
+
+.triage-inputbar-field {
+  flex: 1;
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  color: #172b4d;
+  font-family: inherit;
+  padding: 8px 4px;
+  min-width: 0;
+}
+
+.triage-mic-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: #f5f7fa;
+  color: #6b778c;
+  font-size: 17px;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.18s;
+}
+.triage-mic-btn:hover { background: #e6f7f9; color: #00a3bf; }
+.triage-mic-btn.active {
+  background: #de350b;
+  color: white;
+  animation: triageMicPulse 1.3s ease-in-out infinite;
+}
+@keyframes triageMicPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(222,53,11,0.5); }
+  50% { box-shadow: 0 0 0 8px rgba(222,53,11,0); }
+}
+
+.triage-send-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: #00a3bf;
+  color: white;
+  font-size: 15px;
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.18s;
+}
+.triage-send-btn:hover:not(:disabled) { background: #008a9e; transform: scale(1.05); }
+.triage-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.triage-dock-hint {
+  font-size: 11px;
+  color: #97a0af;
+  text-align: center;
+  font-weight: 500;
+}
+
+.triage-unified-input {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.triage-quickreplies-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px 12px;
+  background: #eef9fb;
+  border: 1px solid #d4eef2;
+  border-radius: 14px;
+}
+
+.triage-quickreplies-label {
+  font-size: 10.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #008a9e;
+}
+
+.triage-quickreplies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.triage-qr-btn {
+  padding: 9px 16px;
+  border-radius: 18px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s;
+  background: white;
+  color: #172b4d;
+  border: 1px solid #e0e0e0;
+}
+
+.triage-qr-btn:hover {
+  border-color: #00a3bf;
+  background: #e6f7f9;
+  color: #00a3bf;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 163, 191, 0.12);
+}
+
+.triage-qr-btn.yes {
+  background: #00875a;
+  color: white;
+  border-color: #00875a;
+}
+
+.triage-qr-btn.yes:hover {
+  background: #006644;
+  color: white;
+  box-shadow: 0 3px 8px rgba(0, 135, 90, 0.3);
+}
+
+.triage-qr-btn.no {
+  background: #de350b;
+  color: white;
+  border-color: #de350b;
+}
+
+.triage-qr-btn.no:hover {
+  background: #bf2600;
+  color: white;
+  box-shadow: 0 3px 8px rgba(222, 53, 11, 0.3);
+}
+
+/* ── Clarifier (NLP follow-up) ─────────────────────────────────────────────── */
+
+.triage-clarifier {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.triage-skip-btn {
+  align-self: flex-end;
+  padding: 6px 12px;
+  background: transparent;
+  color: #97a0af;
+  border: none;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.2s;
+}
+
+.triage-skip-btn:hover {
+  color: #00a3bf;
+  text-decoration: underline;
+}
+
 /* ── Messages Area ─────────────────────────────────────────────────────────── */
 
 .triage-chat-messages {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0; /* critical: lets this flex item scroll within the panel */
   overflow-y: auto;
-  padding: 16px 16px 8px;
+  padding: 18px 16px 10px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   scroll-behavior: smooth;
-  background: white;
+  background: #f7f9fb;
 }
 
 .triage-chat-messages::-webkit-scrollbar {
@@ -139,22 +547,24 @@
 
 .triage-message-bubble {
   padding: 12px 16px;
-  border-radius: 12px;
+  border-radius: 16px;
   font-size: 14px;
   line-height: 1.5;
 }
 
 .triage-message.system .triage-message-bubble {
-  background: #f5f7fa;
+  background: #ffffff;
   color: #172b4d;
-  border-bottom-left-radius: 4px;
-  border: 1px solid #e0e0e0;
+  border-bottom-left-radius: 5px;
+  border: 1px solid #e6ebf0;
+  box-shadow: 0 1px 3px rgba(23, 43, 77, 0.05);
 }
 
 .triage-message.user .triage-message-bubble {
-  background: #00a3bf;
+  background: linear-gradient(135deg, #00b4d2 0%, #008a9e 100%);
   color: white;
-  border-bottom-right-radius: 4px;
+  border-bottom-right-radius: 5px;
+  box-shadow: 0 2px 6px rgba(0, 138, 158, 0.22);
 }
 
 .triage-message-subtext {
@@ -715,7 +1125,9 @@
 @media (max-width: 800px) {
   .triage-chat-wrapper {
     flex-direction: column;
-    max-height: none;
+    /* Keep it bounded on mobile too so the chat scrolls internally. */
+    height: 85vh;
+    max-height: 85vh;
   }
 
   .triage-status-panel {
@@ -741,4 +1153,338 @@
   .triage-assessment-grid {
     grid-template-columns: 1fr;
   }
+}
+
+@media (max-width: 440px) {
+  .triage-emergency-bar-text {
+    font-size: 11px;
+  }
+  .triage-emergency-call {
+    padding: 8px 13px;
+  }
+}
+
+/* ============================================================================
+   New features: quick-start chips · share location · language selector · maps
+   ========================================================================== */
+
+/* ── Language selector (header) ── */
+.triage-lang-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: rgba(255, 255, 255, 0.16);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 9px;
+  padding: 5px 26px 5px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  outline: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23ffffff' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+}
+.triage-lang-select:focus-visible {
+  border-color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+.triage-lang-select option {
+  color: #172b4d;
+}
+
+/* ── Quick-start chips (welcome screen) ── */
+.triage-quickstart-group {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 12px;
+  background: #f3fbfc;
+  border: 1px solid #d4eef2;
+  border-radius: 14px;
+}
+.triage-quickstart-label {
+  font-size: 10.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #008a9e;
+}
+.triage-quickstart-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+.triage-quickstart-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s;
+  background: #ffffff;
+  color: #172b4d;
+  border: 1px solid #e0e0e0;
+  text-align: left;
+}
+.triage-quickstart-chip:hover {
+  border-color: #00a3bf;
+  background: #e6f7f9;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 10px rgba(0, 163, 191, 0.14);
+}
+.triage-quickstart-emoji {
+  font-size: 17px;
+  line-height: 1;
+}
+
+/* ── Share-location button (dock) ── */
+.triage-location-btn {
+  width: 100%;
+  margin-top: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.18s;
+  background: #eef9fb;
+  color: #008a9e;
+  border: 1px dashed #00a3bf;
+}
+.triage-location-btn:hover:not(:disabled) {
+  background: #00a3bf;
+  color: #ffffff;
+}
+.triage-location-btn:disabled {
+  cursor: default;
+  opacity: 0.85;
+}
+.triage-location-btn.shared {
+  background: #e3fcef;
+  color: #00875a;
+  border-style: solid;
+  border-color: #00875a;
+}
+
+/* ── Map link inside a chat bubble (shared location) ── */
+.triage-message-maplink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 7px;
+  padding: 6px 11px;
+  border-radius: 9px;
+  font-size: 12px;
+  font-weight: 700;
+  text-decoration: none;
+  background: #e6f7f9;
+  color: #008a9e;
+  border: 1px solid rgba(0, 163, 191, 0.3);
+  align-self: flex-start;
+}
+.triage-message-maplink:hover {
+  background: #00a3bf;
+  color: #ffffff;
+}
+
+/* ============================================================================
+   Result CTA + modal — assessment is shown on demand, not inline in the chat
+   ========================================================================== */
+
+/* ── "Assessment ready" CTA (replaces the input dock when done) ── */
+.triage-result-cta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.triage-result-cta-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #172b4d;
+  min-width: 0;
+}
+.triage-result-cta-dot {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.triage-result-cta-dot.critical { color: #de350b; }
+.triage-result-cta-dot.high { color: #ff8b00; }
+.triage-result-cta-dot.moderate { color: #ffab00; }
+.triage-result-cta-dot.low { color: #00875a; }
+
+.triage-see-result-btn {
+  flex-shrink: 0;
+  padding: 11px 20px;
+  background: #00a3bf;
+  color: #ffffff;
+  border: none;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.triage-see-result-btn:hover {
+  background: #008a9e;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 163, 191, 0.3);
+}
+
+/* ── Modal ── */
+.triage-result-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(23, 43, 77, 0.55);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  animation: triageFadeIn 0.18s ease-out;
+}
+.triage-result-modal {
+  position: relative;
+  width: 100%;
+  max-width: 560px;
+  max-height: 88vh;
+  overflow-y: auto;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 20px 60px rgba(23, 43, 77, 0.35);
+  animation: triageSlideIn 0.25s ease-out;
+}
+.triage-result-modal .triage-assessment-card {
+  border: none;
+  box-shadow: none;
+  border-radius: 14px;
+  animation: none;
+}
+.triage-result-modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.25);
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+.triage-result-modal-close:hover {
+  background: rgba(255, 255, 255, 0.45);
+}
+.triage-result-done-btn {
+  flex: 1;
+  padding: 12px 20px;
+  background: #00a3bf;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.triage-result-done-btn:hover {
+  background: #008a9e;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 163, 191, 0.3);
+}
+
+@keyframes triageFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ============================================================================
+   Post-triage success panel — "Ambulance is on its way" + Track button
+   ========================================================================== */
+.triage-success-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.triage-success-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: #e3fcef;
+  border: 1px solid #57d9a3;
+}
+.triage-success-icon {
+  font-size: 26px;
+  line-height: 1;
+  flex-shrink: 0;
+  animation: triageAmbulancePulse 1.6s ease-in-out infinite;
+}
+.triage-success-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.triage-success-titles strong {
+  font-size: 15px;
+  font-weight: 800;
+  color: #006644;
+}
+.triage-success-titles span {
+  font-size: 12px;
+  color: #1f7a5a;
+}
+.triage-success-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.triage-track-btn {
+  flex: 1 1 auto;
+  padding: 12px 18px;
+  background: #00875a;
+  color: #ffffff;
+  border: none;
+  border-radius: 9px;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.triage-track-btn:hover {
+  background: #006644;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(0, 135, 90, 0.3);
+}
+.triage-success-actions .triage-see-result-btn {
+  flex: 1 1 auto;
+  background: #ffffff;
+  color: #00a3bf;
+  border: 1px solid #00a3bf;
+}
+.triage-success-actions .triage-see-result-btn:hover {
+  background: #e6f7f9;
+}
+
+@keyframes triageAmbulancePulse {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(3px); }
 }

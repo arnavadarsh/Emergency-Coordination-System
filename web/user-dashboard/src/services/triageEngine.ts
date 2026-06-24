@@ -697,10 +697,10 @@ export function getSeverityColor(severity: SeverityLevel): string {
 
 export function getSeverityEmoji(severity: SeverityLevel): string {
   switch (severity) {
-    case 'CRITICAL': return '🔴';
-    case 'HIGH': return '🟠';
-    case 'MODERATE': return '🟡';
-    case 'LOW': return '🟢';
+    case 'CRITICAL': return '●';
+    case 'HIGH': return '●';
+    case 'MODERATE': return '●';
+    case 'LOW': return '●';
   }
 }
 

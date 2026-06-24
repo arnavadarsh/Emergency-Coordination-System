@@ -6,6 +6,7 @@ import toast from 'react-hot-toast';
 import { tokenStorage } from '../utils/tokenStorage';
 import { DriverRouteMap } from '../components/DriverRouteMap';
 import ActiveCaseCard from '../components/ActiveCaseCard';
+import DriverChat from '../components/DriverChat';
 import ChecklistModal from '../components/ChecklistModal';
 
 const API_BASE_URL = 'http://localhost:3000/api';
@@ -407,6 +408,23 @@ function Dashboard() {
                       title="Route To Hospital" ctaLabel="Open in Maps" />
                   </Card>
                 )}
+
+                {/* Chat with the patient */}
+                <Card style={{ overflow:'hidden', marginTop:'20px' }}>
+                  <div style={{ padding:'14px 20px', borderBottom:`1px solid ${C.cardBorder}` }}>
+                    <span style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary }}>💬 Chat with Patient</span>
+                  </div>
+                  <div style={{ padding:'12px' }}>
+                    <DriverChat
+                      bookingId={activeDispatch.booking.id}
+                      selfRole="DRIVER"
+                      title="Chat with patient"
+                      peerLabel="Patient"
+                      peerPhone={activeDispatch.booking.patientPhone}
+                      locked={['COMPLETED','CANCELLED'].includes(activeDispatch.status)}
+                    />
+                  </div>
+                </Card>
               </>
             ) : (
               <Card style={{ padding:'60px 24px', textAlign:'center' }}>

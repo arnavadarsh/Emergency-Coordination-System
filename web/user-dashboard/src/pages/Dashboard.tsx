@@ -13,6 +13,7 @@ import { LiveRouteMap } from '../components/LiveRouteMap';
 import BookingCard, { ACTIVE_STATUSES } from '../components/BookingCard';
 import BookingTabs from '../components/BookingTabs';
 import TriageChat from '../components/TriageChat';
+import DriverChat from '../components/DriverChat';
 import type { TriageResult } from '../services/triageEngine';
 
 const API_BASE_URL = 'http://localhost:3000/api';
@@ -185,6 +186,8 @@ function Dashboard() {
   });
   const [triageCompleted, setTriageCompleted] = useState(false);
   const [, setTriageResultData] = useState<TriageResult | null>(null);
+  const [fastTrackDispatched, setFastTrackDispatched] = useState(false);
+  const fastTrackBookingIdRef = useRef<string | null>(null);
 
   // Map states
   const [gettingLocation, setGettingLocation] = useState(false);
@@ -644,8 +647,9 @@ function Dashboard() {
       }
       
       // Set bookings
+      let mappedBookings: Booking[] = [];
       if (data.bookings && data.bookings.length > 0) {
-        const mappedBookings = data.bookings.map((b: any) => ({
+        mappedBookings = data.bookings.map((b: any) => ({
           id: b.id,
           userId: b.userId,
           hospitalId: b.hospitalId,
@@ -703,10 +707,12 @@ function Dashboard() {
       
       setLoading(false);
       setError(null);
+      return mappedBookings;
     } catch (err: any) {
       console.error('Failed to fetch dashboard data:', err);
       setError(err.response?.data?.message || 'Failed to load dashboard data');
       setLoading(false);
+      return [];
     }
   };
 
@@ -747,7 +753,136 @@ function Dashboard() {
     };
   }, [userProfile?.id, bookings]);
 
+  // ── Fast-track: dispatch immediately when triage detects a CRITICAL life-threat ──
+  const handleFastTrack = async (result: TriageResult) => {
+    if (fastTrackDispatched) return;
+    setFastTrackDispatched(true);
+    try {
+      // Resolve pickup — prefer what the user already set, else detect, else default.
+      let lat = pickupCoords?.lat;
+      let lng = pickupCoords?.lng;
+      let address = pickupLocation;
+      if (lat == null || lng == null) {
+        try {
+          const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+            navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }),
+          );
+          lat = pos.coords.latitude;
+          lng = pos.coords.longitude;
+          address = address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+        } catch {
+          lat = 28.6139;
+          lng = 77.2090;
+          address = address || 'Location being detected';
+        }
+      }
+
+      const token = tokenStorage.getToken();
+      const bookingData = {
+        pickupLocation: address || 'Current Location',
+        pickupAddress: address || 'Current Location',
+        pickupLatitude: lat,
+        pickupLongitude: lng,
+        bookingType: 'EMERGENCY',
+        severity: 'CRITICAL',
+        description: result.chiefComplaint,
+        triageData: {
+          chiefComplaint: result.chiefComplaint,
+          severity: 'CRITICAL',
+          isBreathing: result.isBreathing,
+          isConscious: result.isConscious,
+          hasChestPain: result.hasChestPain,
+          hasSevereBleeding: result.hasSevereBleeding,
+        },
+      };
+      const response = await axios.post(`${API_BASE_URL}/bookings`, bookingData, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      fastTrackBookingIdRef.current = response.data?.id || response.data?.booking?.id || null;
+      toast.success('🚨 CRITICAL detected — ambulance dispatch initiated!', { duration: 6000 });
+      await fetchDashboardData();
+    } catch (err: any) {
+      // Let the user retry via the normal button if auto-dispatch failed.
+      setFastTrackDispatched(false);
+      console.error('Fast-track dispatch failed:', err);
+      toast.error('Auto-dispatch failed — tap "Request Emergency Ambulance" to retry.');
+    }
+  };
+
+  /**
+   * Resolve a pickup location (shared GPS → device GPS → default) and create an
+   * EMERGENCY booking. Returns the created booking. Used to dispatch the
+   * ambulance the moment triage finishes, so the in-chat "ambulance is on its
+   * way" confirmation is accurate.
+   */
+  const createEmergencyBooking = async (result: TriageResult, severity: string): Promise<Booking | null> => {
+    let lat = pickupCoords?.lat;
+    let lng = pickupCoords?.lng;
+    let address = pickupLocation;
+    if (lat == null || lng == null) {
+      try {
+        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }),
+        );
+        lat = pos.coords.latitude;
+        lng = pos.coords.longitude;
+        address = address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+      } catch {
+        lat = 28.6139;
+        lng = 77.2090;
+        address = address || 'Location being detected';
+      }
+    }
+    const token = tokenStorage.getToken();
+    const bookingData = {
+      pickupLocation: address || 'Current Location',
+      pickupAddress: address || 'Current Location',
+      pickupLatitude: lat,
+      pickupLongitude: lng,
+      bookingType: 'EMERGENCY',
+      severity,
+      description: result.chiefComplaint,
+      triageData: {
+        chiefComplaint: result.chiefComplaint,
+        severity,
+        isBreathing: result.isBreathing,
+        isConscious: result.isConscious,
+        hasChestPain: result.hasChestPain,
+        hasSevereBleeding: result.hasSevereBleeding,
+      },
+    };
+    const response = await axios.post(`${API_BASE_URL}/bookings`, bookingData, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return (response.data?.booking || response.data) as Booking;
+  };
+
+  /** "Track ambulance" from the chat success screen → open live tracking. */
+  const handleTrackFromChat = async () => {
+    const fresh = await fetchDashboardData();
+    const id = fastTrackBookingIdRef.current;
+    const booking = (id ? fresh.find((b) => b.id === id) : null) ?? fresh[0] ?? null;
+    setShowBookingForm(false);
+    setFastTrackDispatched(false);
+    setTriageCompleted(false);
+    setTriageResultData(null);
+    fastTrackBookingIdRef.current = null;
+    if (booking) startTracking(booking);
+    else { setActiveTab('bookings'); toast.success('Track your ambulance in "My Bookings".'); }
+  };
+
   const handleCreateBooking = async (triageOverride?: { chiefComplaint: string; severity: string; isBreathing: boolean; isConscious: boolean; hasChestPain: boolean; hasSevereBleeding: boolean }) => {
+    // Already dispatched via fast-track — don't create a duplicate; just close & reset.
+    if (fastTrackDispatched) {
+      setShowBookingForm(false);
+      setFastTrackDispatched(false);
+      setTriageCompleted(false);
+      setTriageResultData(null);
+      fastTrackBookingIdRef.current = null;
+      toast.success('Ambulance already dispatched. Track it in "My Bookings".');
+      await fetchDashboardData();
+      return;
+    }
     try {
       // Validate required fields
       if (!pickupLocation && !pickupCoords) {
@@ -907,6 +1042,41 @@ function Dashboard() {
   const startTracking = (booking: Booking) => {
     setTrackingBooking(booking);
     setActiveTab('bookings');
+  };
+
+  // ── Triage finished ──
+  const handleTriageComplete = async (result: TriageResult) => {
+    setTriageResultData(result);
+    setTriageCompleted(true);
+    const mappedSeverity = result.severity === 'MODERATE' ? 'MEDIUM' : result.severity;
+    const td = {
+      chiefComplaint: result.chiefComplaint,
+      severity: mappedSeverity as 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW',
+      isBreathing: result.isBreathing,
+      isConscious: result.isConscious,
+      hasChestPain: result.hasChestPain,
+      hasSevereBleeding: result.hasSevereBleeding,
+    };
+    setTriageData(td);
+
+    // Ensure an ambulance is dispatched the moment triage finishes. CRITICAL
+    // cases were already auto-dispatched mid-assessment (fast-track); for every
+    // other case, dispatch now so the chat's "ambulance is on its way"
+    // confirmation + Track button are accurate. The booking form stays open
+    // showing that success screen until the user taps Track.
+    if (!fastTrackDispatched && !fastTrackBookingIdRef.current) {
+      try {
+        const booking = await createEmergencyBooking(result, mappedSeverity);
+        fastTrackBookingIdRef.current = booking?.id ?? null;
+        setFastTrackDispatched(true);
+        await fetchDashboardData();
+      } catch (err) {
+        console.error('Auto-dispatch on triage complete failed:', err);
+        toast.error('Could not dispatch automatically — tap "Request Emergency Ambulance".');
+      }
+    } else {
+      await fetchDashboardData();
+    }
   };
 
   const handleCancelBooking = async (bookingId: string) => {
@@ -1886,44 +2056,34 @@ function Dashboard() {
                   </div>
                 </>
               ) : (
-                <div className="triage-section">
-                  <h3 style={{ margin: '0 0 16px 0', fontSize: '18px', color: '#172b4d', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    🤖 AI Emergency Triage
-                    {triageCompleted && (
-                      <span style={{ fontSize: '12px', padding: '3px 10px', background: '#e3fcef', color: '#00875a', borderRadius: '16px', fontWeight: 600 }}>
-                        ✓ Complete
-                      </span>
-                    )}
-                  </h3>
-                  <TriageChat
-                    onComplete={(result: TriageResult) => {
-                      setTriageResultData(result);
-                      setTriageCompleted(true);
-                      const mappedSeverity = result.severity === 'MODERATE' ? 'MEDIUM' : result.severity;
-                      const td = {
-                        chiefComplaint: result.chiefComplaint,
-                        severity: mappedSeverity as 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW',
-                        isBreathing: result.isBreathing,
-                        isConscious: result.isConscious,
-                        hasChestPain: result.hasChestPain,
-                        hasSevereBleeding: result.hasSevereBleeding,
-                      };
-                      setTriageData(td);
-                    }}
-                  />
-                </div>
+                <TriageChat
+                  onFastTrack={handleFastTrack}
+                  onComplete={handleTriageComplete}
+                  onTrack={handleTrackFromChat}
+                  onLocation={(loc) => {
+                    setPickupCoords({ lat: loc.lat, lng: loc.lng });
+                    setPickupLocation((prev) => prev || `${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`);
+                    reverseGeocode(loc.lat, loc.lng, setPickupLocation);
+                  }}
+                />
               )}
 
               <div className="form-actions">
-                <button onClick={() => setShowBookingForm(false)} className="cancel-btn">
-                  Cancel
-                </button>
-                <button 
-                  onClick={() => handleCreateBooking()} 
-                  className="submit-btn"
-                  disabled={bookingType === 'EMERGENCY' ? (!triageCompleted) : (!pickupLocation && !pickupCoords) || !dropoffLocation || !scheduledTime}
+                <button
+                  onClick={() => { setShowBookingForm(false); setFastTrackDispatched(false); fastTrackBookingIdRef.current = null; }}
+                  className="cancel-btn"
                 >
-                  {bookingType === 'EMERGENCY' ? '🚑 Request Emergency Ambulance' : '📅 Schedule Transport'}
+                  {fastTrackDispatched ? 'Close' : 'Cancel'}
+                </button>
+                <button
+                  onClick={() => handleCreateBooking()}
+                  className="submit-btn"
+                  style={fastTrackDispatched ? { background: '#00875a' } : undefined}
+                  disabled={bookingType === 'EMERGENCY' ? (!triageCompleted && !fastTrackDispatched) : (!pickupLocation && !pickupCoords) || !dropoffLocation || !scheduledTime}
+                >
+                  {bookingType === 'EMERGENCY'
+                    ? (fastTrackDispatched ? '✓ Ambulance Dispatched — Done' : '🚑 Request Emergency Ambulance')
+                    : '📅 Schedule Transport'}
                 </button>
               </div>
             </div>
@@ -2011,20 +2171,23 @@ function Dashboard() {
 
       {/* Real-time Tracking Modal */}
       {trackingBooking && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0, 0, 0, 0.8)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9998,
-          padding: '20px'
-        }}>
-          <div style={{
+        <div
+          onClick={() => setTrackingBooking(null)}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0, 0, 0, 0.8)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9998,
+            padding: '20px'
+          }}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{
             background: 'white',
             borderRadius: '16px',
             maxWidth: '900px',
@@ -2072,8 +2235,11 @@ function Dashboard() {
               </button>
             </div>
 
-            <div style={{ 
-              padding: '20px 24px', 
+            {/* Scrollable body so the map + driver chat are always reachable
+                and the modal never clips its content. */}
+            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
+            <div style={{
+              padding: '20px 24px',
               background: '#f8f9fa',
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
@@ -2129,9 +2295,22 @@ function Dashboard() {
                   </div>
                 </div>
               )}
+
+              {/* Chat with the assigned driver (shown once a dispatch exists). */}
+              {trackingBooking.dispatch?.ambulance && (
+                <div style={{ gridColumn: '1 / -1' }}>
+                  <DriverChat
+                    bookingId={trackingBooking.id}
+                    selfRole="USER"
+                    title="Chat with your driver"
+                    peerLabel="Driver"
+                    locked={['COMPLETED', 'CANCELLED'].includes(trackingBooking.status)}
+                  />
+                </div>
+              )}
             </div>
 
-            <div style={{ flex: 1, position: 'relative', minHeight: '400px' }}>
+            <div style={{ position: 'relative', height: '380px', flexShrink: 0 }}>
               <LiveRouteMap
                 ambulanceLat={trackingMetrics?.ambulanceLat}
                 ambulanceLng={trackingMetrics?.ambulanceLng}
@@ -2158,6 +2337,16 @@ function Dashboard() {
                   <span>Live Route</span>
                 </div>
               </div>
+            </div>
+            </div>{/* end scrollable body */}
+
+            <div style={{ padding: '12px 24px', borderTop: '1px solid #e0e0e0', background: '#fff', display: 'flex', justifyContent: 'flex-end', flexShrink: 0 }}>
+              <button
+                onClick={() => setTrackingBooking(null)}
+                style={{ padding: '10px 22px', background: '#0066cc', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 600, fontSize: '14px', cursor: 'pointer' }}
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>

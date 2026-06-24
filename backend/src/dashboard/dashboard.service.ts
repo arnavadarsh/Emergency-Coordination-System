@@ -145,15 +145,40 @@ export class DashboardService {
       new Date(b.completedAt) >= today
     ).length;
 
-    // Get dispatches
-    const dispatches = await this.dispatchRepository.find({
+    // Get dispatches (without triage join — triage_reports table may not exist in all deployments)
+    const allDispatches = await this.dispatchRepository.find({
       relations: ['booking', 'ambulance'],
     });
 
-    const incomingAmbulances = dispatches.filter(d => 
+    const incomingAmbulances = allDispatches.filter(d => 
       d.booking && 
       [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
     ).length;
+
+    // Build pre-arrival alerts from active dispatches targeting this hospital
+    const targetHospitalId = hospital?.id;
+    const preArrivalAlerts = allDispatches
+      .filter(d =>
+        d.hospitalId === targetHospitalId &&
+        d.booking &&
+        [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
+      )
+      .map(d => ({
+        dispatchId: d.id,
+        bookingId: d.bookingId,
+        ambulanceId: d.ambulanceId,
+        ambulanceVehicleNumber: d.ambulance?.vehicleNumber ?? 'N/A',
+        ambulanceLocation: {
+          latitude: d.ambulance?.currentLatitude ?? null,
+          longitude: d.ambulance?.currentLongitude ?? null,
+        },
+        patientSeverity: d.booking?.severity ?? 'MEDIUM',
+        emergencyType: null,
+        triage: null,
+        etaMinutes: d.estimatedPickupTime ?? null,
+        status: d.status,
+        alertedAt: d.dispatchedAt?.toISOString() ?? d.createdAt?.toISOString() ?? new Date().toISOString(),
+      }));
 
     return {
       hospital: hospital ? {
@@ -180,6 +205,7 @@ export class DashboardService {
         pickupAddress: b.pickupAddress,
         createdAt: b.createdAt,
       })),
+      preArrivalAlerts,
     };
   }
 

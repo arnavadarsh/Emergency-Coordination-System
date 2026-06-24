@@ -1,4 +1,10 @@
 import { Injectable } from '@nestjs/common';
+import {
+  TriageScoreDto,
+  ConsciousnessLevel,
+  AccidentSeverityLevel,
+} from './dto/triage-score.dto';
+import { TRIAGE_SCORING_CONFIG } from './triage-scoring.config';
 
 /**
  * Triage Service
@@ -33,6 +39,39 @@ export interface TriageAssessment {
   hasSevereBleeding: boolean;
   painLevel: number;
   isPregnant: boolean;
+}
+
+// ── Vitals Scoring return types ──────────────────────────────────────────────
+
+/** Priority output of the vitals-based scoring engine */
+export type TriagePriorityLevel = 'CRITICAL' | 'HIGH' | 'MODERATE' | 'LOW';
+
+/** Per-category point breakdown for auditability */
+export interface ScoreBreakdown {
+  oxygenScore: number;
+  heartRateScore: number;
+  bloodPressureScore: number;
+  consciousnessScore: number;
+  accidentScore: number;
+  symptomScore: number;
+}
+
+/** Full response from scoreVitals() */
+export interface TriageScoreResult {
+  /** Composite numeric score (0–110+) */
+  severityScore: number;
+  /** Derived clinical priority level */
+  priorityLevel: TriagePriorityLevel;
+  /** Plain-English clinical risk warnings */
+  riskFlags: string[];
+  /** Suggested ambulance class */
+  recommendedAmbulanceType: 'ICU' | 'ALS' | 'BLS';
+  /** Per-factor scoring explanation */
+  reasoning: string[];
+  /** Point contribution per vitals category */
+  scoringBreakdown: ScoreBreakdown;
+  /** ISO-8601 timestamp of assessment */
+  assessedAt: string;
 }
 
 @Injectable()
@@ -239,6 +278,237 @@ export class TriageService {
     }
 
     return { type, requiredUnits: [...new Set(units)], reason };
+  }
+
+  // ── Vitals-Based Scoring Engine ─────────────────────────────────────────
+
+  /**
+   * POST /triage/score
+   *
+   * Accepts structured vital signs and symptom data, runs a configurable
+   * numeric scoring algorithm, and returns:
+   *   - severityScore       : 0–110+ composite score
+   *   - priorityLevel       : CRITICAL | HIGH | MODERATE | LOW
+   *   - riskFlags           : plain-English warning strings
+   *   - recommendedAmbulanceType : ICU | ALS | BLS
+   *   - reasoning           : explanation per scoring factor
+   *   - scoringBreakdown    : per-category points for transparency
+   */
+  scoreVitals(dto: TriageScoreDto): TriageScoreResult {
+    const oxygenScore       = this.scoreOxygen(dto.oxygenLevel);
+    const heartRateScore    = this.scoreHeartRate(dto.heartRate);
+    const bloodPressureScore = this.scoreBloodPressure(dto.bloodPressureSystolic);
+    const consciousnessScore = this.scoreConsciousness(dto.consciousnessLevel);
+    const accidentScore     = this.scoreAccident(dto.accidentSeverity);
+    const symptomScore      = this.scoreSymptoms(dto.symptoms);
+
+    const severityScore =
+      oxygenScore + heartRateScore + bloodPressureScore +
+      consciousnessScore + accidentScore + symptomScore;
+
+    const priorityLevel = this.derivePriority(severityScore);
+    const riskFlags     = this.buildRiskFlags(dto);
+    const reasoning     = this.buildVitalsReasoning(dto, {
+      oxygenScore,
+      heartRateScore,
+      bloodPressureScore,
+      consciousnessScore,
+      accidentScore,
+      symptomScore,
+    });
+    const recommendedAmbulanceType = this.suggestAmbulance(severityScore, dto);
+
+    return {
+      severityScore,
+      priorityLevel,
+      riskFlags,
+      recommendedAmbulanceType,
+      reasoning,
+      scoringBreakdown: {
+        oxygenScore,
+        heartRateScore,
+        bloodPressureScore,
+        consciousnessScore,
+        accidentScore,
+        symptomScore,
+      },
+      assessedAt: new Date().toISOString(),
+    };
+  }
+
+  // ── Private Scoring Helpers ──────────────────────────────────────────────
+
+  private scoreOxygen(spo2: number): number {
+    const { dangerousLow, low, borderline } = TRIAGE_SCORING_CONFIG.vitals.oxygenLevel;
+    const max = TRIAGE_SCORING_CONFIG.maxPoints.oxygenLevel;
+    if (spo2 < dangerousLow) return max;              // ≤84 %  → 30 pts
+    if (spo2 < low)          return Math.round(max * 0.73); // 85–91% → 22 pts
+    if (spo2 < borderline)   return Math.round(max * 0.40); // 92–94% → 12 pts
+    return 0;                                          // ≥95 %  → 0 pts
+  }
+
+  private scoreHeartRate(hr: number): number {
+    const { dangerouslyLow, low, high, dangerouslyHigh } =
+      TRIAGE_SCORING_CONFIG.vitals.heartRate;
+    const max = TRIAGE_SCORING_CONFIG.maxPoints.heartRate;
+    if (hr < dangerouslyLow || hr > dangerouslyHigh) return max;         // 20 pts
+    if (hr < low || hr > high)                        return Math.round(max * 0.60); // 12 pts
+    return 0;
+  }
+
+  private scoreBloodPressure(systolic: number): number {
+    const { dangerouslyLow, low, high, crisis } =
+      TRIAGE_SCORING_CONFIG.vitals.bloodPressure.systolic;
+    const max = TRIAGE_SCORING_CONFIG.maxPoints.bloodPressure;
+    if (systolic < dangerouslyLow) return max;                    // <80  → 20 pts
+    if (systolic < low)            return Math.round(max * 0.75); // 80–89 → 15 pts
+    if (systolic >= crisis)        return Math.round(max * 0.90); // ≥180 → 18 pts
+    if (systolic >= high)          return Math.round(max * 0.50); // 160–179 → 10 pts
+    return 0;
+  }
+
+  private scoreConsciousness(level: ConsciousnessLevel): number {
+    const max = TRIAGE_SCORING_CONFIG.maxPoints.consciousness;
+    const map: Record<ConsciousnessLevel, number> = {
+      [ConsciousnessLevel.UNRESPONSIVE]: max,               // 25 pts
+      [ConsciousnessLevel.PAIN]:         Math.round(max * 0.72), // 18 pts
+      [ConsciousnessLevel.VERBAL]:       Math.round(max * 0.40), // 10 pts
+      [ConsciousnessLevel.ALERT]:        0,
+    };
+    return map[level] ?? 0;
+  }
+
+  private scoreAccident(severity: AccidentSeverityLevel): number {
+    const max = TRIAGE_SCORING_CONFIG.maxPoints.accidentSeverity;
+    const map: Record<AccidentSeverityLevel, number> = {
+      [AccidentSeverityLevel.CRITICAL]: max,                    // 15 pts
+      [AccidentSeverityLevel.SEVERE]:   Math.round(max * 0.80), // 12 pts
+      [AccidentSeverityLevel.MODERATE]: Math.round(max * 0.47), //  7 pts
+      [AccidentSeverityLevel.MINOR]:    Math.round(max * 0.13), //  2 pts
+      [AccidentSeverityLevel.NONE]:     0,
+    };
+    return map[severity] ?? 0;
+  }
+
+  private scoreSymptoms(symptoms: string[]): number {
+    const { criticalKeywords, pointsPerMatch, maxScore } =
+      TRIAGE_SCORING_CONFIG.symptomKeywords;
+    const lowered = symptoms.map((s) => s.toLowerCase());
+    let matched = 0;
+    for (const keyword of criticalKeywords) {
+      if (lowered.some((s) => s.includes(keyword))) {
+        matched++;
+      }
+    }
+    return Math.min(matched * pointsPerMatch, maxScore);
+  }
+
+  private derivePriority(score: number): TriagePriorityLevel {
+    const { CRITICAL, HIGH, MODERATE } = TRIAGE_SCORING_CONFIG.priorityThresholds;
+    if (score >= CRITICAL) return 'CRITICAL';
+    if (score >= HIGH)     return 'HIGH';
+    if (score >= MODERATE) return 'MODERATE';
+    return 'LOW';
+  }
+
+  private buildRiskFlags(dto: TriageScoreDto): string[] {
+    const flags: string[] = [];
+    const { oxygenLevel, heartRate, bloodPressure } = TRIAGE_SCORING_CONFIG.vitals;
+
+    if (dto.oxygenLevel < oxygenLevel.dangerousLow) {
+      flags.push(`Critical hypoxemia – SpO₂ ${dto.oxygenLevel}% (severely life-threatening)`);
+    } else if (dto.oxygenLevel < oxygenLevel.low) {
+      flags.push(`Hypoxemia detected – SpO₂ ${dto.oxygenLevel}%`);
+    }
+
+    if (dto.heartRate > heartRate.dangerouslyHigh) {
+      flags.push(`Severe tachycardia – HR ${dto.heartRate} bpm`);
+    } else if (dto.heartRate > heartRate.high) {
+      flags.push(`Tachycardia – HR ${dto.heartRate} bpm`);
+    }
+
+    if (dto.heartRate < heartRate.dangerouslyLow) {
+      flags.push(`Severe bradycardia – HR ${dto.heartRate} bpm`);
+    } else if (dto.heartRate < heartRate.low) {
+      flags.push(`Bradycardia – HR ${dto.heartRate} bpm`);
+    }
+
+    if (dto.bloodPressureSystolic < bloodPressure.systolic.dangerouslyLow) {
+      flags.push(`Severe hypotension – BP ${dto.bloodPressureSystolic}/${dto.bloodPressureDiastolic} mmHg (possible shock)`);
+    } else if (dto.bloodPressureSystolic < bloodPressure.systolic.low) {
+      flags.push(`Hypotension – BP ${dto.bloodPressureSystolic}/${dto.bloodPressureDiastolic} mmHg`);
+    }
+
+    if (dto.bloodPressureSystolic >= bloodPressure.systolic.crisis) {
+      flags.push(`Hypertensive crisis – BP ${dto.bloodPressureSystolic}/${dto.bloodPressureDiastolic} mmHg`);
+    } else if (dto.bloodPressureSystolic >= bloodPressure.systolic.high) {
+      flags.push(`Elevated blood pressure – BP ${dto.bloodPressureSystolic}/${dto.bloodPressureDiastolic} mmHg`);
+    }
+
+    if (dto.consciousnessLevel === ConsciousnessLevel.UNRESPONSIVE) {
+      flags.push('Patient unresponsive – immediate airway and neurological intervention required');
+    } else if (dto.consciousnessLevel === ConsciousnessLevel.PAIN) {
+      flags.push('Patient responds only to pain stimuli – reduced consciousness level');
+    }
+
+    if (
+      dto.accidentSeverity === AccidentSeverityLevel.CRITICAL ||
+      dto.accidentSeverity === AccidentSeverityLevel.SEVERE
+    ) {
+      flags.push(`Major trauma reported – accident severity: ${dto.accidentSeverity}`);
+    }
+
+    return flags;
+  }
+
+  private buildVitalsReasoning(
+    dto: TriageScoreDto,
+    scores: ScoreBreakdown,
+  ): string[] {
+    const reasons: string[] = [];
+
+    reasons.push(`SpO₂ ${dto.oxygenLevel}% → oxygen score: ${scores.oxygenScore} pts`);
+    reasons.push(`Heart rate ${dto.heartRate} bpm → HR score: ${scores.heartRateScore} pts`);
+    reasons.push(`Blood pressure ${dto.bloodPressureSystolic}/${dto.bloodPressureDiastolic} mmHg → BP score: ${scores.bloodPressureScore} pts`);
+    reasons.push(`Consciousness (${dto.consciousnessLevel}) → consciousness score: ${scores.consciousnessScore} pts`);
+    reasons.push(`Accident severity (${dto.accidentSeverity}) → accident score: ${scores.accidentScore} pts`);
+
+    if (scores.symptomScore > 0) {
+      reasons.push(`${scores.symptomScore} pts from critical symptom keyword matches: ${dto.symptoms.join(', ')}`);
+    }
+
+    return reasons;
+  }
+
+  private suggestAmbulance(
+    score: number,
+    dto: TriageScoreDto,
+  ): 'ICU' | 'ALS' | 'BLS' {
+    const isUnresponsive = dto.consciousnessLevel === ConsciousnessLevel.UNRESPONSIVE;
+    const criticalO2 = dto.oxygenLevel < TRIAGE_SCORING_CONFIG.vitals.oxygenLevel.dangerousLow;
+    const cardiacKeywords = ['cardiac arrest', 'heart attack', 'chest pain'];
+    const strokeKeywords  = ['stroke'];
+    const lowered = dto.symptoms.map((s) => s.toLowerCase());
+    const hasCardiacStroke = [...cardiacKeywords, ...strokeKeywords].some(
+      (kw) => lowered.some((s) => s.includes(kw)),
+    );
+
+    if (
+      score >= TRIAGE_SCORING_CONFIG.priorityThresholds.CRITICAL ||
+      isUnresponsive ||
+      criticalO2
+    ) {
+      return 'ICU';
+    }
+
+    if (
+      score >= TRIAGE_SCORING_CONFIG.priorityThresholds.HIGH ||
+      hasCardiacStroke
+    ) {
+      return 'ALS';
+    }
+
+    return 'BLS';
   }
 
   private buildReasoning(answers: Record<string, string>, emergencyType: EmergencyType): string[] {

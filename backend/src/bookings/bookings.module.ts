@@ -10,12 +10,14 @@ import { TriageReport } from '../triage/entities/triage.entity';
 import { User } from '../users/entities/user.entity';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { TriageModule } from '../triage/triage.module';
+import { HospitalsModule } from '../hospitals/hospitals.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Booking, Dispatch, Ambulance, Hospital, TriageReport, User]),
     RealtimeModule,
     forwardRef(() => TriageModule),
+    HospitalsModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],

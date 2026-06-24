@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -12,14 +12,70 @@ import { BookingStatus, SeverityLevel, UserRole, AmbulanceStatus } from '../comm
 import { FindBookingsDto } from './dto/find-bookings.dto';
 import { CreateEmergencyBookingDto } from './dto/create-emergency-booking.dto';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { TriageService } from '../triage/triage.service';
+import { HospitalRankingService } from '../hospitals/hospital-ranking.service';
 
 /**
  * Bookings Service
  * Booking management with CRUD operations and auto-dispatch
  */
 @Injectable()
-export class BookingsService {
+export class BookingsService implements OnModuleInit {
   private readonly logger = new Logger(BookingsService.name);
+
+  /**
+   * On boot, repair dispatch state: free ambulances that aren't on an active
+   * trip, and ensure every active booking actually has a dispatch (so a
+   * previously failed/aborted auto-dispatch doesn't leave a booking with no
+   * ambulance). Safe and idempotent — only touches active, undispatched
+   * bookings. Deferred so the realtime gateway is ready before any emits.
+   */
+  onModuleInit(): void {
+    setTimeout(() => {
+      this.selfHealDispatches().catch((err) =>
+        this.logger.error(`[selfHeal] failed: ${err?.message || err}`),
+      );
+    }, 4000);
+  }
+
+  private async selfHealDispatches(): Promise<void> {
+    const ACTIVE = [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS];
+    const activeBookings = await this.bookingRepository.find({
+      where: ACTIVE.map((status) => ({ status })),
+    });
+
+    const dispatches = await this.dispatchRepository.find();
+    const dispatchedBookingIds = new Set(dispatches.map((d) => d.bookingId));
+    const busyAmbulanceIds = new Set(
+      dispatches
+        .filter((d) => !['COMPLETED', 'CANCELLED'].includes(d.status))
+        .map((d) => d.ambulanceId)
+        .filter(Boolean),
+    );
+
+    // Reconcile ambulance availability with live dispatch state.
+    const allAmbulances = await this.ambulanceRepository.find();
+    for (const amb of allAmbulances) {
+      const desired = busyAmbulanceIds.has(amb.id)
+        ? AmbulanceStatus.BUSY
+        : AmbulanceStatus.AVAILABLE;
+      if (amb.status !== desired) {
+        amb.status = desired;
+        await this.ambulanceRepository.save(amb);
+      }
+    }
+
+    // Dispatch any active booking that somehow has no dispatch yet.
+    const undispatched = activeBookings.filter((b) => !dispatchedBookingIds.has(b.id));
+    if (undispatched.length) {
+      this.logger.log(`[selfHeal] re-dispatching ${undispatched.length} active booking(s) with no ambulance`);
+      for (const booking of undispatched) {
+        await this.autoDispatch(booking).catch((err) =>
+          this.logger.error(`[selfHeal] dispatch failed for ${booking.id}: ${err?.message || err}`),
+        );
+      }
+    }
+  }
 
   constructor(
     @InjectRepository(Booking)
@@ -35,6 +91,8 @@ export class BookingsService {
     private readonly dataSource: DataSource,
     private readonly realtimeGateway: RealtimeGateway,
     private readonly eventEmitter: EventEmitter2,
+    private readonly triageService: TriageService,
+    private readonly hospitalRankingService: HospitalRankingService,
   ) {}
 
   async createEmergencyBooking(createBookingDto: CreateEmergencyBookingDto): Promise<{ bookingId: string; status: BookingStatus }> {
@@ -50,30 +108,67 @@ export class BookingsService {
         throw new NotFoundException('User not found');
       }
 
+      // ── Derive severity from triage answers ──────────────────────────────
+      // Build an answers map compatible with TriageService.assessEmergency()
+      const triageAnswers: Record<string, string> = {
+        emergency_type: emergencyType || '',
+        breathing: String(answers.breathing) === 'true' ? 'Yes' : 'No',
+        bleeding:  String(answers.bleeding) === 'true' ? 'Yes' : 'No',
+        conscious: String(answers.conscious) === 'true' ? 'Yes' : 'No',
+        pain_level: String(answers.painLevel ?? 0),
+        pregnant_check: answers.pregnancy ? 'Yes' : 'No',
+      };
+
+      let derivedSeverity: SeverityLevel = SeverityLevel.MEDIUM;
+      let derivedEmergencyType: EmergencyType = emergencyType as EmergencyType;
+      try {
+        const assessment = await this.triageService.assessEmergency(triageAnswers);
+        // Map TriageService severity string → SeverityLevel enum
+        const severityMap: Record<string, SeverityLevel> = {
+          CRITICAL: SeverityLevel.CRITICAL,
+          HIGH:     SeverityLevel.HIGH,
+          MODERATE: SeverityLevel.MEDIUM,
+          MEDIUM:   SeverityLevel.MEDIUM,
+          LOW:      SeverityLevel.LOW,
+        };
+        derivedSeverity = severityMap[assessment.severity.toUpperCase()] ?? SeverityLevel.MEDIUM;
+        this.logger.log(`[createEmergencyBooking] Derived severity=${derivedSeverity} from triage answers`);
+      } catch (triageErr) {
+        this.logger.warn(`[createEmergencyBooking] TriageService.assessEmergency failed, using MEDIUM: ${triageErr.message}`);
+      }
+
+      // ── Build and save TriageReport ──────────────────────────────────────
       const triageReport = new TriageReport();
-      triageReport.emergencyType = emergencyType as EmergencyType;
-      triageReport.breathing = answers.breathing === 'true';
-      triageReport.bleeding = answers.bleeding === 'true';
-      triageReport.conscious = answers.conscious === 'true';
-      triageReport.painLevel = answers.painLevel;
+      triageReport.emergencyType = derivedEmergencyType;
+      triageReport.breathing = String(answers.breathing) === 'true';
+      triageReport.bleeding  = String(answers.bleeding) === 'true';
+      triageReport.conscious = String(answers.conscious) === 'true';
+      triageReport.painLevel = answers.painLevel ?? 0;
       triageReport.pregnancy = answers.pregnancy || false;
 
       const savedTriageReport = await queryRunner.manager.save(triageReport);
 
+      // ── Build and save Booking ───────────────────────────────────────────
       const booking = new Booking();
-      booking.userId = userId;
-      booking.pickupLatitude = location.lat;
-      booking.pickupLongitude = location.lng;
-      booking.status = BookingStatus.PENDING;
-      booking.triageReport = savedTriageReport;
+      booking.userId           = userId;
+      booking.pickupLatitude   = location.lat;
+      booking.pickupLongitude  = location.lng;
+      booking.status           = BookingStatus.PENDING;
+      booking.severity         = derivedSeverity;     // ← was missing before
+      booking.triageReport     = savedTriageReport;
 
       const savedBooking = await queryRunner.manager.save(booking);
 
       await queryRunner.commitTransaction();
 
-      this.logger.log(`New emergency booking created: ${savedBooking.id}`);
+      this.logger.log(`New emergency booking created: ${savedBooking.id} severity=${derivedSeverity}`);
       this.realtimeGateway.server.emit('booking_created', savedBooking);
       this.eventEmitter.emit('booking.created', savedBooking.id);
+
+      // Pass the in-memory triageReport so autoDispatch doesn't need a DB re-fetch
+      this.autoDispatch(savedBooking, savedTriageReport).catch(err =>
+        this.logger.error(`[autoDispatch] Failed for emergency booking ${savedBooking.id}`, err.stack),
+      );
 
       return {
         bookingId: savedBooking.id,
@@ -157,19 +252,31 @@ export class BookingsService {
   /**
    * Auto-dispatch nearest available ambulance to booking
    */
-  private async autoDispatch(booking: Booking): Promise<void> {
+  private async autoDispatch(booking: Booking, preloadedTriage?: TriageReport | null): Promise<void> {
+    this.logger.log(`[autoDispatch] START bookingId=${booking.id} pickup=(${booking.pickupLatitude},${booking.pickupLongitude}) preloadedTriage=${preloadedTriage ? 'YES' : 'NO'}`);
+
     // Find all available ambulances with location
-    const availableAmbulances = await this.ambulanceRepository.find({
+    let candidates = await this.ambulanceRepository.find({
       where: { status: AmbulanceStatus.AVAILABLE },
     });
+    this.logger.log(`[autoDispatch] Available ambulances: ${candidates.length}`);
 
-    if (availableAmbulances.length === 0) {
-      console.log('No available ambulances for booking:', booking.id);
-      return;
+    if (candidates.length === 0) {
+      // Fleet looks exhausted (common in demos where trips never get marked
+      // complete, so ambulances stay BUSY forever). Rather than leaving the
+      // booking with no ambulance, fall back to the whole fleet.
+      candidates = await this.ambulanceRepository.find();
+      this.logger.warn(
+        `[autoDispatch] No AVAILABLE ambulances — falling back to full fleet (${candidates.length}).`,
+      );
+      if (candidates.length === 0) {
+        this.logger.warn(`[autoDispatch] No ambulances exist — aborting dispatch for booking ${booking.id}`);
+        return;
+      }
     }
 
     // Find nearest ambulance using Haversine formula
-    let nearestAmbulance = availableAmbulances[0];
+    let nearestAmbulance = candidates[0];
     let minDistance = this.calculateDistance(
       booking.pickupLatitude,
       booking.pickupLongitude,
@@ -177,7 +284,7 @@ export class BookingsService {
       nearestAmbulance.currentLongitude || booking.pickupLongitude,
     );
 
-    for (const ambulance of availableAmbulances) {
+    for (const ambulance of candidates) {
       if (ambulance.currentLatitude && ambulance.currentLongitude) {
         const distance = this.calculateDistance(
           booking.pickupLatitude,
@@ -191,31 +298,35 @@ export class BookingsService {
         }
       }
     }
+    this.logger.log(`[autoDispatch] Nearest ambulance: ${nearestAmbulance.vehicleNumber} (${nearestAmbulance.id}), distance=${minDistance.toFixed(2)}km`);
 
-    // Find nearest active hospital with available beds.
-    const hospitals = await this.hospitalRepository.find();
+    // Load all hospitals with capabilities in a single query (avoids N+1 for ICU/load scoring)
+    const hospitals = await this.hospitalRepository.find({
+      relations: ['capabilities'],
+    });
+    this.logger.log(`[autoDispatch] Total hospitals in DB: ${hospitals.length}`);
 
-    let selectedHospital: Hospital | null = null;
-    let minHospitalDistance = Number.MAX_VALUE;
+    // Derive emergency type from triage (available without an extra DB call)
+    const emergencyTypeForRanking =
+      preloadedTriage?.emergencyType ?? booking.triageReport?.emergencyType ?? null;
 
-    for (const hospital of hospitals) {
-      if ((hospital.availableBeds || 0) <= 0) continue;
-      const distance = this.calculateDistance(
-        booking.pickupLatitude,
-        booking.pickupLongitude,
-        Number(hospital.latitude),
-        Number(hospital.longitude),
-      );
-      if (distance < minHospitalDistance) {
-        minHospitalDistance = distance;
-        selectedHospital = hospital;
-      }
-    }
+    // Rank hospitals using weighted scoring (distance, ICU, beds, specialization, load)
+    const ranking = this.hospitalRankingService.selectBest(hospitals, {
+      pickupLatitude: booking.pickupLatitude,
+      pickupLongitude: booking.pickupLongitude,
+      severity: booking.severity ?? undefined,
+      emergencyType: emergencyTypeForRanking,
+    });
+
+    const selectedHospital: Hospital | null = ranking?.best ?? null;
 
     if (selectedHospital) {
+      this.logger.log(`[autoDispatch] Selected hospital: "${selectedHospital.name}" (${selectedHospital.id})`);
       booking.destinationLatitude = Number(selectedHospital.latitude);
       booking.destinationLongitude = Number(selectedHospital.longitude);
       booking.destinationAddress = selectedHospital.name;
+    } else {
+      this.logger.warn(`[autoDispatch] No hospitals in DB — proceeding without hospital assignment`);
     }
 
     // Create dispatch
@@ -225,9 +336,10 @@ export class BookingsService {
       hospitalId: selectedHospital?.id,
       status: 'DISPATCHED',
       dispatchedAt: new Date(),
-      estimatedPickupTime: Math.round(minDistance * 3), // Rough ETA: 3 min per km
+      estimatedPickupTime: Math.round(minDistance * 3), // 3 min per km
     });
     await this.dispatchRepository.save(dispatch);
+    this.logger.log(`[autoDispatch] Dispatch saved: ${dispatch.id}`);
 
     // Update ambulance status
     nearestAmbulance.status = AmbulanceStatus.BUSY;
@@ -237,7 +349,7 @@ export class BookingsService {
     booking.status = BookingStatus.ASSIGNED;
     await this.bookingRepository.save(booking);
 
-    // Notify connected dashboards (driver/admin/hospital) immediately
+    // Broadcast to all dashboards
     this.realtimeGateway.server.emit('dispatch_assigned', {
       dispatchId: dispatch.id,
       bookingId: booking.id,
@@ -248,7 +360,51 @@ export class BookingsService {
       assignedAt: dispatch.dispatchedAt,
     });
 
-    console.log(`Dispatched ambulance ${nearestAmbulance.vehicleNumber} to booking ${booking.id}`);
+    // Pre-arrival alert: notify the specific hospital room
+    if (selectedHospital) {
+      // Use preloaded triage if available; fall back to a DB fetch
+      let triage: TriageReport | null = preloadedTriage ?? null;
+      if (!triage) {
+        // Best-effort: some deployments don't have the triage_reports table.
+        try {
+          const bookingWithTriage = await this.bookingRepository.findOne({
+            where: { id: booking.id },
+            relations: ['triageReport'],
+          });
+          triage = bookingWithTriage?.triageReport ?? null;
+        } catch (err: any) {
+          this.logger.warn(`[autoDispatch] triage lookup skipped: ${err?.message || err}`);
+          triage = null;
+        }
+      }
+      this.logger.log(`[autoDispatch] Triage: ${triage ? 'YES (type=' + triage.emergencyType + ', breathing=' + triage.breathing + ')' : 'NO (null)'}`);
+      this.logger.log(`[autoDispatch] Emitting pre_arrival_alert to room hospital:${selectedHospital.id} severity=${booking.severity}`);
+
+      this.realtimeGateway.emitToHospital(selectedHospital.id, 'pre_arrival_alert', {
+        dispatchId: dispatch.id,
+        bookingId: booking.id,
+        ambulanceId: nearestAmbulance.id,
+        ambulanceVehicleNumber: nearestAmbulance.vehicleNumber,
+        ambulanceLocation: {
+          latitude: nearestAmbulance.currentLatitude ?? null,
+          longitude: nearestAmbulance.currentLongitude ?? null,
+        },
+        patientSeverity: booking.severity || SeverityLevel.MEDIUM,
+        emergencyType: triage?.emergencyType ?? null,
+        triage: triage ? {
+          breathing: triage.breathing,
+          bleeding: triage.bleeding,
+          conscious: triage.conscious,
+          painLevel: triage.painLevel,
+          pregnancy: triage.pregnancy,
+        } : null,
+        etaMinutes: dispatch.estimatedPickupTime ?? null,
+        status: dispatch.status,
+        alertedAt: new Date().toISOString(),
+      });
+    }
+
+    this.logger.log(`[autoDispatch] DONE — ambulance ${nearestAmbulance.vehicleNumber} → booking ${booking.id}`);
   }
 
   /**
