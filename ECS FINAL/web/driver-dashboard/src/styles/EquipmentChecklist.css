@@ -1,0 +1,187 @@
+.equipment-checklist-card {
+  background: white;
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  margin-bottom: 20px;
+}
+
+.checklist-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.checklist-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #333;
+}
+
+.checklist-stats {
+  display: flex;
+  gap: 8px;
+}
+
+.stat-badge {
+  padding: 6px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.stat-badge.complete {
+  background: #e8f5e9;
+  color: #00875a;
+}
+
+.stat-badge.incomplete {
+  background: #fff3e0;
+  color: #ff8b00;
+}
+
+.warning-banner {
+  background: #ffebee;
+  color: #c62828;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  text-align: center;
+  font-weight: 500;
+}
+
+.equipment-list {
+  max-height: 400px;
+  overflow-y: auto;
+  margin-bottom: 16px;
+}
+
+.equipment-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 2px solid transparent;
+}
+
+.equipment-item:hover {
+  background: #f8f9fa;
+}
+
+.equipment-item.checked {
+  background: #e8f5e9;
+  border-color: #00875a;
+}
+
+.checkbox-wrapper {
+  position: relative;
+  width: 24px;
+  height: 24px;
+}
+
+.equipment-checkbox {
+  position: absolute;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.checkmark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 24px;
+  width: 24px;
+  background-color: white;
+  border: 2px solid #ddd;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: bold;
+  transition: all 0.2s;
+}
+
+.equipment-item.checked .checkmark {
+  background-color: #00875a;
+  border-color: #00875a;
+}
+
+.equipment-info {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.equipment-name {
+  font-weight: 500;
+  color: #333;
+}
+
+.required-badge {
+  padding: 2px 8px;
+  background: #ff8b00;
+  color: white;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.checklist-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid #eee;
+}
+
+.save-btn {
+  padding: 12px 24px;
+  background: #00875a;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.save-btn:hover:not(:disabled) {
+  background: #006644;
+}
+
+.save-btn:disabled {
+  background: #ccc;
+  cursor: not-allowed;
+}
+
+.last-saved {
+  text-align: center;
+  font-size: 12px;
+  color: #666;
+}
+
+/* Scrollbar styling */
+.equipment-list::-webkit-scrollbar {
+  width: 8px;
+}
+
+.equipment-list::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+.equipment-list::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 4px;
+}
+
+.equipment-list::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}

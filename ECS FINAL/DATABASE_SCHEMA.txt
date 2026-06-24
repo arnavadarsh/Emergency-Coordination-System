@@ -1,0 +1,644 @@
+================================================================================
+                    ECS - EMERGENCY CARE SYSTEM DATABASE SCHEMA
+================================================================================
+                           Version: 1.0
+                           Last Updated: January 2026
+================================================================================
+
+
+================================================================================
+                        1. USERS & AUTHENTICATION
+================================================================================
+
+TABLE: users
+--------------------------------------------------------------------------------
+| Column          | Type          | Constraints                                |
+|-----------------|---------------|---------------------------------------------|
+| id              | UUID          | PRIMARY KEY                                 |
+| email           | VARCHAR(255)  | UNIQUE NOT NULL                             |
+| password_hash   | VARCHAR(255)  | NOT NULL                                    |
+| role            | ENUM          | NOT NULL (USER, DRIVER, HOSPITAL, ADMIN)    |
+| is_active       | BOOLEAN       | DEFAULT true                                |
+| email_verified  | BOOLEAN       | DEFAULT false                               |
+| last_login      | TIMESTAMP     | NULLABLE                                    |
+| created_at      | TIMESTAMP     | DEFAULT NOW()                               |
+| updated_at      | TIMESTAMP     | DEFAULT NOW()                               |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_users_email (email)
+  - idx_users_role (role)
+--------------------------------------------------------------------------------
+
+
+TABLE: user_profiles
+--------------------------------------------------------------------------------
+| Column            | Type          | Constraints                              |
+|-------------------|---------------|------------------------------------------|
+| id                | UUID          | PRIMARY KEY                              |
+| user_id           | UUID          | FK → users.id (UNIQUE)                   |
+| first_name        | VARCHAR(100)  | NOT NULL                                 |
+| last_name         | VARCHAR(100)  | NOT NULL                                 |
+| phone_number      | VARCHAR(20)   | NOT NULL                                 |
+| emergency_contact | VARCHAR(20)   | NULLABLE                                 |
+| date_of_birth     | DATE          | NULLABLE                                 |
+| address           | TEXT          | NULLABLE                                 |
+| blood_type        | VARCHAR(5)    | NULLABLE                                 |
+| medical_notes     | TEXT          | NULLABLE                                 |
+| created_at        | TIMESTAMP     | DEFAULT NOW()                            |
+| updated_at        | TIMESTAMP     | DEFAULT NOW()                            |
+--------------------------------------------------------------------------------
+RELATIONSHIP: One user → One profile (1:1)
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        2. HOSPITAL MANAGEMENT
+================================================================================
+
+TABLE: hospitals
+--------------------------------------------------------------------------------
+| Column              | Type          | Constraints                            |
+|---------------------|---------------|----------------------------------------|
+| id                  | UUID          | PRIMARY KEY                            |
+| name                | VARCHAR(255)  | NOT NULL                               |
+| address             | TEXT          | NOT NULL                               |
+| phone_number        | VARCHAR(20)   | NOT NULL                               |
+| email               | VARCHAR(255)  | NULLABLE                               |
+| latitude            | DECIMAL(10,7) | NOT NULL                               |
+| longitude           | DECIMAL(10,7) | NOT NULL                               |
+| service_status      | ENUM          | DEFAULT 'ACCEPTING'                    |
+|                     |               | (ACCEPTING, LIMITED, DIVERT)           |
+| total_beds          | INTEGER       | DEFAULT 0                              |
+| available_beds      | INTEGER       | DEFAULT 0                              |
+| is_verified         | BOOLEAN       | DEFAULT false                          |
+| last_status_update  | TIMESTAMP     | NULLABLE                               |
+| created_at          | TIMESTAMP     | DEFAULT NOW()                          |
+| updated_at          | TIMESTAMP     | DEFAULT NOW()                          |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_hospitals_status (service_status)
+  - idx_hospitals_location (latitude, longitude)
+--------------------------------------------------------------------------------
+
+
+TABLE: hospital_capabilities
+--------------------------------------------------------------------------------
+| Column          | Type          | Constraints                                |
+|-----------------|---------------|---------------------------------------------|
+| id              | UUID          | PRIMARY KEY                                 |
+| hospital_id     | UUID          | FK → hospitals.id                           |
+| capability_type | ENUM          | NOT NULL (ER, ICU, CARDIAC, TRAUMA,         |
+|                 |               |           NEURO, OB)                        |
+| name            | VARCHAR(100)  | NOT NULL                                    |
+| status          | ENUM          | DEFAULT 'ACCEPTING'                         |
+|                 |               | (ACCEPTING, LIMITED, DIVERT)                |
+| capacity        | INTEGER       | DEFAULT 0                                   |
+| current_load    | INTEGER       | DEFAULT 0                                   |
+| created_at      | TIMESTAMP     | DEFAULT NOW()                               |
+| updated_at      | TIMESTAMP     | DEFAULT NOW()                               |
+--------------------------------------------------------------------------------
+CONSTRAINTS:
+  - UNIQUE (hospital_id, capability_type)
+INDEXES:
+  - idx_capabilities_hospital (hospital_id)
+--------------------------------------------------------------------------------
+
+
+TABLE: hospital_status_history
+--------------------------------------------------------------------------------
+| Column      | Type          | Constraints                                    |
+|-------------|---------------|------------------------------------------------|
+| id          | UUID          | PRIMARY KEY                                    |
+| hospital_id | UUID          | FK → hospitals.id                              |
+| old_status  | ENUM          | NOT NULL                                       |
+| new_status  | ENUM          | NOT NULL                                       |
+| changed_by  | UUID          | FK → users.id                                  |
+| reason      | TEXT          | NULLABLE                                       |
+| changed_at  | TIMESTAMP     | DEFAULT NOW()                                  |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_status_history_hospital (hospital_id)
+  - idx_status_history_time (changed_at)
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        3. AMBULANCES & DRIVERS
+================================================================================
+
+TABLE: ambulances
+--------------------------------------------------------------------------------
+| Column                | Type          | Constraints                          |
+|-----------------------|---------------|--------------------------------------|
+| id                    | UUID          | PRIMARY KEY                          |
+| vehicle_number        | VARCHAR(20)   | UNIQUE NOT NULL                      |
+| vehicle_type          | ENUM          | DEFAULT 'BASIC'                      |
+|                       |               | (BASIC, ADVANCED, CRITICAL_CARE)     |
+| status                | ENUM          | DEFAULT 'AVAILABLE'                  |
+|                       |               | (AVAILABLE, BUSY, MAINTENANCE,       |
+|                       |               |  OFFLINE)                            |
+| current_latitude      | DECIMAL(10,7) | NULLABLE                             |
+| current_longitude     | DECIMAL(10,7) | NULLABLE                             |
+| last_location_update  | TIMESTAMP     | NULLABLE                             |
+| equipment_list        | JSONB         | NULLABLE                             |
+| created_at            | TIMESTAMP     | DEFAULT NOW()                        |
+| updated_at            | TIMESTAMP     | DEFAULT NOW()                        |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_ambulances_status (status)
+  - idx_ambulances_location (current_latitude, current_longitude)
+--------------------------------------------------------------------------------
+
+
+TABLE: ambulance_assignments
+--------------------------------------------------------------------------------
+| Column        | Type          | Constraints                                  |
+|---------------|---------------|----------------------------------------------|
+| id            | UUID          | PRIMARY KEY                                  |
+| ambulance_id  | UUID          | FK → ambulances.id                           |
+| driver_id     | UUID          | FK → users.id                                |
+| is_active     | BOOLEAN       | DEFAULT true                                 |
+| assigned_at   | TIMESTAMP     | DEFAULT NOW()                                |
+| unassigned_at | TIMESTAMP     | NULLABLE                                     |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_assignments_driver (driver_id)
+  - idx_assignments_ambulance (ambulance_id)
+--------------------------------------------------------------------------------
+
+
+TABLE: ambulance_location_logs
+--------------------------------------------------------------------------------
+| Column       | Type          | Constraints                                   |
+|--------------|---------------|-----------------------------------------------|
+| id           | UUID          | PRIMARY KEY                                   |
+| ambulance_id | UUID          | FK → ambulances.id                            |
+| latitude     | DECIMAL(10,7) | NOT NULL                                      |
+| longitude    | DECIMAL(10,7) | NOT NULL                                      |
+| speed_kmh    | FLOAT         | NULLABLE                                      |
+| heading      | FLOAT         | NULLABLE                                      |
+| recorded_at  | TIMESTAMP     | DEFAULT NOW()                                 |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_location_logs_ambulance (ambulance_id)
+  - idx_location_logs_time (recorded_at)
+NOTE: Consider PARTITION BY RANGE (recorded_at) for time-series optimization
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        4. BOOKINGS
+================================================================================
+
+TABLE: bookings
+--------------------------------------------------------------------------------
+| Column                | Type          | Constraints                          |
+|-----------------------|---------------|--------------------------------------|
+| id                    | UUID          | PRIMARY KEY                          |
+| user_id               | UUID          | FK → users.id                        |
+| booking_type          | ENUM          | NOT NULL (EMERGENCY, SCHEDULED)      |
+| status                | ENUM          | DEFAULT 'CREATED'                    |
+|                       |               | (CREATED, ASSIGNED, IN_PROGRESS,     |
+|                       |               |  COMPLETED, CANCELLED)               |
+| severity              | ENUM          | NULLABLE                             |
+|                       |               | (LOW, MEDIUM, HIGH, CRITICAL)        |
+| description           | TEXT          | NULLABLE                             |
+| pickup_latitude       | DECIMAL(10,7) | NOT NULL                             |
+| pickup_longitude      | DECIMAL(10,7) | NOT NULL                             |
+| pickup_address        | TEXT          | NULLABLE                             |
+| destination_latitude  | DECIMAL(10,7) | NULLABLE                             |
+| destination_longitude | DECIMAL(10,7) | NULLABLE                             |
+| destination_address   | TEXT          | NULLABLE                             |
+| scheduled_time        | TIMESTAMP     | NULLABLE                             |
+| assigned_at           | TIMESTAMP     | NULLABLE                             |
+| started_at            | TIMESTAMP     | NULLABLE                             |
+| completed_at          | TIMESTAMP     | NULLABLE                             |
+| cancelled_at          | TIMESTAMP     | NULLABLE                             |
+| cancellation_reason   | TEXT          | NULLABLE                             |
+| created_at            | TIMESTAMP     | DEFAULT NOW()                        |
+| updated_at            | TIMESTAMP     | DEFAULT NOW()                        |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_bookings_user (user_id)
+  - idx_bookings_status (status)
+  - idx_bookings_type (booking_type)
+  - idx_bookings_created (created_at)
+--------------------------------------------------------------------------------
+
+
+TABLE: scheduled_requirements
+--------------------------------------------------------------------------------
+| Column              | Type      | Constraints                                |
+|---------------------|-----------|---------------------------------------------|
+| id                  | UUID      | PRIMARY KEY                                 |
+| booking_id          | UUID      | FK → bookings.id (UNIQUE)                   |
+| wheelchair_required | BOOLEAN   | DEFAULT false                               |
+| stretcher_required  | BOOLEAN   | DEFAULT false                               |
+| oxygen_required     | BOOLEAN   | DEFAULT false                               |
+| escort_required     | BOOLEAN   | DEFAULT false                               |
+| special_notes       | TEXT      | NULLABLE                                    |
+| created_at          | TIMESTAMP | DEFAULT NOW()                               |
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        5. EMERGENCY TRIAGE SYSTEM
+================================================================================
+
+TABLE: emergency_triage
+--------------------------------------------------------------------------------
+| Column             | Type      | Constraints                                 |
+|--------------------|-----------|---------------------------------------------|
+| id                 | UUID      | PRIMARY KEY                                 |
+| booking_id         | UUID      | FK → bookings.id (UNIQUE)                   |
+| severity_level     | ENUM      | NOT NULL (LOW, MEDIUM, HIGH, CRITICAL)      |
+| requirement_vector | JSONB     | NOT NULL                                    |
+| ai_explanation     | TEXT      | NULLABLE                                    |
+| confidence_score   | FLOAT     | NULLABLE                                    |
+| created_at         | TIMESTAMP | DEFAULT NOW()                               |
+--------------------------------------------------------------------------------
+EXAMPLE requirement_vector:
+{
+  "needs": ["ER", "ICU", "CARDIAC"],
+  "priority": "HIGH",
+  "keywords": ["chest pain", "difficulty breathing"]
+}
+--------------------------------------------------------------------------------
+
+
+TABLE: triage_questions
+--------------------------------------------------------------------------------
+| Column        | Type         | Constraints                                  |
+|---------------|--------------|----------------------------------------------|
+| id            | UUID         | PRIMARY KEY                                  |
+| question_code | VARCHAR(50)  | UNIQUE NOT NULL                              |
+| question_text | TEXT         | NOT NULL                                     |
+| question_type | ENUM         | NOT NULL (BOOLEAN, SINGLE_CHOICE,            |
+|               |              |           MULTI_CHOICE, TEXT, NUMERIC)       |
+| options       | JSONB        | NULLABLE                                     |
+| weight        | FLOAT        | DEFAULT 1.0                                  |
+| category      | VARCHAR(50)  | NULLABLE                                     |
+| display_order | INTEGER      | DEFAULT 0                                    |
+| is_active     | BOOLEAN      | DEFAULT true                                 |
+--------------------------------------------------------------------------------
+
+
+TABLE: triage_answers
+--------------------------------------------------------------------------------
+| Column        | Type         | Constraints                                  |
+|---------------|--------------|----------------------------------------------|
+| id            | UUID         | PRIMARY KEY                                  |
+| triage_id     | UUID         | FK → emergency_triage.id                     |
+| question_code | VARCHAR(50)  | NOT NULL                                     |
+| answer_value  | TEXT         | NOT NULL                                     |
+| created_at    | TIMESTAMP    | DEFAULT NOW()                                |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_triage_answers_triage (triage_id)
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        6. DISPATCH & ASSIGNMENT
+================================================================================
+
+TABLE: dispatches
+--------------------------------------------------------------------------------
+| Column                  | Type      | Constraints                            |
+|-------------------------|-----------|----------------------------------------|
+| id                      | UUID      | PRIMARY KEY                            |
+| booking_id              | UUID      | FK → bookings.id (UNIQUE)              |
+| ambulance_id            | UUID      | FK → ambulances.id                     |
+| hospital_id             | UUID      | FK → hospitals.id                      |
+| driver_id               | UUID      | FK → users.id                          |
+| status                  | ENUM      | DEFAULT 'DISPATCHED'                   |
+|                         |           | (DISPATCHED, EN_ROUTE_PICKUP,          |
+|                         |           |  AT_PICKUP, EN_ROUTE_HOSPITAL,         |
+|                         |           |  AT_HOSPITAL, COMPLETED, CANCELLED)    |
+| dispatched_at           | TIMESTAMP | DEFAULT NOW()                          |
+| arrived_at_pickup       | TIMESTAMP | NULLABLE                               |
+| departed_pickup         | TIMESTAMP | NULLABLE                               |
+| arrived_at_hospital     | TIMESTAMP | NULLABLE                               |
+| completed_at            | TIMESTAMP | NULLABLE                               |
+| estimated_pickup_time   | INTEGER   | NULLABLE (minutes)                     |
+| estimated_hospital_time | INTEGER   | NULLABLE (minutes)                     |
+| actual_distance_km      | FLOAT     | NULLABLE                               |
+| notes                   | TEXT      | NULLABLE                               |
+| created_at              | TIMESTAMP | DEFAULT NOW()                          |
+| updated_at              | TIMESTAMP | DEFAULT NOW()                          |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_dispatches_booking (booking_id)
+  - idx_dispatches_ambulance (ambulance_id)
+  - idx_dispatches_status (status)
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        7. HOSPITAL RANKING & ROUTING
+================================================================================
+
+TABLE: hospital_ranking_snapshots
+--------------------------------------------------------------------------------
+| Column             | Type      | Constraints                                 |
+|--------------------|-----------|---------------------------------------------|
+| id                 | UUID      | PRIMARY KEY                                 |
+| booking_id         | UUID      | FK → bookings.id                            |
+| hospital_id        | UUID      | FK → hospitals.id                           |
+| rank               | INTEGER   | NOT NULL                                    |
+| distance_km        | FLOAT     | NOT NULL                                    |
+| eta_minutes        | INTEGER   | NOT NULL                                    |
+| capability_match   | FLOAT     | NOT NULL (0.0 - 1.0)                        |
+| availability_score | FLOAT     | NOT NULL (0.0 - 1.0)                        |
+| total_score        | FLOAT     | NOT NULL                                    |
+| selected           | BOOLEAN   | DEFAULT false                               |
+| evaluated_at       | TIMESTAMP | DEFAULT NOW()                               |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_ranking_booking (booking_id)
+  - idx_ranking_hospital (hospital_id)
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        8. REROUTING ENGINE
+================================================================================
+
+TABLE: reroute_events
+--------------------------------------------------------------------------------
+| Column              | Type      | Constraints                                |
+|---------------------|-----------|---------------------------------------------|
+| id                  | UUID      | PRIMARY KEY                                 |
+| dispatch_id         | UUID      | FK → dispatches.id                          |
+| old_hospital_id     | UUID      | FK → hospitals.id                           |
+| new_hospital_id     | UUID      | FK → hospitals.id                           |
+| reason              | ENUM      | NOT NULL (HOSPITAL_DIVERT, TRAFFIC,         |
+|                     |           |           CLOSER, CAPACITY_FULL,            |
+|                     |           |           PATIENT_CONDITION)                |
+| reason_details      | TEXT      | NULLABLE                                    |
+| safety_check_passed | BOOLEAN   | NOT NULL                                    |
+| distance_change_km  | FLOAT     | NULLABLE                                    |
+| eta_change_minutes  | INTEGER   | NULLABLE                                    |
+| approved_by         | UUID      | NULLABLE → users.id                         |
+| triggered_at        | TIMESTAMP | DEFAULT NOW()                               |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_reroute_dispatch (dispatch_id)
+  - idx_reroute_time (triggered_at)
+--------------------------------------------------------------------------------
+
+
+TABLE: reroute_blocks
+--------------------------------------------------------------------------------
+| Column             | Type      | Constraints                                 |
+|--------------------|-----------|---------------------------------------------|
+| id                 | UUID      | PRIMARY KEY                                 |
+| dispatch_id        | UUID      | FK → dispatches.id                          |
+| attempted_hospital | UUID      | FK → hospitals.id                           |
+| block_reason       | ENUM      | NOT NULL (TOO_FAR, PATIENT_CRITICAL,        |
+|                    |           |           NO_CAPABILITY, HOSPITAL_FULL)     |
+| details            | TEXT      | NULLABLE                                    |
+| evaluated_at       | TIMESTAMP | DEFAULT NOW()                               |
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        9. AUDIT & SYSTEM LOGS
+================================================================================
+
+TABLE: audit_logs
+--------------------------------------------------------------------------------
+| Column       | Type         | Constraints                                   |
+|--------------|--------------|-----------------------------------------------|
+| id           | UUID         | PRIMARY KEY                                   |
+| entity_type  | VARCHAR(50)  | NOT NULL                                      |
+| entity_id    | UUID         | NOT NULL                                      |
+| action       | ENUM         | NOT NULL (CREATE, UPDATE, DELETE,             |
+|              |              |           STATUS_CHANGE)                      |
+| changes      | JSONB        | NULLABLE                                      |
+| before_state | JSONB        | NULLABLE                                      |
+| after_state  | JSONB        | NULLABLE                                      |
+| user_id      | UUID         | NULLABLE → users.id                           |
+| ip_address   | VARCHAR(45)  | NULLABLE                                      |
+| user_agent   | TEXT         | NULLABLE                                      |
+| created_at   | TIMESTAMP    | DEFAULT NOW()                                 |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_audit_entity (entity_type, entity_id)
+  - idx_audit_user (user_id)
+  - idx_audit_time (created_at)
+NOTE: Consider PARTITION BY RANGE (created_at) for monthly partitions
+--------------------------------------------------------------------------------
+
+
+TABLE: system_notifications
+--------------------------------------------------------------------------------
+| Column     | Type         | Constraints                                     |
+|------------|--------------|------------------------------------------------|
+| id         | UUID         | PRIMARY KEY                                    |
+| user_id    | UUID         | FK → users.id                                  |
+| type       | ENUM         | NOT NULL (BOOKING_UPDATE, DISPATCH_UPDATE,     |
+|            |              |           SYSTEM_ALERT, REMINDER)              |
+| title      | VARCHAR(255) | NOT NULL                                       |
+| message    | TEXT         | NOT NULL                                       |
+| data       | JSONB        | NULLABLE                                       |
+| is_read    | BOOLEAN      | DEFAULT false                                  |
+| created_at | TIMESTAMP    | DEFAULT NOW()                                  |
+--------------------------------------------------------------------------------
+INDEXES:
+  - idx_notifications_user (user_id)
+  - idx_notifications_unread (user_id, is_read)
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        10. ENUM DEFINITIONS
+================================================================================
+
+ENUM: user_role
+--------------------------------------------------------------------------------
+| Value    | Description                                                    |
+|----------|----------------------------------------------------------------|
+| USER     | End users requesting ambulance services                        |
+| DRIVER   | Ambulance drivers                                              |
+| HOSPITAL | Hospital staff managing status and receiving patients          |
+| ADMIN    | System administrators with full access                         |
+--------------------------------------------------------------------------------
+
+ENUM: hospital_service_status
+--------------------------------------------------------------------------------
+| Value     | Description                                                   |
+|-----------|---------------------------------------------------------------|
+| ACCEPTING | Hospital accepting all patients                               |
+| LIMITED   | Hospital has limited capacity                                 |
+| DIVERT    | Hospital diverting patients to other facilities               |
+--------------------------------------------------------------------------------
+
+ENUM: booking_status
+--------------------------------------------------------------------------------
+| Value       | Description                                                 |
+|-------------|-------------------------------------------------------------|
+| CREATED     | Booking created, awaiting ambulance assignment              |
+| ASSIGNED    | Ambulance has been assigned to the booking                  |
+| IN_PROGRESS | Ambulance en route or patient being transported             |
+| COMPLETED   | Patient successfully delivered to hospital                  |
+| CANCELLED   | Booking was cancelled                                       |
+--------------------------------------------------------------------------------
+
+ENUM: booking_type
+--------------------------------------------------------------------------------
+| Value     | Description                                                   |
+|-----------|---------------------------------------------------------------|
+| EMERGENCY | Immediate dispatch required - life threatening                |
+| SCHEDULED | Pre-planned medical transport                                 |
+--------------------------------------------------------------------------------
+
+ENUM: severity_level
+--------------------------------------------------------------------------------
+| Value    | Description                                                    |
+|----------|----------------------------------------------------------------|
+| LOW      | Non-urgent, can wait for available resources                   |
+| MEDIUM   | Needs medical attention within hours                           |
+| HIGH     | Urgent, needs immediate attention                              |
+| CRITICAL | Life-threatening emergency, highest priority                   |
+--------------------------------------------------------------------------------
+
+ENUM: capability_type
+--------------------------------------------------------------------------------
+| Value   | Description                                                     |
+|---------|----------------------------------------------------------------|
+| ER      | Emergency Room - general emergency services                     |
+| ICU     | Intensive Care Unit - critical patient care                     |
+| CARDIAC | Cardiac Care - heart-related emergencies                        |
+| TRAUMA  | Trauma Center - severe injuries and accidents                   |
+| NEURO   | Neurology - brain and nervous system                            |
+| OB      | Obstetrics/Maternity - pregnancy and childbirth                 |
+--------------------------------------------------------------------------------
+
+ENUM: ambulance_status
+--------------------------------------------------------------------------------
+| Value       | Description                                                 |
+|-------------|-------------------------------------------------------------|
+| AVAILABLE   | Ready for dispatch                                          |
+| BUSY        | Currently on an active assignment                           |
+| MAINTENANCE | Under maintenance, not available                            |
+| OFFLINE     | Not in service                                              |
+--------------------------------------------------------------------------------
+
+ENUM: dispatch_status
+--------------------------------------------------------------------------------
+| Value             | Description                                           |
+|-------------------|-------------------------------------------------------|
+| DISPATCHED        | Driver notified of assignment                         |
+| EN_ROUTE_PICKUP   | Ambulance heading to pickup location                  |
+| AT_PICKUP         | Ambulance arrived at pickup location                  |
+| EN_ROUTE_HOSPITAL | Ambulance heading to hospital with patient            |
+| AT_HOSPITAL       | Ambulance arrived at hospital                         |
+| COMPLETED         | Patient handed over, dispatch complete                |
+| CANCELLED         | Dispatch was cancelled                                |
+--------------------------------------------------------------------------------
+
+ENUM: reroute_reason
+--------------------------------------------------------------------------------
+| Value             | Description                                           |
+|-------------------|-------------------------------------------------------|
+| HOSPITAL_DIVERT   | Original hospital went into divert status             |
+| TRAFFIC           | Traffic conditions make another hospital faster       |
+| CLOSER            | Closer hospital became available                      |
+| CAPACITY_FULL     | Original hospital reached full capacity               |
+| PATIENT_CONDITION | Patient condition changed, needs different capability |
+--------------------------------------------------------------------------------
+
+
+================================================================================
+                        11. ENTITY RELATIONSHIPS
+================================================================================
+
+users
+  ├── user_profiles (1:1)
+  ├── bookings (1:N) - User can have multiple bookings
+  ├── ambulance_assignments (1:N) - Driver can have multiple assignments
+  ├── hospital_status_history (1:N) - Staff can make multiple status changes
+  └── audit_logs (1:N) - User actions are logged
+
+hospitals
+  ├── hospital_capabilities (1:N) - Hospital has multiple capabilities
+  ├── hospital_status_history (1:N) - Track all status changes
+  ├── dispatches (1:N) - Hospital receives multiple dispatches
+  └── hospital_ranking_snapshots (1:N) - Scored for multiple bookings
+
+ambulances
+  ├── ambulance_assignments (1:N) - Can have multiple driver assignments
+  ├── ambulance_location_logs (1:N) - GPS tracking history
+  └── dispatches (1:N) - Can handle multiple dispatches over time
+
+bookings
+  ├── emergency_triage (1:1) - Each emergency booking has one triage
+  ├── scheduled_requirements (1:1) - Scheduled bookings have requirements
+  ├── dispatches (1:1) - Each booking has one active dispatch
+  └── hospital_ranking_snapshots (1:N) - Multiple hospitals scored
+
+dispatches
+  ├── reroute_events (1:N) - Can have multiple reroute attempts
+  └── reroute_blocks (1:N) - Can have multiple blocked reroutes
+
+emergency_triage
+  └── triage_answers (1:N) - Multiple answers per triage
+
+
+================================================================================
+                        12. DATABASE INDEXES SUMMARY
+================================================================================
+
+Performance-Critical Indexes:
+  - users.email (login lookups)
+  - bookings.status + bookings.created_at (active bookings queries)
+  - ambulances.status (available ambulance search)
+  - hospitals.service_status (accepting hospitals)
+  - dispatches.status (active dispatch tracking)
+  - ambulance_location_logs.recorded_at (time-series queries)
+
+Geospatial Considerations:
+  - Consider PostGIS extension for hospitals and ambulances
+  - Spatial indexes on (latitude, longitude) pairs
+  - Enable distance calculations and radius searches
+
+
+================================================================================
+                        13. SAMPLE QUERIES
+================================================================================
+
+-- Find available ambulances near a location
+SELECT a.*, 
+       ST_Distance(
+         ST_MakePoint(a.current_longitude, a.current_latitude),
+         ST_MakePoint(:lng, :lat)
+       ) as distance
+FROM ambulances a
+WHERE a.status = 'AVAILABLE'
+ORDER BY distance
+LIMIT 5;
+
+-- Find accepting hospitals with required capability
+SELECT h.*, hc.capability_type, hc.status
+FROM hospitals h
+JOIN hospital_capabilities hc ON h.id = hc.hospital_id
+WHERE h.service_status = 'ACCEPTING'
+  AND hc.capability_type = :required_capability
+  AND hc.status = 'ACCEPTING';
+
+-- Get active bookings for a user
+SELECT b.*, d.status as dispatch_status, 
+       a.vehicle_number, h.name as hospital_name
+FROM bookings b
+LEFT JOIN dispatches d ON b.id = d.booking_id
+LEFT JOIN ambulances a ON d.ambulance_id = a.id
+LEFT JOIN hospitals h ON d.hospital_id = h.id
+WHERE b.user_id = :user_id
+  AND b.status IN ('CREATED', 'ASSIGNED', 'IN_PROGRESS')
+ORDER BY b.created_at DESC;
+
+
+================================================================================
+                              END OF SCHEMA
+================================================================================
