@@ -20,6 +20,18 @@ export class HospitalsController {
     return this.hospitalsService.findAll();
   }
 
+  @Get('nearby')
+  async findNearby(
+    @Query('latitude') latitude: string,
+    @Query('longitude') longitude: string,
+    @Query('radius') radius?: string,
+  ) {
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+    const radiusKm = radius ? parseFloat(radius) : 10;
+    return this.hospitalsService.findNearby(lat, lng, radiusKm);
+  }
+
   @Get(':id')
   async findOne(@Param('id') id: string) {
     return this.hospitalsService.findById(id);
@@ -65,16 +77,15 @@ export class HospitalsController {
     return this.hospitalsService.updateCapability(id, updateCapabilityDto);
   }
 
-  @Get('nearby')
-  async findNearby(
-    @Query('latitude') latitude: string,
-    @Query('longitude') longitude: string,
-    @Query('radius') radius?: string,
+  @Patch(':id/dispatches/:dispatchId/reject')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.HOSPITAL, UserRole.ADMIN)
+  async rejectIncomingDispatch(
+    @Param('id') id: string,
+    @Param('dispatchId') dispatchId: string,
+    @CurrentUser() user: any,
   ) {
-    const lat = parseFloat(latitude);
-    const lng = parseFloat(longitude);
-    const radiusKm = radius ? parseFloat(radius) : 10;
-    return this.hospitalsService.findNearby(lat, lng, radiusKm);
+    return this.hospitalsService.rejectIncomingDispatch(id, dispatchId, user);
   }
 
   @Get(':id/stats')

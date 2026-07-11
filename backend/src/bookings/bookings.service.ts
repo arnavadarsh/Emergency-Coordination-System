@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -20,62 +20,8 @@ import { HospitalRankingService } from '../hospitals/hospital-ranking.service';
  * Booking management with CRUD operations and auto-dispatch
  */
 @Injectable()
-export class BookingsService implements OnModuleInit {
+export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
-
-  /**
-   * On boot, repair dispatch state: free ambulances that aren't on an active
-   * trip, and ensure every active booking actually has a dispatch (so a
-   * previously failed/aborted auto-dispatch doesn't leave a booking with no
-   * ambulance). Safe and idempotent — only touches active, undispatched
-   * bookings. Deferred so the realtime gateway is ready before any emits.
-   */
-  onModuleInit(): void {
-    setTimeout(() => {
-      this.selfHealDispatches().catch((err) =>
-        this.logger.error(`[selfHeal] failed: ${err?.message || err}`),
-      );
-    }, 4000);
-  }
-
-  private async selfHealDispatches(): Promise<void> {
-    const ACTIVE = [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS];
-    const activeBookings = await this.bookingRepository.find({
-      where: ACTIVE.map((status) => ({ status })),
-    });
-
-    const dispatches = await this.dispatchRepository.find();
-    const dispatchedBookingIds = new Set(dispatches.map((d) => d.bookingId));
-    const busyAmbulanceIds = new Set(
-      dispatches
-        .filter((d) => !['COMPLETED', 'CANCELLED'].includes(d.status))
-        .map((d) => d.ambulanceId)
-        .filter(Boolean),
-    );
-
-    // Reconcile ambulance availability with live dispatch state.
-    const allAmbulances = await this.ambulanceRepository.find();
-    for (const amb of allAmbulances) {
-      const desired = busyAmbulanceIds.has(amb.id)
-        ? AmbulanceStatus.BUSY
-        : AmbulanceStatus.AVAILABLE;
-      if (amb.status !== desired) {
-        amb.status = desired;
-        await this.ambulanceRepository.save(amb);
-      }
-    }
-
-    // Dispatch any active booking that somehow has no dispatch yet.
-    const undispatched = activeBookings.filter((b) => !dispatchedBookingIds.has(b.id));
-    if (undispatched.length) {
-      this.logger.log(`[selfHeal] re-dispatching ${undispatched.length} active booking(s) with no ambulance`);
-      for (const booking of undispatched) {
-        await this.autoDispatch(booking).catch((err) =>
-          this.logger.error(`[selfHeal] dispatch failed for ${booking.id}: ${err?.message || err}`),
-        );
-      }
-    }
-  }
 
   constructor(
     @InjectRepository(Booking)
@@ -94,6 +40,11 @@ export class BookingsService implements OnModuleInit {
     private readonly triageService: TriageService,
     private readonly hospitalRankingService: HospitalRankingService,
   ) {}
+
+  private isHospitalAccepting(status?: string): boolean {
+    const normalized = (status || '').toUpperCase();
+    return normalized === 'ACTIVE' || normalized === 'ACCEPTING';
+  }
 
   async createEmergencyBooking(createBookingDto: CreateEmergencyBookingDto): Promise<{ bookingId: string; status: BookingStatus }> {
     const queryRunner = this.dataSource.createQueryRunner();
@@ -256,27 +207,18 @@ export class BookingsService implements OnModuleInit {
     this.logger.log(`[autoDispatch] START bookingId=${booking.id} pickup=(${booking.pickupLatitude},${booking.pickupLongitude}) preloadedTriage=${preloadedTriage ? 'YES' : 'NO'}`);
 
     // Find all available ambulances with location
-    let candidates = await this.ambulanceRepository.find({
+    const availableAmbulances = await this.ambulanceRepository.find({
       where: { status: AmbulanceStatus.AVAILABLE },
     });
-    this.logger.log(`[autoDispatch] Available ambulances: ${candidates.length}`);
+    this.logger.log(`[autoDispatch] Available ambulances: ${availableAmbulances.length}`);
 
-    if (candidates.length === 0) {
-      // Fleet looks exhausted (common in demos where trips never get marked
-      // complete, so ambulances stay BUSY forever). Rather than leaving the
-      // booking with no ambulance, fall back to the whole fleet.
-      candidates = await this.ambulanceRepository.find();
-      this.logger.warn(
-        `[autoDispatch] No AVAILABLE ambulances — falling back to full fleet (${candidates.length}).`,
-      );
-      if (candidates.length === 0) {
-        this.logger.warn(`[autoDispatch] No ambulances exist — aborting dispatch for booking ${booking.id}`);
-        return;
-      }
+    if (availableAmbulances.length === 0) {
+      this.logger.warn(`[autoDispatch] No available ambulances — aborting dispatch for booking ${booking.id}`);
+      return;
     }
 
     // Find nearest ambulance using Haversine formula
-    let nearestAmbulance = candidates[0];
+    let nearestAmbulance = availableAmbulances[0];
     let minDistance = this.calculateDistance(
       booking.pickupLatitude,
       booking.pickupLongitude,
@@ -284,7 +226,7 @@ export class BookingsService implements OnModuleInit {
       nearestAmbulance.currentLongitude || booking.pickupLongitude,
     );
 
-    for (const ambulance of candidates) {
+    for (const ambulance of availableAmbulances) {
       if (ambulance.currentLatitude && ambulance.currentLongitude) {
         const distance = this.calculateDistance(
           booking.pickupLatitude,
@@ -306,12 +248,18 @@ export class BookingsService implements OnModuleInit {
     });
     this.logger.log(`[autoDispatch] Total hospitals in DB: ${hospitals.length}`);
 
+    const eligibleHospitals = hospitals.filter(hospital =>
+      this.isHospitalAccepting(hospital.status as any) &&
+      (hospital.availableBeds ?? 0) > 0
+    );
+    this.logger.log(`[autoDispatch] Eligible hospitals for assignment: ${eligibleHospitals.length}`);
+
     // Derive emergency type from triage (available without an extra DB call)
     const emergencyTypeForRanking =
       preloadedTriage?.emergencyType ?? booking.triageReport?.emergencyType ?? null;
 
     // Rank hospitals using weighted scoring (distance, ICU, beds, specialization, load)
-    const ranking = this.hospitalRankingService.selectBest(hospitals, {
+    const ranking = this.hospitalRankingService.selectBest(eligibleHospitals, {
       pickupLatitude: booking.pickupLatitude,
       pickupLongitude: booking.pickupLongitude,
       severity: booking.severity ?? undefined,
@@ -365,17 +313,11 @@ export class BookingsService implements OnModuleInit {
       // Use preloaded triage if available; fall back to a DB fetch
       let triage: TriageReport | null = preloadedTriage ?? null;
       if (!triage) {
-        // Best-effort: some deployments don't have the triage_reports table.
-        try {
-          const bookingWithTriage = await this.bookingRepository.findOne({
-            where: { id: booking.id },
-            relations: ['triageReport'],
-          });
-          triage = bookingWithTriage?.triageReport ?? null;
-        } catch (err: any) {
-          this.logger.warn(`[autoDispatch] triage lookup skipped: ${err?.message || err}`);
-          triage = null;
-        }
+        const bookingWithTriage = await this.bookingRepository.findOne({
+          where: { id: booking.id },
+          relations: ['triageReport'],
+        });
+        triage = bookingWithTriage?.triageReport ?? null;
       }
       this.logger.log(`[autoDispatch] Triage: ${triage ? 'YES (type=' + triage.emergencyType + ', breathing=' + triage.breathing + ')' : 'NO (null)'}`);
       this.logger.log(`[autoDispatch] Emitting pre_arrival_alert to room hospital:${selectedHospital.id} severity=${booking.severity}`);

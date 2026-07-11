@@ -4,7 +4,7 @@ import { Toaster } from 'react-hot-toast';
 import Dashboard from './pages/Dashboard';
 import TokenStorage from './utils/tokenStorage';
 
-const UNIFIED_LOGIN_URL = 'http://localhost:3004';
+const UNIFIED_LOGIN_URL = 'http://localhost:3001';
 
 /**
  * Synchronously extract token from URL hash (#token=...) at module load time.

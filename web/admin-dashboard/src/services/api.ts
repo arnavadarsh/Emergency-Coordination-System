@@ -34,8 +34,14 @@ class ApiClient {
       (response) => response,
       (error) => {
         if (error.response?.status === 401) {
+          // Token expired or missing — clear and redirect to login
           TokenStorage.removeToken();
-          window.location.href = 'http://localhost:3004';
+          window.location.href = '/login';
+        } else if (error.response?.status === 403) {
+          // Wrong role — the stored token belongs to a different account type.
+          console.error('[Admin Dashboard] Access denied (403): account does not have ADMIN role. Clearing token.');
+          TokenStorage.removeToken();
+          window.location.href = '/login';
         }
         return Promise.reject(error);
       }

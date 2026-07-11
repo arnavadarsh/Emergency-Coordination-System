@@ -10,12 +10,6 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  // Raise the JSON/body limit so chat image & voice-note attachments
-  // (base64 data URLs) aren't rejected by the 100kb default.
-  const { json, urlencoded } = await import('express');
-  app.use(json({ limit: '20mb' }));
-  app.use(urlencoded({ extended: true, limit: '20mb' }));
-
   // Get configuration service
   const configService = app.get(ConfigService);
   const port = configService.get<number>('app.port', 3000);

@@ -271,7 +271,7 @@ const Landing: React.FC = () => {
     e.preventDefault(); setError(''); setLoading(true);
     try {
       const { accessToken, user } = await ApiClient.login(email, password);
-      const urls: Record<string, string> = { USER: '/dashboard', HOSPITAL: 'http://localhost:3001/dashboard', DRIVER: 'http://localhost:3003/dashboard', ADMIN: 'http://localhost:3002/dashboard' };
+      const urls: Record<string, string> = { USER: '/dashboard', HOSPITAL: 'http://localhost:3004/dashboard', DRIVER: 'http://localhost:3003/dashboard', ADMIN: 'http://localhost:3002/dashboard' };
       if (!urls[user.role]) throw new Error('Unknown role.');
       if (user.role === 'USER') navigate('/dashboard');
       else window.location.href = `${urls[user.role]}#token=${encodeURIComponent(accessToken)}`;

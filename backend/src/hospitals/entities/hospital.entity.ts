@@ -42,7 +42,7 @@ export class Hospital {
   @Column({
     type: 'enum',
     enum: HospitalStatus,
-    default: HospitalStatus.ACTIVE,
+    default: HospitalStatus.ACCEPTING,
     name: 'service_status',
   })
   status: HospitalStatus;

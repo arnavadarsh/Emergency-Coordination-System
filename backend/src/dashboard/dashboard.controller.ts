@@ -20,7 +20,7 @@ export class DashboardController {
   @Get('hospital')
   @Roles(UserRole.HOSPITAL)
   async getHospitalStats(@CurrentUser() user: any) {
-    return this.dashboardService.getHospitalStats(user.hospitalId);
+    return this.dashboardService.getHospitalStats(user.hospitalId, user.email);
   }
 
   /**

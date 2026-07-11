@@ -22,6 +22,4 @@ export default new DataSource({
   migrations: ['src/migrations/*.ts'],
   synchronize: false, // Always use migrations in production
   logging: configService.get('NODE_ENV') === 'development',
-  ssl: { rejectUnauthorized: false },
-  extra: { connectionTimeoutMillis: 15000 },
 });

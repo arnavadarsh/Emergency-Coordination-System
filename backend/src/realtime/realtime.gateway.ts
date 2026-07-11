@@ -27,6 +27,7 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
   server: Server;
 
   private readonly logger = new Logger(RealtimeGateway.name);
+  private readonly chatHistory = new Map<string, any[]>();
 
   /**
    * Handle client connection
@@ -81,45 +82,57 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     return { event: 'joined_hospital', data: { hospitalId: data?.hospitalId } };
   }
 
-  /**
-   * Join a booking's chat room. Both the patient and the assigned driver call
-   * this so they receive `chat:message` events for that booking in realtime.
-   */
-  @SubscribeMessage('chat:join')
-  handleChatJoin(@ConnectedSocket() client: Socket, @MessageBody() data: { bookingId: string }) {
-    if (data?.bookingId) {
-      client.join(`booking:${data.bookingId}`);
-      this.logger.log(`Client ${client.id} joined booking room: ${data.bookingId}`);
-    }
-    return { event: 'chat:joined', data: { bookingId: data?.bookingId } };
-  }
-
-  @SubscribeMessage('chat:leave')
-  handleChatLeave(@ConnectedSocket() client: Socket, @MessageBody() data: { bookingId: string }) {
-    if (data?.bookingId) client.leave(`booking:${data.bookingId}`);
-    return { event: 'chat:left', data: { bookingId: data?.bookingId } };
-  }
-
-  /** Relay a transient "typing…" indicator to the other party (not persisted). */
-  @SubscribeMessage('chat:typing')
-  handleChatTyping(
+  @SubscribeMessage('join_case_chat')
+  handleJoinCaseChat(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { bookingId: string; role: string },
+    @MessageBody() data: { bookingId?: string; dispatchId?: string },
   ) {
-    if (data?.bookingId) {
-      client.to(`booking:${data.bookingId}`).emit('chat:typing', {
-        bookingId: data.bookingId,
-        role: data.role,
-      });
+    const roomId = data?.bookingId || data?.dispatchId;
+    if (!roomId) {
+      return { event: 'case_chat_error', data: { message: 'Missing booking or dispatch id' } };
     }
+
+    const room = `case-chat:${roomId}`;
+    client.join(room);
+    const messages = this.chatHistory.get(roomId) ?? [];
+    client.emit('case_chat_history', { roomId, messages });
+    this.logger.log(`Client ${client.id} joined case chat room: ${room}`);
+    return { event: 'joined_case_chat', data: { roomId } };
   }
 
-  /** Emit an event to everyone in a booking's room (patient + driver). */
-  emitToBooking(bookingId: string, event: string, data: any) {
-    const room = `booking:${bookingId}`;
-    const roomSize = this.server.sockets.adapter.rooms.get(room)?.size ?? 0;
-    this.logger.log(`[emitToBooking] event="${event}" room="${room}" clients=${roomSize}`);
-    this.server.to(room).emit(event, data);
+  @SubscribeMessage('case_chat_message')
+  handleCaseChatMessage(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    data: {
+      bookingId?: string;
+      dispatchId?: string;
+      senderRole?: 'patient' | 'driver';
+      senderName?: string;
+      message?: string;
+    },
+  ) {
+    const roomId = data?.bookingId || data?.dispatchId;
+    const text = (data?.message || '').trim().slice(0, 500);
+    if (!roomId || !text) {
+      return { event: 'case_chat_error', data: { message: 'Missing chat room or message' } };
+    }
+
+    const message = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      roomId,
+      bookingId: data.bookingId,
+      dispatchId: data.dispatchId,
+      senderRole: data.senderRole === 'driver' ? 'driver' : 'patient',
+      senderName: (data.senderName || data.senderRole || 'User').slice(0, 80),
+      message: text,
+      createdAt: new Date().toISOString(),
+    };
+
+    const history = [...(this.chatHistory.get(roomId) ?? []), message].slice(-50);
+    this.chatHistory.set(roomId, history);
+    this.server.to(`case-chat:${roomId}`).emit('case_chat_message', message);
+    return { event: 'case_chat_message_ack', data: message };
   }
 
   /**

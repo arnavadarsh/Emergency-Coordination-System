@@ -6,20 +6,6 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { UserRole, BookingStatus, AmbulanceStatus } from '../common/enums';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
-import { ChatService } from '../chat/chat.service';
-
-/** Friendly, patient-facing chat note for each dispatch status. */
-const STATUS_CHAT_MESSAGE: Record<string, string> = {
-  ASSIGNED: '🚑 A driver has been assigned and is being dispatched to you.',
-  DISPATCHED: '🚑 Your ambulance has been dispatched.',
-  EN_ROUTE_PICKUP: '🚗 Your driver is on the way to the pickup location.',
-  EN_ROUTE: '🚗 Your driver is on the way to the pickup location.',
-  AT_PICKUP: '📍 Your driver has arrived at the pickup location.',
-  EN_ROUTE_HOSPITAL: '🏥 On the way to the hospital now.',
-  AT_HOSPITAL: '🏥 Arrived at the hospital.',
-  COMPLETED: '✅ Trip completed. Take care!',
-  CANCELLED: '❌ This trip has been cancelled.',
-};
 
 /**
  * Dispatch Service
@@ -35,7 +21,6 @@ export class DispatchService {
     @InjectRepository(Ambulance)
     private ambulanceRepository: Repository<Ambulance>,
     private readonly realtimeGateway: RealtimeGateway,
-    private readonly chatService: ChatService,
   ) {}
 
   /**
@@ -128,17 +113,6 @@ export class DispatchService {
       status: savedDispatch.status,
       completedAt: savedDispatch.completedAt,
     });
-
-    // Post an automated chat note into the booking thread (best-effort).
-    const note = STATUS_CHAT_MESSAGE[status];
-    if (note && savedDispatch.bookingId) {
-      try {
-        const msg = await this.chatService.createSystemMessage(savedDispatch.bookingId, note);
-        this.realtimeGateway.emitToBooking(savedDispatch.bookingId, 'chat:message', msg);
-      } catch {
-        /* chat note is non-critical */
-      }
-    }
 
     return savedDispatch;
   }

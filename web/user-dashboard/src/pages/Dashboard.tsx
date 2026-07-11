@@ -13,7 +13,7 @@ import { LiveRouteMap } from '../components/LiveRouteMap';
 import BookingCard, { ACTIVE_STATUSES } from '../components/BookingCard';
 import BookingTabs from '../components/BookingTabs';
 import TriageChat from '../components/TriageChat';
-import DriverChat from '../components/DriverChat';
+import CaseChat from '../components/CaseChat';
 import type { TriageResult } from '../services/triageEngine';
 
 const API_BASE_URL = 'http://localhost:3000/api';
@@ -741,14 +741,31 @@ function Dashboard() {
 
       const oldName = payload?.oldHospital?.name || 'previous hospital';
       const newName = payload?.newHospital?.name || 'new hospital';
-      toast(`🔀 ${oldName} is unavailable. Ambulance diverted to ${newName}.`, { duration: 6000 });
+      toast(`Destination updated: ${oldName} is unavailable. Ambulance diverted to ${newName}.`, { duration: 7000 });
       fetchDashboardData();
     };
 
+    const onRerouteSearchStarted = (payload: any) => {
+      const isRelevant = payload?.userId === userProfile?.id || bookings.some((b) => b.id === payload?.bookingId);
+      if (!isRelevant) return;
+      toast(payload?.message || 'Assigned hospital is currently unable to accept the patient. Searching for the next best hospital.', { duration: 7000 });
+    };
+
+    const onRerouteEscalated = (payload: any) => {
+      const isRelevant = payload?.userId === userProfile?.id || bookings.some((b) => b.id === payload?.bookingId);
+      if (!isRelevant) return;
+      toast.error('No suitable hospital is currently available. Manual intervention is required.', { duration: 10000 });
+      fetchDashboardData();
+    };
+
+    socket.on('hospital_reroute_search_started', onRerouteSearchStarted);
     socket.on('dispatch_diverted', onDispatchDiverted);
+    socket.on('hospital_reroute_escalated', onRerouteEscalated);
 
     return () => {
+      socket.off('hospital_reroute_search_started', onRerouteSearchStarted);
       socket.off('dispatch_diverted', onDispatchDiverted);
+      socket.off('hospital_reroute_escalated', onRerouteEscalated);
       socket.disconnect();
     };
   }, [userProfile?.id, bookings]);
@@ -1129,40 +1146,6 @@ function Dashboard() {
     navigate('/');
   };
 
-  const getSeverityColor = (severity?: string) => {
-    switch (severity) {
-      case 'CRITICAL': return '#de350b';
-      case 'HIGH': return '#ff8b00';
-      case 'MEDIUM': return '#ffab00';
-      case 'LOW': return '#00875a';
-      default: return '#0066cc';
-    }
-  };
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'PENDING': return '#6b778c';
-      case 'CONFIRMED': return '#0066cc';
-      case 'ASSIGNED': return '#ff8b00';
-      case 'IN_PROGRESS': return '#00875a';
-      case 'COMPLETED': return '#6b778c';
-      case 'CANCELLED': return '#de350b';
-      default: return '#6b778c';
-    }
-  };
-
-  const getDispatchStatusColor = (status: string) => {
-    switch (status) {
-      case 'DISPATCHED':
-      case 'ASSIGNED': return '#1976d2';
-      case 'EN_ROUTE': return '#ff9800';
-      case 'AT_PICKUP': return '#4caf50';
-      case 'EN_ROUTE_HOSPITAL': return '#ff9800';
-      case 'AT_HOSPITAL': return '#4caf50';
-      case 'COMPLETED': return '#9e9e9e';
-      default: return '#1976d2';
-    }
-  };
 
   const getDispatchStatusLabel = (status: string) => {
     switch (status) {
@@ -1177,18 +1160,6 @@ function Dashboard() {
     }
   };
 
-  const getDispatchProgress = (status: string) => {
-    switch (status) {
-      case 'DISPATCHED':
-      case 'ASSIGNED': return 15;
-      case 'EN_ROUTE': return 35;
-      case 'AT_PICKUP': return 50;
-      case 'EN_ROUTE_HOSPITAL': return 75;
-      case 'AT_HOSPITAL': return 90;
-      case 'COMPLETED': return 100;
-      default: return 10;
-    }
-  };
 
   if (loading) {
     return (
@@ -1819,12 +1790,21 @@ function Dashboard() {
                       activeBookings.length > 0 ? (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
                           {activeBookings.map(booking => (
-                            <BookingCard
-                              key={booking.id}
-                              booking={booking}
-                              onTrack={booking.dispatch ? () => startTracking(booking) : undefined}
-                              onCancel={() => handleCancelBooking(booking.id)}
-                            />
+                            <div key={booking.id} style={{ display: 'flex', flexDirection: 'column', gap: '12px', minWidth: 0 }}>
+                              <BookingCard
+                                booking={booking}
+                                onTrack={booking.dispatch ? () => startTracking(booking) : undefined}
+                                onCancel={() => handleCancelBooking(booking.id)}
+                              />
+                              {booking.dispatch && (
+                                <CaseChat
+                                  bookingId={booking.id}
+                                  currentRole="patient"
+                                  senderName={userProfile?.name || 'Patient'}
+                                  title="Chat with Driver"
+                                />
+                              )}
+                            </div>
                           ))}
                         </div>
                       ) : (
@@ -2171,23 +2151,20 @@ function Dashboard() {
 
       {/* Real-time Tracking Modal */}
       {trackingBooking && (
-        <div
-          onClick={() => setTrackingBooking(null)}
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(0, 0, 0, 0.8)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 9998,
-            padding: '20px'
-          }}
-        >
-          <div onClick={(e) => e.stopPropagation()} style={{
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0, 0, 0, 0.8)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9998,
+          padding: '20px'
+        }}>
+          <div style={{
             background: 'white',
             borderRadius: '16px',
             maxWidth: '900px',
@@ -2235,11 +2212,8 @@ function Dashboard() {
               </button>
             </div>
 
-            {/* Scrollable body so the map + driver chat are always reachable
-                and the modal never clips its content. */}
-            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', display: 'flex', flexDirection: 'column' }}>
-            <div style={{
-              padding: '20px 24px',
+            <div style={{ 
+              padding: '20px 24px', 
               background: '#f8f9fa',
               display: 'grid',
               gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
@@ -2295,22 +2269,9 @@ function Dashboard() {
                   </div>
                 </div>
               )}
-
-              {/* Chat with the assigned driver (shown once a dispatch exists). */}
-              {trackingBooking.dispatch?.ambulance && (
-                <div style={{ gridColumn: '1 / -1' }}>
-                  <DriverChat
-                    bookingId={trackingBooking.id}
-                    selfRole="USER"
-                    title="Chat with your driver"
-                    peerLabel="Driver"
-                    locked={['COMPLETED', 'CANCELLED'].includes(trackingBooking.status)}
-                  />
-                </div>
-              )}
             </div>
 
-            <div style={{ position: 'relative', height: '380px', flexShrink: 0 }}>
+            <div style={{ flex: 1, position: 'relative', minHeight: '400px' }}>
               <LiveRouteMap
                 ambulanceLat={trackingMetrics?.ambulanceLat}
                 ambulanceLng={trackingMetrics?.ambulanceLng}
@@ -2337,16 +2298,6 @@ function Dashboard() {
                   <span>Live Route</span>
                 </div>
               </div>
-            </div>
-            </div>{/* end scrollable body */}
-
-            <div style={{ padding: '12px 24px', borderTop: '1px solid #e0e0e0', background: '#fff', display: 'flex', justifyContent: 'flex-end', flexShrink: 0 }}>
-              <button
-                onClick={() => setTrackingBooking(null)}
-                style={{ padding: '10px 22px', background: '#0066cc', color: '#fff', border: 'none', borderRadius: '8px', fontWeight: 600, fontSize: '14px', cursor: 'pointer' }}
-              >
-                Close
-              </button>
             </div>
           </div>
         </div>

@@ -1,11 +1,13 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
 import TokenStorage from '../utils/tokenStorage';
+import { API_CONFIG } from '../config/api';
 import '../styles/Dashboard.css';
 
-const API_BASE_URL = 'http://localhost:3000/api';
+const API_BASE_URL = API_CONFIG.BASE_URL;
+const SOCKET_URL = API_BASE_URL.replace(/\/api\/?$/, '');
 
 interface Capability {
   type: string;
@@ -201,7 +203,7 @@ const Dashboard = () => {
 
   // Socket.IO connection for real-time pre-arrival alerts
   useEffect(() => {
-    const socket = io('http://localhost:3000', {
+    const socket = io(SOCKET_URL, {
       auth: { token: TokenStorage.getToken() },
     });
     socketRef.current = socket;
@@ -246,6 +248,23 @@ const Dashboard = () => {
       );
     });
 
+    socket.on('hospital_reroute_search_started', (payload: any) => {
+      console.log('[Reroute] hospital_reroute_search_started:', payload);
+      if (payload?.message) alert(payload.message);
+      fetchDashboardData();
+    });
+
+    socket.on('dispatch_diverted', (payload: any) => {
+      console.log('[Reroute] dispatch_diverted:', payload);
+      setPreArrivalAlerts(prev => prev.filter(a => a.dispatchId !== payload?.dispatchId));
+      fetchDashboardData();
+    });
+
+    socket.on('hospital_reroute_escalated', (payload: any) => {
+      console.warn('[Reroute] hospital_reroute_escalated:', payload);
+      alert('No suitable hospital is currently available. Admin intervention is required.');
+    });
+
     return () => {
       socket.disconnect();
     };
@@ -261,7 +280,7 @@ const Dashboard = () => {
 
   const handleLogout = () => {
     TokenStorage.removeToken();
-    navigate('/login');
+    navigate('/');
   };
   
   const handleStatusChange = async (newStatus: string) => {
@@ -329,6 +348,31 @@ const Dashboard = () => {
     } catch (err) {
       console.error('Failed to update bed count:', err);
       alert('Failed to update bed count');
+    }
+  };
+
+  const handleRejectIncoming = async (dispatchId: string) => {
+    const hospitalId = hospitalInfo.id;
+    if (!hospitalId) {
+      alert('Hospital data not loaded yet, please wait');
+      return;
+    }
+
+    const confirmed = window.confirm('Reject this incoming patient and search for the next best hospital?');
+    if (!confirmed) return;
+
+    try {
+      const token = TokenStorage.getToken();
+      await axios.patch(
+        `${API_BASE_URL}/hospitals/${hospitalId}/dispatches/${dispatchId}/reject`,
+        {},
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setPreArrivalAlerts(prev => prev.filter(alert => alert.dispatchId !== dispatchId));
+      await fetchDashboardData();
+    } catch (err) {
+      console.error('Failed to reject incoming patient:', err);
+      alert('Failed to reroute this patient');
     }
   };
 
@@ -420,22 +464,22 @@ const Dashboard = () => {
           <div className="top-bar-right">
             <div className="status-buttons">
               <button 
-                className={`status-btn ${hospitalInfo.status === 'ACTIVE' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('ACTIVE')}
+                className={`status-btn ${hospitalInfo.status === 'ACCEPTING' ? 'active' : ''}`}
+                onClick={() => handleStatusChange('ACCEPTING')}
               >
-                Active
+                Accepting
               </button>
               <button 
-                className={`status-btn ${hospitalInfo.status === 'INACTIVE' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('INACTIVE')}
+                className={`status-btn ${hospitalInfo.status === 'LIMITED' ? 'active' : ''}`}
+                onClick={() => handleStatusChange('LIMITED')}
               >
-                Inactive
+                Limited
               </button>
               <button 
-                className={`status-btn ${hospitalInfo.status === 'MAINTENANCE' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('MAINTENANCE')}
+                className={`status-btn ${hospitalInfo.status === 'DIVERT' ? 'active' : ''}`}
+                onClick={() => handleStatusChange('DIVERT')}
               >
-                Maintenance
+                Divert
               </button>
             </div>
           </div>
@@ -532,8 +576,8 @@ const Dashboard = () => {
                 <svg viewBox="0 0 24 24" fill="currentColor" style={{ width: '48px', height: '48px', color: '#ccc', marginBottom: '16px', display: 'block', margin: '0 auto 16px' }}>
                   <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99z"/>
                 </svg>
-                <div style={{ fontSize: '16px', fontWeight: '500' }}>No incoming ambulances</div>
-                <div style={{ fontSize: '13px', marginTop: '6px' }}>Pre-arrival alerts will appear here when ambulances are dispatched to this hospital</div>
+                <div style={{ fontSize: '16px', fontWeight: '500' }}>No incoming ambulances for {hospitalInfo.name}</div>
+                <div style={{ fontSize: '13px', marginTop: '6px' }}>Pre-arrival alerts appear here only when a dispatch is assigned to this hospital.</div>
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
@@ -604,6 +648,25 @@ const Dashboard = () => {
                               </span>
                             )}
                           </div>
+                        </div>
+                      )}
+
+                      {isActive && (
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '16px' }}>
+                          <button
+                            onClick={() => handleRejectIncoming(alert.dispatchId)}
+                            style={{
+                              padding: '10px 16px',
+                              background: '#de350b',
+                              color: 'white',
+                              border: 'none',
+                              borderRadius: '6px',
+                              cursor: 'pointer',
+                              fontWeight: 700,
+                            }}
+                          >
+                            Reject and Reroute
+                          </button>
                         </div>
                       )}
                     </div>

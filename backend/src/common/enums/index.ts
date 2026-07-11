@@ -26,9 +26,9 @@ export enum BookingStatus {
  * Hospital status enum
  */
 export enum HospitalStatus {
-  ACTIVE = 'ACTIVE',
-  INACTIVE = 'INACTIVE',
-  MAINTENANCE = 'MAINTENANCE',
+  ACCEPTING = 'ACCEPTING',
+  LIMITED = 'LIMITED',
+  DIVERT = 'DIVERT',
 }
 
 /**

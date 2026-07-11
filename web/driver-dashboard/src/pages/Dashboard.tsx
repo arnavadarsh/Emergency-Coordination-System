@@ -6,8 +6,8 @@ import toast from 'react-hot-toast';
 import { tokenStorage } from '../utils/tokenStorage';
 import { DriverRouteMap } from '../components/DriverRouteMap';
 import ActiveCaseCard from '../components/ActiveCaseCard';
-import DriverChat from '../components/DriverChat';
 import ChecklistModal from '../components/ChecklistModal';
+import CaseChat from '../components/CaseChat';
 
 const API_BASE_URL = 'http://localhost:3000/api';
 
@@ -202,10 +202,33 @@ function Dashboard() {
   }, []);
   useEffect(() => {
     const socket = io('http://localhost:3000', { transports: ['websocket'] });
+    const onRerouteSearchStarted = (p: any) => {
+      toast.error(p?.message || 'Assigned hospital is currently unable to accept the patient. Searching for the next best hospital.', { duration: 7000 });
+      fetchData();
+    };
+    const onDispatchDiverted = (p: any) => {
+      const oldName = p?.oldHospital?.name || 'previous hospital';
+      const newName = p?.newHospital?.name || 'new hospital';
+      toast.success(`Route updated: ${oldName} -> ${newName}`, { duration: 7000 });
+      fetchData();
+    };
+    const onRerouteEscalated = () => {
+      toast.error('No suitable hospital is available. Continue care and wait for admin instructions.', { duration: 10000 });
+      fetchData();
+    };
     socket.on('dispatch_assigned', fetchData);
     socket.on('dispatch_status_updated', fetchData);
-    socket.on('dispatch_diverted', (p: any) => { if (p?.newHospital) toast(`🔀 Diverted to ${p.newHospital.name}`); fetchData(); });
-    return () => { socket.off('dispatch_assigned', fetchData); socket.off('dispatch_status_updated', fetchData); socket.disconnect(); };
+    socket.on('hospital_reroute_search_started', onRerouteSearchStarted);
+    socket.on('dispatch_diverted', onDispatchDiverted);
+    socket.on('hospital_reroute_escalated', onRerouteEscalated);
+    return () => {
+      socket.off('dispatch_assigned', fetchData);
+      socket.off('dispatch_status_updated', fetchData);
+      socket.off('hospital_reroute_search_started', onRerouteSearchStarted);
+      socket.off('dispatch_diverted', onDispatchDiverted);
+      socket.off('hospital_reroute_escalated', onRerouteEscalated);
+      socket.disconnect();
+    };
   }, []);
 
   const updateStatus = async (dispatchId: string, newStatus: string) => {
@@ -409,22 +432,15 @@ function Dashboard() {
                   </Card>
                 )}
 
-                {/* Chat with the patient */}
-                <Card style={{ overflow:'hidden', marginTop:'20px' }}>
-                  <div style={{ padding:'14px 20px', borderBottom:`1px solid ${C.cardBorder}` }}>
-                    <span style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary }}>💬 Chat with Patient</span>
-                  </div>
-                  <div style={{ padding:'12px' }}>
-                    <DriverChat
-                      bookingId={activeDispatch.booking.id}
-                      selfRole="DRIVER"
-                      title="Chat with patient"
-                      peerLabel="Patient"
-                      peerPhone={activeDispatch.booking.patientPhone}
-                      locked={['COMPLETED','CANCELLED'].includes(activeDispatch.status)}
-                    />
-                  </div>
-                </Card>
+                <div style={{ marginTop:'20px' }}>
+                  <CaseChat
+                    bookingId={activeDispatch.booking.id}
+                    dispatchId={activeDispatch.id}
+                    currentRole="driver"
+                    senderName={driverProfile?.name || 'Driver'}
+                    title="Chat with Patient"
+                  />
+                </div>
               </>
             ) : (
               <Card style={{ padding:'60px 24px', textAlign:'center' }}>

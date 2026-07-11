@@ -33,6 +33,13 @@ class ApiClient {
       (response) => response,
       (error) => {
         if (error.response?.status === 401) {
+          // Token expired or missing — clear and redirect to login
+          TokenStorage.removeToken();
+          window.location.href = '/login';
+        } else if (error.response?.status === 403) {
+          // Wrong role — the stored token belongs to a different account type.
+          // Clear it so the user can log in with the correct credentials.
+          console.error('[User Dashboard] Access denied (403): account does not have USER role. Clearing token.');
           TokenStorage.removeToken();
           window.location.href = '/login';
         }

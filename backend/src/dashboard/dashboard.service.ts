@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThanOrEqual } from 'typeorm';
 import { Hospital } from '../hospitals/entities/hospital.entity';
@@ -117,49 +117,54 @@ export class DashboardService {
   /**
    * Get hospital dashboard stats
    */
-  async getHospitalStats(hospitalId?: string) {
+  async getHospitalStats(hospitalId?: string, userEmail?: string) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Get hospital info
     const hospitals = await this.hospitalRepository.find({
       relations: ['capabilities'],
     });
 
-    const hospital = hospitalId 
-      ? hospitals.find(h => h.id === hospitalId) 
-      : hospitals[0];
+    const normalizedEmail = userEmail?.trim().toLowerCase();
+    const hospital = hospitalId
+      ? hospitals.find(h => h.id === hospitalId)
+      : hospitals.find(h => h.email?.trim().toLowerCase() === normalizedEmail);
 
-    // Get bookings
+    if (!hospital) {
+      throw new NotFoundException(
+        'No hospital is linked to this account. Ask an administrator to assign a hospital to this login.',
+      );
+    }
+
     const allBookings = await this.bookingRepository.find({
       order: { createdAt: 'DESC' },
     });
 
-    const activeBookings = allBookings.filter(b => 
-      [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(b.status)
-    );
-
-    const completedToday = allBookings.filter(b => 
-      b.status === BookingStatus.COMPLETED && 
-      b.completedAt && 
-      new Date(b.completedAt) >= today
-    ).length;
-
-    // Get dispatches (without triage join — triage_reports table may not exist in all deployments)
     const allDispatches = await this.dispatchRepository.find({
       relations: ['booking', 'ambulance'],
     });
 
-    const incomingAmbulances = allDispatches.filter(d => 
-      d.booking && 
-      [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
+    const hospitalDispatches = allDispatches.filter(d => d.hospitalId === hospital.id);
+    const hospitalBookingIds = new Set(hospitalDispatches.map(d => d.bookingId));
+    const hospitalBookings = allBookings.filter(b => hospitalBookingIds.has(b.id));
+
+    const activeBookings = hospitalBookings.filter(b =>
+      [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(b.status),
+    );
+
+    const completedToday = hospitalBookings.filter(b =>
+      b.status === BookingStatus.COMPLETED &&
+      b.completedAt &&
+      new Date(b.completedAt) >= today,
     ).length;
 
-    // Build pre-arrival alerts from active dispatches targeting this hospital
-    const targetHospitalId = hospital?.id;
-    const preArrivalAlerts = allDispatches
+    const incomingAmbulances = hospitalDispatches.filter(d =>
+      d.booking &&
+      [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status),
+    ).length;
+
+    const preArrivalAlerts = hospitalDispatches
       .filter(d =>
-        d.hospitalId === targetHospitalId &&
         d.booking &&
         [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
       )
@@ -181,23 +186,23 @@ export class DashboardService {
       }));
 
     return {
-      hospital: hospital ? {
+      hospital: {
         id: hospital.id,
         name: hospital.name,
         status: hospital.status,
         address: hospital.address,
         phoneNumber: hospital.phoneNumber,
-      } : null,
-      capabilities: hospital?.capabilities || [],
+      },
+      capabilities: hospital.capabilities || [],
       stats: {
-        totalBeds: hospital?.totalBeds || 0,
-        availableBeds: hospital?.availableBeds || 0,
-        occupiedBeds: (hospital?.totalBeds || 0) - (hospital?.availableBeds || 0),
+        totalBeds: hospital.totalBeds || 0,
+        availableBeds: hospital.availableBeds || 0,
+        occupiedBeds: (hospital.totalBeds || 0) - (hospital.availableBeds || 0),
         incomingAmbulances,
         activeEmergencies: activeBookings.length,
         completedToday,
       },
-      recentBookings: allBookings.slice(0, 10).map(b => ({
+      recentBookings: hospitalBookings.slice(0, 10).map(b => ({
         id: b.id,
         status: b.status,
         severity: b.severity,
@@ -208,7 +213,6 @@ export class DashboardService {
       preArrivalAlerts,
     };
   }
-
   /**
    * Get admin dashboard stats
    */
@@ -364,16 +368,23 @@ export class DashboardService {
       where: { id: driverId },
     });
 
-    // Get dispatches - for now get all dispatches
-    // In real app, filter by driver assignment
-    const dispatches = await this.dispatchRepository.find({
+    const allDispatches = await this.dispatchRepository.find({
       relations: ['booking', 'hospital', 'ambulance'],
       order: { createdAt: 'DESC' },
     });
 
-    // Get ambulance assigned to driver (from assignments table or config)
     const ambulances = await this.ambulanceRepository.find();
-    const assignedAmbulance = ambulances[0]; // For now, use first ambulance
+    const assignedAmbulance =
+      driver?.ambulanceId
+        ? ambulances.find(ambulance => ambulance.id === driver.ambulanceId)
+        : ambulances[0];
+
+    const scopedDispatches = allDispatches.filter(d => {
+      if (d.driverId && d.driverId === driverId) return true;
+      if (!d.driverId && assignedAmbulance?.id && d.ambulanceId === assignedAmbulance.id) return true;
+      return false;
+    });
+    const dispatches = scopedDispatches.length > 0 ? scopedDispatches : allDispatches;
 
     const activeDispatch = dispatches.find(d => 
       d.booking && 
@@ -418,7 +429,7 @@ export class DashboardService {
           dropoffLocation: d.booking.destinationAddress || d.hospital?.name || 'Hospital',
           destinationLatitude: d.booking.destinationLatitude || d.hospital?.latitude,
           destinationLongitude: d.booking.destinationLongitude || d.hospital?.longitude,
-          selectedHospitalName: d.hospital?.name || d.booking.destinationAddress || 'Hospital',
+          selectedHospitalName: d.booking.destinationAddress || d.hospital?.name || 'Hospital',
           selectedHospitalAddress: d.hospital?.address || d.booking.destinationAddress || 'Address unavailable',
           bookingType: d.booking.severity === 'CRITICAL' || d.booking.severity === 'HIGH' ? 'EMERGENCY' : 'SCHEDULED',
           severity: d.booking.severity,
@@ -485,12 +496,12 @@ export class DashboardService {
         description: b.description,
         dispatch: dispatch ? {
           status: dispatch.status || b.status,
-          hospital: dispatch.hospital ? {
+          hospital: dispatch?.hospital ? {
             id: dispatch.hospital.id,
-            name: dispatch.hospital.name,
+            name: b.destinationAddress || dispatch.hospital.name,
             address: dispatch.hospital.address,
-            latitude: dispatch.hospital.latitude,
-            longitude: dispatch.hospital.longitude,
+            latitude: b.destinationLatitude || dispatch.hospital.latitude,
+            longitude: b.destinationLongitude || dispatch.hospital.longitude,
           } : undefined,
           ambulance: dispatch.ambulance ? {
             vehicleNumber: dispatch.ambulance.vehicleNumber,
@@ -501,7 +512,7 @@ export class DashboardService {
         } : undefined,
         hospital: dispatch?.hospital ? {
           id: dispatch.hospital.id,
-          name: dispatch.hospital.name,
+          name: b.destinationAddress || dispatch.hospital.name,
           address: dispatch.hospital.address,
         } : undefined,
       };
