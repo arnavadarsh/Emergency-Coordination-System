@@ -13,10 +13,17 @@ import { LiveRouteMap } from '../components/LiveRouteMap';
 import BookingCard, { ACTIVE_STATUSES } from '../components/BookingCard';
 import BookingTabs from '../components/BookingTabs';
 import TriageChat from '../components/TriageChat';
+import MedicalProfileSection from '../components/MedicalProfileSection';
+import EmergencyContactsSection from '../components/EmergencyContactsSection';
+import TrackingShareCard from '../components/TrackingShareCard';
+import { normalizeMedicalProfile, type MedicalProfile } from '../types/medicalProfile';
 import CaseChat from '../components/CaseChat';
+import { useCaseChats } from '../hooks/useCaseChats';
+import { formatIstLongDate, formatIstTime } from '../utils/datetime';
+import DriverIdentity, { type DriverInfo } from '../components/DriverIdentity';
 import type { TriageResult } from '../services/triageEngine';
+import { API_BASE_URL, SOCKET_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 interface LiveEtaResponse {
   source: 'google' | 'fallback';
@@ -100,6 +107,7 @@ interface Booking {
       currentLatitude?: number;
       currentLongitude?: number;
     };
+    driver?: DriverInfo | null;
   };
 }
 
@@ -115,6 +123,9 @@ interface UserProfile {
   bloodType?: string;
   medicalHistory?: string;
   dateOfBirth?: string;
+  /** Standing clinical background — the single source of truth for triage,
+   *  pre-alerts and reports. Always present; unset fields read "Not Provided". */
+  medicalProfile: MedicalProfile;
 }
 
 type TabType = 'bookings' | 'profile' | 'locations';
@@ -133,16 +144,16 @@ const calculateDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: num
   return EARTH_RADIUS_KM * c;
 };
 
-const formatExpectedTime = (etaMinutes: number) => {
-  const now = new Date();
-  now.setMinutes(now.getMinutes() + etaMinutes);
-  return now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-};
+const formatExpectedTime = (etaMinutes: number) =>
+  formatIstTime(new Date(Date.now() + etaMinutes * 60000));
 
 function Dashboard() {
   const navigate = useNavigate();
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
+  // Kept alongside the profile so triage can show it without another round-trip,
+  // and so a save in the Profile section is reflected immediately.
+  const [medicalProfile, setMedicalProfile] = useState<MedicalProfile>(() => normalizeMedicalProfile(null));
   const [showBookingForm, setShowBookingForm] = useState(false);
   const [bookingType, setBookingType] = useState<'EMERGENCY' | 'SCHEDULED'>('EMERGENCY');
   const [loading, setLoading] = useState(true);
@@ -633,9 +644,11 @@ function Dashboard() {
           emergencyContact: data.user.emergencyContact || '',
           bloodType: data.user.bloodType,
           medicalHistory: data.user.medicalHistory,
-          dateOfBirth: data.user.dateOfBirth
+          dateOfBirth: data.user.dateOfBirth,
+          medicalProfile: normalizeMedicalProfile(data.user.medicalProfile)
         };
         setUserProfile(profile);
+        setMedicalProfile(profile.medicalProfile);
         setProfileForm({
           firstName: profile.firstName,
           lastName: profile.lastName,
@@ -691,7 +704,15 @@ function Dashboard() {
               type: b.dispatch.ambulance.type,
               currentLatitude: b.dispatch.ambulance.currentLatitude != null ? Number(b.dispatch.ambulance.currentLatitude) : undefined,
               currentLongitude: b.dispatch.ambulance.currentLongitude != null ? Number(b.dispatch.ambulance.currentLongitude) : undefined,
-            } : undefined
+            } : undefined,
+            driver: b.dispatch.driver ? {
+              id: b.dispatch.driver.id,
+              name: b.dispatch.driver.name,
+              photoUrl: b.dispatch.driver.photoUrl ?? null,
+              phoneNumber: b.dispatch.driver.phoneNumber ?? null,
+              licenseNumber: b.dispatch.driver.licenseNumber ?? null,
+              vehicleNumber: b.dispatch.driver.vehicleNumber ?? b.dispatch.ambulance?.vehicleNumber ?? null,
+            } : null
           } : undefined
         }));
 
@@ -731,7 +752,7 @@ function Dashboard() {
       return;
     }
 
-    const socket = io('http://localhost:3000', {
+    const socket = io(SOCKET_URL, {
       transports: ['websocket'],
     });
 
@@ -1055,6 +1076,24 @@ function Dashboard() {
     }
   };
 
+  /**
+   * Chat rooms for every dispatched booking. Held at dashboard level so messages keep
+   * arriving — and the sidebar badge keeps counting — while the user is on another tab.
+   */
+  const chatRooms = useMemo(
+    () => bookings
+      .filter(b => b.dispatch && ACTIVE_STATUSES.includes(b.status))
+      .map(b => ({ bookingId: b.id })),
+    [bookings],
+  );
+  const chat = useCaseChats({
+    rooms: chatRooms,
+    role: 'patient',
+    senderName: userProfile?.name || 'Patient',
+    apiBaseUrl: API_BASE_URL,
+    getToken: () => tokenStorage.getToken(),
+  });
+
   // Start tracking a booking
   const startTracking = (booking: Booking) => {
     setTrackingBooking(booking);
@@ -1211,6 +1250,16 @@ function Dashboard() {
               <path d="M16 2v4M8 2v4M3 10h18" stroke="white" strokeWidth="2"/>
             </svg>
             <span>My Bookings</span>
+            {chat.totalUnread > 0 && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                minWidth: '20px', height: '20px', marginLeft: 'auto', padding: '0 6px',
+                borderRadius: '9999px', background: '#DE350B', color: 'white',
+                fontSize: '11px', fontWeight: 700,
+              }}>
+                {chat.totalUnread}
+              </span>
+            )}
           </a>
           <a href="#" className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('profile'); setShowBookingForm(false); setSidebarOpen(false); }}>
             <svg viewBox="0 0 24 24" fill="none">
@@ -1260,9 +1309,9 @@ function Dashboard() {
               <div className="info-row">
                 {userProfile.phoneNumber}
               </div>
-              {userProfile.bloodType && (
+              {medicalProfile.bloodGroup && (
                 <div className="info-row">
-                  Blood Type: {userProfile.bloodType}
+                  Blood Group: {medicalProfile.bloodGroup}
                 </div>
               )}
             </div>
@@ -1379,7 +1428,7 @@ function Dashboard() {
                       <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0' }}>
                         <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Date of Birth</label>
                         <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>
-                          {userProfile?.dateOfBirth ? new Date(userProfile.dateOfBirth).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' }) : 'Not set'}
+                          {userProfile?.dateOfBirth ? formatIstLongDate(userProfile.dateOfBirth) : 'Not set'}
                         </p>
                       </div>
                       <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0', gridColumn: 'span 2' }}>
@@ -1413,13 +1462,14 @@ function Dashboard() {
                         </p>
                       </div>
                       <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0' }}>
-                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Blood Type</label>
-                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>{userProfile?.bloodType || 'Not specified'}</p>
+                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Blood Group</label>
+                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>{medicalProfile.display.bloodGroup}</p>
                       </div>
                     </div>
                   </div>
 
-                  {/* Medical History Section */}
+                  {/* Medical History Section — free-text notes. The structured
+                      Medical Profile lives in its own editable section below. */}
                   <div>
                     <h3 style={{ 
                       margin: '0 0 20px 0', 
@@ -1648,6 +1698,26 @@ function Dashboard() {
               )}
             </div>
             
+            {/* Medical Profile — add, update or remove at any time. Saving here
+                updates the patient's profile record, so future triage sessions,
+                hospital pre-alerts and reports pick up the new values. */}
+            <MedicalProfileSection
+              apiBaseUrl={API_BASE_URL}
+              token={tokenStorage.getToken() || ''}
+              initialProfile={medicalProfile}
+              onSaved={(saved) => {
+                setMedicalProfile(saved);
+                setUserProfile(prev => (prev ? { ...prev, medicalProfile: saved, bloodType: saved.bloodGroup ?? undefined } : prev));
+              }}
+            />
+
+            {/* Emergency Contacts — the people automatically texted a live
+                tracking link the moment an ambulance is assigned. */}
+            <EmergencyContactsSection
+              apiBaseUrl={API_BASE_URL}
+              token={tokenStorage.getToken() || ''}
+            />
+
             {/* Notification Preferences Section */}
             <div style={{ marginTop: '32px' }}>
               <NotificationPreferencesSection token={tokenStorage.getToken() || ''} />
@@ -1800,8 +1870,15 @@ function Dashboard() {
                                 <CaseChat
                                   bookingId={booking.id}
                                   currentRole="patient"
-                                  senderName={userProfile?.name || 'Patient'}
                                   title="Chat with Driver"
+                                  active={activeTab === 'bookings' && bookingSubTab === 'current' && !showBookingForm}
+                                  connected={chat.connected}
+                                  thread={chat.threads[booking.id]}
+                                  onSend={text => chat.send(booking.id, text)}
+                                  onSendImage={file => { void chat.sendImage(booking.id, file); }}
+                                  onRetry={clientId => chat.retry(booking.id, clientId)}
+                                  apiBaseUrl={API_BASE_URL}
+                                  onVisibilityChange={visible => chat.setRoomVisible(booking.id, visible)}
                                 />
                               )}
                             </div>
@@ -2037,6 +2114,8 @@ function Dashboard() {
                 </>
               ) : (
                 <TriageChat
+                  patientName={userProfile?.name}
+                  medicalProfile={medicalProfile}
                   onFastTrack={handleFastTrack}
                   onComplete={handleTriageComplete}
                   onTrack={handleTrackFromChat}
@@ -2235,7 +2314,7 @@ function Dashboard() {
                 {(liveEta?.expectedArrivalIso || trackingMetrics?.expectedTimeText) && (
                   <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
                     Expected by {liveEta?.expectedArrivalIso
-                      ? new Date(liveEta.expectedArrivalIso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                      ? formatIstTime(liveEta.expectedArrivalIso)
                       : trackingMetrics?.expectedTimeText}
                   </div>
                 )}
@@ -2245,14 +2324,6 @@ function Dashboard() {
                   </div>
                 )}
               </div>
-              {trackingBooking.dispatch?.ambulance && (
-                <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Vehicle</div>
-                  <div style={{ fontSize: '16px', fontWeight: '700', color: '#1976d2' }}>
-                    {trackingBooking.dispatch.ambulance.vehicleNumber}
-                  </div>
-                </div>
-              )}
               {trackingBooking.dispatch?.hospital && (
                 <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
                   <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Selected Hospital</div>
@@ -2269,6 +2340,27 @@ function Dashboard() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {trackingBooking.dispatch && (
+              <div style={{ padding: '0 24px 16px', background: '#f8f9fa' }}>
+                <DriverIdentity
+                  driver={trackingBooking.dispatch.driver}
+                  vehicleNumber={trackingBooking.dispatch.ambulance?.vehicleNumber}
+                  accentColor="#0066cc"
+                  showCallButton
+                />
+              </div>
+            )}
+
+            {/* Hand the same live view to anyone else, and see who the system
+                has already told. */}
+            <div style={{ padding: '0 24px 16px', background: '#f8f9fa' }}>
+              <TrackingShareCard
+                apiBaseUrl={API_BASE_URL}
+                token={tokenStorage.getToken() || ''}
+                bookingId={trackingBooking.id}
+              />
             </div>
 
             <div style={{ flex: 1, position: 'relative', minHeight: '400px' }}>

@@ -1,8 +1,10 @@
-import { Injectable, NotFoundException, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Not } from 'typeorm';
 import { Ambulance } from './entities';
 import { AmbulanceStatus } from '../common/enums';
+import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { shouldSeedDemoData } from '../config/env';
 
 /**
  * Ambulances Service
@@ -10,12 +12,46 @@ import { AmbulanceStatus } from '../common/enums';
  */
 @Injectable()
 export class AmbulancesService implements OnModuleInit {
+  private readonly logger = new Logger(AmbulancesService.name);
+
   constructor(
     @InjectRepository(Ambulance)
     private ambulanceRepository: Repository<Ambulance>,
+    private readonly realtimeGateway: RealtimeGateway,
   ) {}
 
+  /**
+   * Broadcast an ambulance's current position and state.
+   *
+   * The admin Live Operations Map listens for these so a unit moves on screen
+   * as its location is reported, instead of only on the next poll. Coordinates
+   * are cast to Number because the decimal columns come back from pg as
+   * strings, which would otherwise reach the client as "28.5463260".
+   */
+  private emitAmbulanceUpdate(event: 'ambulance_location_updated' | 'ambulance_status_updated', ambulance: Ambulance): void {
+    const latitude = Number(ambulance.currentLatitude);
+    const longitude = Number(ambulance.currentLongitude);
+
+    this.realtimeGateway.server.emit(event, {
+      id: ambulance.id,
+      vehicleNumber: ambulance.vehicleNumber,
+      vehicleType: ambulance.vehicleType,
+      status: ambulance.status,
+      latitude: Number.isFinite(latitude) ? latitude : null,
+      longitude: Number.isFinite(longitude) ? longitude : null,
+      lastLocationUpdate: ambulance.lastLocationUpdate?.toISOString() ?? null,
+      at: new Date().toISOString(),
+    });
+  }
+
   async onModuleInit(): Promise<void> {
+    // Demo ambulances are written only when seeding is enabled — off by default in
+    // production so a deployment never adds rows nobody asked for to the
+    // project's real data. See SEED_DEMO_DATA.
+    if (!shouldSeedDemoData()) {
+      this.logger.log('SEED_DEMO_DATA is off — skipping demo ambulances seeding');
+      return;
+    }
     await this.ensureDispatchReadyFleet();
   }
 
@@ -193,7 +229,9 @@ export class AmbulancesService implements OnModuleInit {
     }
 
     ambulance.status = status;
-    return this.ambulanceRepository.save(ambulance);
+    const saved = await this.ambulanceRepository.save(ambulance);
+    this.emitAmbulanceUpdate('ambulance_status_updated', saved);
+    return saved;
   }
 
   /**
@@ -208,7 +246,9 @@ export class AmbulancesService implements OnModuleInit {
     ambulance.currentLatitude = latitude;
     ambulance.currentLongitude = longitude;
     ambulance.lastLocationUpdate = new Date();
-    return this.ambulanceRepository.save(ambulance);
+    const saved = await this.ambulanceRepository.save(ambulance);
+    this.emitAmbulanceUpdate('ambulance_location_updated', saved);
+    return saved;
   }
 
   /**

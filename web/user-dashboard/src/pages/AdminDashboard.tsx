@@ -4,8 +4,11 @@ import axios from 'axios';
 import toast from 'react-hot-toast';
 import TokenStorage from '../utils/tokenStorage';
 import '../styles/AdminDashboard.css';
+import { formatIstClock, formatIstDate, formatIstDateTime, formatIstFull, formatTimeAgo } from '../utils/datetime';
+import CaseReportModal from '../components/CaseReportModal';
+import { normalizeMedicalProfile, type MedicalProfile } from '../types/medicalProfile';
+import { API_BASE_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 interface SystemStats {
   totalUsers: number;
@@ -97,6 +100,9 @@ interface Booking {
   severity: string;
   pickupAddress: string;
   createdAt: string;
+  patientName: string;
+  /** Patient's Medical Profile, resolved live from their profile record. */
+  medicalProfile: MedicalProfile;
 }
 
 type TabType = 'dashboard' | 'users' | 'hospitals' | 'ambulances' | 'pending' | 'bookings' | 'audit';
@@ -122,20 +128,9 @@ const Dashboard = () => {
   const [ambulances, setAmbulances] = useState<Ambulance[]>([]);
   const [pendingAmbulances, setPendingAmbulances] = useState<PendingAmbulance[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
-
-  const formatTimeAgo = (dateStr: string): string => {
-    if (!dateStr) return 'Just now';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins} min ago`;
-    const diffHrs = Math.floor(diffMins / 60);
-    if (diffHrs < 24) return `${diffHrs} hr ago`;
-    return `${Math.floor(diffHrs / 24)} days ago`;
-  };
+  // Booking whose full ECS case report (patient, Medical Profile, triage,
+  // dispatch) is open. Null when the report modal is closed.
+  const [reportBookingId, setReportBookingId] = useState<string | null>(null);
 
   const fetchDashboardData = async () => {
     try {
@@ -217,6 +212,8 @@ const Dashboard = () => {
         status: b.status,
         severity: b.severity,
         pickupAddress: b.pickupAddress,
+        patientName: b.patientName || 'Patient',
+        medicalProfile: normalizeMedicalProfile(b.medicalProfile),
         createdAt: b.createdAt
       })));
     } catch (err) {
@@ -505,7 +502,7 @@ const Dashboard = () => {
                   </select>
                 </td>
                 <td><span style={{ padding: '4px 12px', borderRadius: '12px', backgroundColor: user.isActive ? '#e3fcef' : '#ffebe6', color: user.isActive ? '#00875a' : '#de350b' }}>{user.isActive ? 'Active' : 'Inactive'}</span></td>
-                <td>{new Date(user.createdAt).toLocaleDateString()}</td>
+                <td title={formatIstFull(user.createdAt)}>{formatIstDate(user.createdAt)}</td>
                 <td><button onClick={() => handleUpdateUserStatus(user.id, !user.isActive)} style={{ padding: '6px 12px', backgroundColor: user.isActive ? '#de350b' : '#00875a', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>{user.isActive ? 'Deactivate' : 'Activate'}</button></td>
               </tr>
             ))}
@@ -576,15 +573,28 @@ const Dashboard = () => {
       <div className="section-header"><h2>Booking Management</h2><span className="count-badge">{bookings.length} bookings</span></div>
       <div className="table-container">
         <table className="data-table">
-          <thead><tr><th>Booking ID</th><th>Status</th><th>Severity</th><th>Pickup Address</th><th>Created</th></tr></thead>
+          <thead><tr><th>Booking ID</th><th>Patient</th><th>Blood Group</th><th>Status</th><th>Severity</th><th>Pickup Address</th><th>Created</th><th>Report</th></tr></thead>
           <tbody>
             {bookings.map(booking => (
               <tr key={booking.id}>
                 <td><code>{booking.id.slice(0, 8)}</code></td>
+                <td>{booking.patientName}</td>
+                {/* Straight from the patient's Medical Profile; "Not Provided"
+                    when they have not recorded a blood group. */}
+                <td><span style={{ color: booking.medicalProfile.bloodGroup ? '#172b4d' : '#97a0af', fontStyle: booking.medicalProfile.bloodGroup ? 'normal' : 'italic' }}>{booking.medicalProfile.display.bloodGroup}</span></td>
                 <td><span style={{ padding: '4px 12px', borderRadius: '12px', backgroundColor: getStatusColor(booking.status) + '20', color: getStatusColor(booking.status) }}>{booking.status}</span></td>
                 <td><span style={{ padding: '4px 12px', borderRadius: '12px', backgroundColor: booking.severity === 'CRITICAL' ? '#de350b20' : booking.severity === 'HIGH' ? '#ff8b0020' : '#ffab0020', color: booking.severity === 'CRITICAL' ? '#de350b' : booking.severity === 'HIGH' ? '#ff8b00' : '#ffab00' }}>{booking.severity || 'MEDIUM'}</span></td>
                 <td>{booking.pickupAddress || 'N/A'}</td>
-                <td>{new Date(booking.createdAt).toLocaleString()}</td>
+                <td title={formatIstFull(booking.createdAt)}>{formatIstDateTime(booking.createdAt)}</td>
+                <td>
+                  <button
+                    onClick={() => setReportBookingId(booking.id)}
+                    style={{ padding: '6px 12px', background: '#f4f5f7', color: '#172b4d', border: '1px solid #dfe1e6', borderRadius: '6px', fontSize: '12px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}
+                    title="Full case report: patient, Medical Profile, triage and dispatch"
+                  >
+                    📄 View
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -670,7 +680,7 @@ const Dashboard = () => {
                 </div>
                 <div className="detail-row">
                   <span className="detail-label">Submitted</span>
-                  <span className="detail-value">{new Date(ambulance.createdAt).toLocaleString()}</span>
+                  <span className="detail-value" title={formatIstFull(ambulance.createdAt)}>{formatIstDateTime(ambulance.createdAt)}</span>
                 </div>
               </div>
               
@@ -774,10 +784,7 @@ const Dashboard = () => {
         <div className="top-bar">
           <div className="top-bar-left">
             <h1>{getTabTitle()}</h1>
-            <div className="time">{currentTime.toLocaleString('en-US', { 
-              weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', 
-              hour: '2-digit', minute: '2-digit' 
-            })}</div>
+            <div className="time">{formatIstClock(currentTime)}</div>
           </div>
           <div className="top-bar-right">
             <div className="system-status">
@@ -823,6 +830,16 @@ const Dashboard = () => {
         .reject-btn { flex: 1; padding: 12px; background: white; color: #de350b; border: 2px solid #de350b; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
         .reject-btn:hover { background: #de350b; color: white; }
       `}</style>
+
+      {/* Full ECS case report — patient, Medical Profile, triage and dispatch. */}
+      {reportBookingId && (
+        <CaseReportModal
+          bookingId={reportBookingId}
+          apiBaseUrl={API_BASE_URL}
+          token={TokenStorage.getToken() || ''}
+          onClose={() => setReportBookingId(null)}
+        />
+      )}
     </div>
   );
 };

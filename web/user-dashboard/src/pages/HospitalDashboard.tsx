@@ -5,8 +5,16 @@ import toast from 'react-hot-toast';
 import { io, Socket } from 'socket.io-client';
 import TokenStorage from '../utils/tokenStorage';
 import '../styles/HospitalDashboard.css';
+import DriverIdentity, { type DriverInfo } from '../components/DriverIdentity';
+import MedicalProfilePanel from '../components/MedicalProfilePanel';
+import {
+  medicalProfileAlerts,
+  normalizeMedicalProfile,
+  type MedicalProfile,
+} from '../types/medicalProfile';
+import { formatIstClock, formatIstFull, formatIstTime, formatTimeAgo } from '../utils/datetime';
+import { API_BASE_URL, SOCKET_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 interface Capability {
   type: string;
@@ -45,6 +53,7 @@ interface PreArrivalAlert {
   bookingId: string;
   ambulanceId: string;
   ambulanceVehicleNumber: string;
+  driver?: DriverInfo | null;
   ambulanceLocation: { latitude: number | null; longitude: number | null };
   patientSeverity: string;
   emergencyType: string | null;
@@ -55,6 +64,9 @@ interface PreArrivalAlert {
     painLevel: number;
     pregnancy: boolean;
   } | null;
+  /** Patient's Medical Profile, taken from their profile when the alert was
+   *  raised. Unset fields arrive as null and are shown as "Not Provided". */
+  medicalProfile?: MedicalProfile | null;
   etaMinutes: number | null;
   status: string;
   alertedAt: string;
@@ -144,20 +156,6 @@ const Dashboard = () => {
     }
   };
 
-  const formatTimeAgo = (dateStr: string): string => {
-    if (!dateStr) return 'Just now';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins} min ago`;
-    const diffHrs = Math.floor(diffMins / 60);
-    if (diffHrs < 24) return `${diffHrs} hr ago`;
-    return `${Math.floor(diffHrs / 24)} days ago`;
-  };
-
   useEffect(() => {
     fetchDashboardData();
 
@@ -177,7 +175,7 @@ const Dashboard = () => {
 
   // Socket.IO for pre-arrival alerts
   useEffect(() => {
-    const socket = io('http://localhost:3000', {
+    const socket = io(SOCKET_URL, {
       auth: { token: TokenStorage.getToken() },
     });
     socketRef.current = socket;
@@ -385,10 +383,7 @@ const Dashboard = () => {
         <div className="top-bar">
           <div className="top-bar-left">
             <h1>{activeTab === 'dashboard' ? 'Dashboard Overview' : activeTab === 'beds' ? 'Bed Management' : activeTab === 'emergencies' ? 'Emergency Cases' : activeTab === 'prearrivals' ? 'Pre-Arrival Alerts' : 'Booking History'}</h1>
-            <div className="time">{currentTime.toLocaleString('en-US', {
-              weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-              hour: '2-digit', minute: '2-digit'
-            })}</div>
+            <div className="time">{formatIstClock(currentTime)}</div>
           </div>
           <div className="top-bar-right">
             <div className="status-buttons">
@@ -514,6 +509,8 @@ const Dashboard = () => {
                   const isActive = alert.status !== 'COMPLETED' && alert.status !== 'CANCELLED';
                   const severityColor = alert.patientSeverity === 'CRITICAL' ? '#de350b' : alert.patientSeverity === 'HIGH' ? '#ff8b00' : alert.patientSeverity === 'MEDIUM' ? '#ffab00' : '#36b37e';
                   const statusColor = alert.status === 'COMPLETED' ? '#36b37e' : alert.status === 'CANCELLED' ? '#97a0af' : '#de350b';
+                  const medical = normalizeMedicalProfile(alert.medicalProfile);
+                  const medicalAlerts = medicalProfileAlerts(medical);
                   return (
                     <div key={alert.dispatchId} style={{ border: `2px solid ${isActive ? severityColor : '#e0e0e0'}`, borderRadius: '10px', padding: '20px', background: isActive ? `${severityColor}08` : '#fafafa' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
@@ -538,21 +535,66 @@ const Dashboard = () => {
                         )}
                       </div>
 
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: alert.triage ? '16px' : 0 }}>
+                      <div style={{ marginBottom: '12px' }}>
+                        <DriverIdentity
+                          driver={alert.driver}
+                          vehicleNumber={alert.ambulanceVehicleNumber}
+                          accentColor={severityColor}
+                          compact
+                        />
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '16px' }}>
                         <div style={{ background: 'white', borderRadius: '8px', padding: '12px', border: '1px solid #eee' }}>
-                          <div style={{ fontSize: '11px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Ambulance</div>
-                          <div style={{ fontWeight: '600', fontSize: '15px' }}>{alert.ambulanceVehicleNumber}</div>
-                          {alert.ambulanceLocation.latitude && (
-                            <div style={{ fontSize: '12px', color: '#666', marginTop: '2px' }}>
-                              {Number(alert.ambulanceLocation.latitude).toFixed(4)}, {Number(alert.ambulanceLocation.longitude).toFixed(4)}
-                            </div>
-                          )}
+                          <div style={{ fontSize: '11px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Ambulance Location</div>
+                          <div style={{ fontWeight: '600', fontSize: '15px' }}>
+                            {alert.ambulanceLocation.latitude
+                              ? `${Number(alert.ambulanceLocation.latitude).toFixed(4)}, ${Number(alert.ambulanceLocation.longitude).toFixed(4)}`
+                              : 'Awaiting GPS'}
+                          </div>
                         </div>
                         <div style={{ background: 'white', borderRadius: '8px', padding: '12px', border: '1px solid #eee' }}>
                           <div style={{ fontSize: '11px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Alerted</div>
                           <div style={{ fontWeight: '500', fontSize: '14px' }}>{formatTimeAgo(alert.alertedAt)}</div>
-                          <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }}>{new Date(alert.alertedAt).toLocaleTimeString()}</div>
+                          <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }} title={formatIstFull(alert.alertedAt)}>{formatIstTime(alert.alertedAt)}</div>
                         </div>
+                      </div>
+
+                      {/* Medical Profile — included automatically with every
+                          pre-alert, using the patient's most recently saved
+                          details. Fields they never supplied read "Not Provided"
+                          rather than an assumed value. */}
+                      <div style={{ marginBottom: '16px' }}>
+                        {medicalAlerts.length > 0 && (
+                          <div style={{
+                            background: '#fff8f0', border: '1px solid #ffab00',
+                            borderRadius: '8px', padding: '10px 12px', marginBottom: '12px',
+                          }}>
+                            <div style={{
+                              fontSize: '10px', fontWeight: 800, color: '#b06000',
+                              textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '6px',
+                            }}>
+                              ⚠️ Prepare for
+                            </div>
+                            <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                              {medicalAlerts.map(item => (
+                                <li key={item} style={{ fontSize: '12.5px', color: '#172b4d', lineHeight: 1.5 }}>
+                                  {item}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                        <MedicalProfilePanel
+                          profile={medical}
+                          compact
+                          accentColor={severityColor}
+                          footnote={
+                            medical.hasData
+                              ? 'Latest details from the patient profile.'
+                              : 'The patient has not recorded any medical information.'
+                          }
+                        />
                       </div>
 
                       {alert.triage && (

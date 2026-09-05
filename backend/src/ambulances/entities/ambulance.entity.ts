@@ -8,6 +8,7 @@ import {
   OneToMany,
 } from 'typeorm';
 import { AmbulanceStatus } from '../../common/enums';
+import { enumColumnType, jsonColumnType, timestampColumnType } from '../../common/column-types';
 import { Booking } from '../../bookings/entities/booking.entity';
 
 /**
@@ -28,7 +29,7 @@ export class Ambulance {
   vehicleType: string;
 
   @Column({
-    type: 'enum',
+    type: enumColumnType(),
     enum: AmbulanceStatus,
     default: AmbulanceStatus.AVAILABLE,
   })
@@ -40,10 +41,10 @@ export class Ambulance {
   @Column({ type: 'decimal', precision: 10, scale: 7, nullable: true, name: 'current_longitude' })
   currentLongitude: number;
 
-  @Column({ type: 'timestamp', nullable: true, name: 'last_location_update' })
+  @Column({ type: timestampColumnType(), nullable: true, name: 'last_location_update' })
   lastLocationUpdate: Date;
 
-  @Column({ type: 'jsonb', nullable: true, name: 'equipment_list' })
+  @Column({ type: jsonColumnType(), nullable: true, name: 'equipment_list' })
   equipmentList: any;
 
   @OneToMany(() => Booking, booking => booking.ambulance)

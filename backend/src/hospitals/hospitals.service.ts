@@ -9,6 +9,8 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { HospitalRankingService } from './hospital-ranking.service';
 import { AuditService } from '../audit/audit.service';
+import { DriverIdentityService } from '../users/driver-identity.service';
+import { shouldSeedDemoData } from '../config/env';
 
 /**
  * Hospitals Service
@@ -31,6 +33,7 @@ export class HospitalsService implements OnModuleInit {
     private readonly realtimeGateway: RealtimeGateway,
     private readonly hospitalRankingService: HospitalRankingService,
     private readonly auditService: AuditService,
+    private readonly driverIdentityService: DriverIdentityService,
   ) {}
 
   private isHospitalAccepting(status?: string): boolean {
@@ -48,11 +51,6 @@ export class HospitalsService implements OnModuleInit {
       Math.sin(dLon / 2) * Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
-  }
-
-  private estimateTravelMinutes(fromLat: number, fromLng: number, hospital: Hospital): number {
-    const distanceKm = this.calculateDistance(fromLat, fromLng, Number(hospital.latitude), Number(hospital.longitude));
-    return Math.max(1, Math.round(distanceKm * 3));
   }
 
   private resolveEmergencyType(booking: Booking): string | null {
@@ -116,8 +114,16 @@ export class HospitalsService implements OnModuleInit {
     const booking = dispatch.booking;
     if (!booking) return null;
 
-    const sourceLat = Number(dispatch.ambulance?.currentLatitude ?? booking.pickupLatitude ?? closedHospital.latitude);
-    const sourceLng = Number(dispatch.ambulance?.currentLongitude ?? booking.pickupLongitude ?? closedHospital.longitude);
+    // Where the patient is now decides where the remaining journey starts. Once
+    // they are aboard, the trip to hospital begins at the ambulance's live
+    // position — not at a pickup address it left some minutes ago.
+    const patientOnBoard = ['AT_PICKUP', 'EN_ROUTE_HOSPITAL', 'AT_HOSPITAL'].includes(dispatch.status);
+    const ambulanceLat = Number(dispatch.ambulance?.currentLatitude);
+    const ambulanceLng = Number(dispatch.ambulance?.currentLongitude);
+    const hasAmbulancePosition = Number.isFinite(ambulanceLat) && Number.isFinite(ambulanceLng);
+
+    const pickupLat = Number(booking.pickupLatitude ?? (hasAmbulancePosition ? ambulanceLat : closedHospital.latitude));
+    const pickupLng = Number(booking.pickupLongitude ?? (hasAmbulancePosition ? ambulanceLng : closedHospital.longitude));
     const requiredCapability = this.resolveRequiredCapability(booking);
 
     const hospitals = await this.hospitalRepository.find({ relations: ['capabilities'] });
@@ -129,19 +135,28 @@ export class HospitalsService implements OnModuleInit {
       return true;
     });
 
-    const ranking = this.hospitalRankingService.selectBest(eligibleHospitals, {
-      pickupLatitude: sourceLat,
-      pickupLongitude: sourceLng,
+    const ranking = await this.hospitalRankingService.selectBest(eligibleHospitals, {
+      pickupLatitude: pickupLat,
+      pickupLongitude: pickupLng,
+      ambulanceLatitude: hasAmbulancePosition ? ambulanceLat : null,
+      ambulanceLongitude: hasAmbulancePosition ? ambulanceLng : null,
+      patientOnBoard,
       severity: booking.severity as SeverityLevel | undefined,
       emergencyType: this.resolveEmergencyType(booking),
     });
 
     if (!ranking?.best) return null;
 
+    this.logger.log(
+      `[reroute] ${ranking.best.name} chosen for dispatch ${dispatch.id} — ${ranking.rankedList[0].reason}`,
+    );
+
     return {
       hospital: ranking.best,
       rankedHospitalIds: ranking.rankedList.map(score => score.hospital.id),
-      etaMinutes: this.estimateTravelMinutes(sourceLat, sourceLng, ranking.best),
+      // The transport time the ranking already measured, rather than a second
+      // estimate that could disagree with it.
+      etaMinutes: ranking.bestEtaMinutes,
     };
   }
 
@@ -329,11 +344,19 @@ export class HospitalsService implements OnModuleInit {
         estimatedHospitalTime: dispatch.estimatedHospitalTime,
       });
 
+      // The newly assigned hospital gets the same driver identity as the original alert.
+      const driver = await this.driverIdentityService.resolveOne({
+        driverId: dispatch.driverId,
+        ambulanceId: dispatch.ambulanceId,
+        vehicleNumber: dispatch.ambulance?.vehicleNumber ?? null,
+      });
+
       this.realtimeGateway.emitToHospital(reroute.hospital.id, 'pre_arrival_alert', {
         dispatchId: dispatch.id,
         bookingId: booking.id,
         ambulanceId: dispatch.ambulanceId,
         ambulanceVehicleNumber: dispatch.ambulance?.vehicleNumber ?? 'N/A',
+        driver,
         ambulanceLocation: {
           latitude: dispatch.ambulance?.currentLatitude ?? null,
           longitude: dispatch.ambulance?.currentLongitude ?? null,
@@ -474,6 +497,13 @@ export class HospitalsService implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
+    // Demo hospitals are written only when seeding is enabled — off by default in
+    // production so a deployment never adds rows nobody asked for to the
+    // project's real data. See SEED_DEMO_DATA.
+    if (!shouldSeedDemoData()) {
+      this.logger.log('SEED_DEMO_DATA is off — skipping demo hospitals seeding');
+      return;
+    }
     await this.ensureDelhiHospitals();
   }
 
@@ -582,6 +612,32 @@ export class HospitalsService implements OnModuleInit {
   }
 
   /**
+   * Broadcast a hospital's current diversion state and bed position.
+   *
+   * Feeds the admin Live Operations Map, which recolours the hospital and
+   * updates its bed readout without waiting for the next poll.
+   */
+  private emitHospitalUpdate(hospital: Hospital): void {
+    const latitude = Number(hospital.latitude);
+    const longitude = Number(hospital.longitude);
+    const totalBeds = hospital.totalBeds ?? 0;
+    const availableBeds = hospital.availableBeds ?? 0;
+
+    this.realtimeGateway.server.emit('hospital_status_updated', {
+      id: hospital.id,
+      name: hospital.name,
+      status: hospital.status,
+      latitude: Number.isFinite(latitude) ? latitude : null,
+      longitude: Number.isFinite(longitude) ? longitude : null,
+      totalBeds,
+      availableBeds,
+      occupiedBeds: Math.max(0, totalBeds - availableBeds),
+      occupancyPercent: totalBeds > 0 ? Math.round(((totalBeds - availableBeds) / totalBeds) * 100) : null,
+      at: new Date().toISOString(),
+    });
+  }
+
+  /**
    * Update hospital status
    */
   async updateStatus(id: string, serviceStatus: string): Promise<Hospital> {
@@ -592,6 +648,7 @@ export class HospitalsService implements OnModuleInit {
 
     hospital.status = serviceStatus as any;
     const savedHospital = await this.hospitalRepository.save(hospital);
+    this.emitHospitalUpdate(savedHospital);
 
     if (!this.isHospitalAccepting(serviceStatus)) {
       await this.rerouteDispatchesForHospital(savedHospital, `Hospital status changed to ${serviceStatus}`);
@@ -611,6 +668,7 @@ export class HospitalsService implements OnModuleInit {
 
     hospital.availableBeds = availableBeds;
     const savedHospital = await this.hospitalRepository.save(hospital);
+    this.emitHospitalUpdate(savedHospital);
 
     if (availableBeds <= 0) {
       await this.rerouteDispatchesForHospital(savedHospital, 'Hospital reached full capacity');

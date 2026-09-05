@@ -18,10 +18,14 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "typeorm": "typeorm-ts-node-commonjs",
+    "typeorm": "node -r ts-node/register ./node_modules/typeorm/cli.js",
     "migration:generate": "npm run typeorm -- migration:generate -d src/config/typeorm.config.ts",
     "migration:run": "npm run typeorm -- migration:run -d src/config/typeorm.config.ts",
-    "migration:revert": "npm run typeorm -- migration:revert -d src/config/typeorm.config.ts"
+    "migration:revert": "npm run typeorm -- migration:revert -d src/config/typeorm.config.ts",
+    "migration:show": "npm run typeorm -- migration:show -d src/config/typeorm.config.ts",
+    "migration:run:prod": "node ./node_modules/typeorm/cli.js migration:run -d dist/config/typeorm.config.js",
+    "migration:show:prod": "node ./node_modules/typeorm/cli.js migration:show -d dist/config/typeorm.config.js",
+    "migration:baseline": "node -r ts-node/register scripts/baseline-migrations.ts"
   },
   "dependencies": {
     "@google/genai": "^2.8.0",
@@ -39,6 +43,7 @@
     "better-sqlite3": "^12.6.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.0",
+    "dotenv": "^16.4.5",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
     "pg": "^8.11.3",

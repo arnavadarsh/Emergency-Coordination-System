@@ -1,4 +1,10 @@
 import React from 'react';
+import MedicalProfilePanel from './MedicalProfilePanel';
+import {
+  medicalProfileAlerts,
+  normalizeMedicalProfile,
+  type MedicalProfile,
+} from '../types/medicalProfile';
 
 // User dashboard palette
 const C = {
@@ -26,6 +32,7 @@ interface Booking {
   patientName?: string;
   patientPhone?: string;
   description?: string;
+  medicalProfile?: MedicalProfile | null;
 }
 
 interface Dispatch { id: string; status: string; assignedAt: string; booking: Booking; }
@@ -63,6 +70,8 @@ const ActiveCaseCard: React.FC<ActiveCaseCardProps> = ({
   const sev = booking.severity || 'MEDIUM';
   const sc = SEV[sev] ?? SEV.MEDIUM;
   const step = STEPS[status];
+  const medical = normalizeMedicalProfile(booking.medicalProfile);
+  const alerts = medicalProfileAlerts(medical);
 
   const handleCTA = () => {
     if (!step) return;
@@ -115,6 +124,44 @@ const ActiveCaseCard: React.FC<ActiveCaseCardProps> = ({
             </a>
           )}
         </div>
+      </div>
+
+      {/* Medical Profile — the patient's standing clinical background, shown
+          on the case card itself so the responder can spot allergies, existing
+          conditions and current medication while triaging, without navigating
+          away. Supporting information: it does not change the triage priority. */}
+      <div style={{ padding: '14px 20px', borderBottom: `1px solid ${C.cardBorder}` }}>
+        {alerts.length > 0 && (
+          <div style={{
+            background: '#fff8f0', border: '1px solid #ffab00', borderRadius: '8px',
+            padding: '10px 12px', marginBottom: '12px',
+          }}>
+            <div style={{
+              fontSize: '10px', fontWeight: 800, color: '#b06000',
+              textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '6px',
+            }}>
+              ⚠️ Note before treating
+            </div>
+            <ul style={{ margin: 0, paddingLeft: '16px' }}>
+              {alerts.map(alert => (
+                <li key={alert} style={{ fontSize: '12.5px', color: C.textPrimary, lineHeight: 1.5 }}>
+                  {alert}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <MedicalProfilePanel
+          profile={medical}
+          compact
+          accentColor={sc.color}
+          footnote={
+            medical.hasData
+              ? 'Latest details from the patient profile.'
+              : 'The patient has not recorded any medical information.'
+          }
+          style={{ border: 'none', padding: 0 }}
+        />
       </div>
 
       {/* Route */}

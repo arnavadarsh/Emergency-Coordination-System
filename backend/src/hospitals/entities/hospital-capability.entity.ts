@@ -10,6 +10,7 @@ import {
 } from 'typeorm';
 import { HospitalCapability as HospitalCapabilityEnum } from '../../common/enums';
 import { Hospital } from './hospital.entity';
+import { enumColumnType } from '../../common/column-types';
 
 /**
  * Hospital capability entity
@@ -29,7 +30,7 @@ export class HospitalCapability {
   hospital: Hospital;
 
   @Column({
-    type: 'enum',
+    type: enumColumnType(),
     enum: HospitalCapabilityEnum,
     name: 'capability_type',
   })

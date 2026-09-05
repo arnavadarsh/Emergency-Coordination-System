@@ -2,22 +2,54 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Hospital } from './entities/hospital.entity';
 import { HospitalCapability as CapabilityType } from '../common/enums';
 import { SeverityLevel } from '../common/enums';
+import { GeoPoint, TravelEstimate, TravelTimeService } from '../common/travel-time/travel-time.service';
+import { haversineKm } from '../common/geo';
 import {
   DEFAULT_RANKING_WEIGHTS,
+  DETOUR_TOLERANCE_MINUTES,
   MAX_DISTANCE_KM,
   RankingWeights,
+  TRANSPORT_TIME_DECAY_MINUTES,
 } from './hospital-ranking.config';
 
 export interface HospitalRankingInput {
+  /** Where the patient is — the start of the transport leg before pickup. */
   pickupLatitude: number;
   pickupLongitude: number;
+
+  /**
+   * The ambulance's live position, when one is assigned.
+   *
+   * Used two ways: it becomes the start of the transport leg once the patient
+   * is aboard, and before that it decides whether a hospital lies along the
+   * ambulance's approach or behind it.
+   */
+  ambulanceLatitude?: number | null;
+  ambulanceLongitude?: number | null;
+
+  /**
+   * True once the patient is in the ambulance (a mid-transport reroute). The
+   * journey to hospital then starts wherever the ambulance is right now, not
+   * at the pickup address it has already left.
+   */
+  patientOnBoard?: boolean;
+
   severity?: SeverityLevel;
   emergencyType?: string | null;
 }
 
 export interface HospitalScoreBreakdown {
+  /** Distance over the transport leg (road distance when routed). */
   distanceKm: number;
-  distanceScore: number;
+  /** Minutes for the transport leg — what the travel-time score is built on. */
+  transportMinutes: number;
+  /** Where those minutes came from: live traffic, or a distance estimate. */
+  travelTimeSource: TravelEstimate['source'];
+  /** Extra minutes caused by collecting the patient first. Null before pickup
+   *  is relevant, or when the ambulance position is unknown. */
+  detourMinutes: number | null;
+  travelTimeScore: number;
+  approachScore: number;
   icuScore: number;
   bedScore: number;
   specializationScore: number;
@@ -27,31 +59,48 @@ export interface HospitalScoreBreakdown {
 export interface HospitalScore {
   hospital: Hospital;
   totalScore: number;
+  /** One line saying why this hospital ranked where it did. */
+  reason: string;
   breakdown: HospitalScoreBreakdown;
 }
 
 export interface RankingResult {
   best: Hospital;
   rankedList: HospitalScore[];
+  /** Transport minutes to the selected hospital — the ETA to hand downstream. */
+  bestEtaMinutes: number;
 }
 
 /**
  * HospitalRankingService
  *
- * Pure utility — accepts already-loaded Hospital entities and returns a ranked list.
- * Contains no DB calls; callers are responsible for fetching hospitals with
- * capabilities loaded (eager/explicit join) before calling this service.
+ * Chooses where an ambulance should take a patient, from already-loaded
+ * Hospital entities. No DB access: callers fetch hospitals with capabilities
+ * joined and apply their own eligibility filter first.
  *
- * Ranking factors (configurable via hospital-ranking.config.ts):
- *   Distance         35% — Haversine distance normalized over MAX_DISTANCE_KM
- *   ICU availability 25% — ICU bed headroom; penalizes missing ICU for CRITICAL cases
- *   Bed availability 20% — availableBeds / totalBeds ratio
- *   Specialization   15% — capability type matched to emergencyType keyword
- *   Hospital load     5% — aggregate departmental currentLoad / capacity (tiebreaker)
+ * The ranking is built around the question that actually matters clinically —
+ * how long until this patient is receiving the right care — so it scores
+ * driving minutes rather than map distance, and takes those minutes from live
+ * traffic when a routing key is configured. Two positions feed into it:
+ *
+ *   - the patient's location, which starts the transport leg before pickup;
+ *   - the ambulance's live position, which starts that leg once the patient is
+ *     aboard, and which before then reveals whether a hospital is ahead of the
+ *     ambulance or back the way it came.
+ *
+ * Ranking factors (weights in hospital-ranking.config.ts):
+ *   Travel time      32% — transport minutes, exponential decay
+ *   ICU availability 22% — ICU headroom; heavy penalty for CRITICAL with no ICU
+ *   Bed availability 18% — availableBeds / totalBeds
+ *   Specialization   15% — capability matched to the emergency type
+ *   Approach          8% — detour cost relative to the ambulance's position
+ *   Hospital load     5% — aggregate departmental load (tiebreaker)
  */
 @Injectable()
 export class HospitalRankingService {
   private readonly logger = new Logger(HospitalRankingService.name);
+
+  constructor(private readonly travelTime: TravelTimeService) {}
 
   /**
    * Select the single best hospital and return the full ranked list.
@@ -60,11 +109,11 @@ export class HospitalRankingService {
    *   Pass 1 — eligible hospitals with availableBeds > 0
    *   Pass 2 — all eligible hospitals (beds = 0 is acceptable for alerting)
    */
-  selectBest(
+  async selectBest(
     hospitals: Hospital[],
     input: HospitalRankingInput,
     weights: RankingWeights = DEFAULT_RANKING_WEIGHTS,
-  ): RankingResult | null {
+  ): Promise<RankingResult | null> {
     if (hospitals.length === 0) {
       this.logger.warn('[HospitalRanking] No hospitals provided — cannot select.');
       return null;
@@ -78,23 +127,127 @@ export class HospitalRankingService {
       this.logger.warn('[HospitalRanking] Pass 1 found 0 hospitals with beds — falling back to all hospitals.');
     }
 
-    const rankedList = this.rankAll(candidates, input, weights);
+    const rankedList = await this.rankAll(candidates, input, weights);
     this.logScoreTable(rankedList, input);
 
-    return { best: rankedList[0].hospital, rankedList };
+    return {
+      best: rankedList[0].hospital,
+      rankedList,
+      bestEtaMinutes: rankedList[0].breakdown.transportMinutes,
+    };
   }
 
   /**
    * Score and sort all hospitals. Returns highest-score first.
    */
-  rankAll(
+  async rankAll(
     hospitals: Hospital[],
     input: HospitalRankingInput,
     weights: RankingWeights = DEFAULT_RANKING_WEIGHTS,
-  ): HospitalScore[] {
+  ): Promise<HospitalScore[]> {
+    const legs = await this.resolveLegs(hospitals, input);
+
     return hospitals
-      .map(h => this.scoreOne(h, input, weights))
+      .map((hospital, index) => this.scoreOne(hospital, input, weights, legs[index]))
       .sort((a, b) => b.totalScore - a.totalScore);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Travel legs
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Work out, for every candidate, how long the transport leg takes and how far
+   * out of the ambulance's way it is.
+   *
+   * Routing is bought once, for a shortlist. The nearest few hospitals by
+   * straight line are the only ones whose precise minutes can change the answer;
+   * everything beyond that is scored from the offline estimate, which costs
+   * nothing and never promotes a distant hospital past a near one on its own.
+   */
+  private async resolveLegs(
+    hospitals: Hospital[],
+    input: HospitalRankingInput,
+  ): Promise<{ transport: TravelEstimate; detourMinutes: number | null }[]> {
+    const pickup: GeoPoint = { latitude: input.pickupLatitude, longitude: input.pickupLongitude };
+    const ambulance = this.ambulancePoint(input);
+
+    // Once the patient is aboard, the trip to hospital starts at the ambulance.
+    const transportOrigin = input.patientOnBoard && ambulance ? ambulance : pickup;
+
+    const points = hospitals.map(h => this.hospitalPoint(h));
+
+    // Before pickup, a second origin — where the ambulance is — turns "how far
+    // is this hospital" into "is it ahead of us or behind us".
+    const wantsDetour = Boolean(ambulance) && !input.patientOnBoard;
+
+    // Everything below rides on ONE matrix request: two origins, the shortlisted
+    // hospitals, plus the pickup point when the detour needs measuring. Asking
+    // leg by leg would multiply a paid call by the number of candidates.
+    const budget = this.travelTime.maxDestinationsPerCall;
+    const shortlist = this.shortlistIndexes(points, transportOrigin, wantsDetour ? budget - 1 : budget);
+
+    const destinations: GeoPoint[] = shortlist.map(i => points[i]);
+    if (wantsDetour) destinations.push(pickup);
+
+    const origins: GeoPoint[] = wantsDetour ? [transportOrigin, ambulance!] : [transportOrigin];
+    const matrix = await this.travelTime.estimateMatrix(origins, destinations);
+
+    const transportBySlot = matrix[0] ?? [];
+    const ambulanceBySlot = wantsDetour ? matrix[1] ?? [] : [];
+
+    // Ambulance → patient: the same leg for every candidate, and the last
+    // destination in the matrix above.
+    const ambulanceToPickup = wantsDetour
+      ? ambulanceBySlot[destinations.length - 1] ?? this.travelTime.offline(ambulance!, pickup)
+      : null;
+
+    return hospitals.map((hospital, index) => {
+      const slot = shortlist.indexOf(index);
+      const transport = slot >= 0 && transportBySlot[slot]
+        ? transportBySlot[slot]
+        : this.travelTime.offline(transportOrigin, points[index]);
+
+      let detourMinutes: number | null = null;
+      if (ambulanceToPickup) {
+        const ambulanceToHospital = slot >= 0 && ambulanceBySlot[slot]
+          ? ambulanceBySlot[slot]
+          : this.travelTime.offline(ambulance!, points[index]);
+        // Time added by picking the patient up on the way. Zero means the
+        // hospital sits straight ahead; large means doubling back.
+        detourMinutes = Math.max(
+          0,
+          ambulanceToPickup.minutes + transport.minutes - ambulanceToHospital.minutes,
+        );
+      }
+
+      return { transport, detourMinutes };
+    });
+  }
+
+  /** Indexes of the nearest hospitals by straight line, capped for routing cost. */
+  private shortlistIndexes(points: GeoPoint[], origin: GeoPoint, maxDestinations: number): number[] {
+    return points
+      .map((point, index) => ({
+        index,
+        km: haversineKm(origin.latitude, origin.longitude, point.latitude, point.longitude),
+      }))
+      // A hospital past the service radius is never worth a paid lookup.
+      .filter(entry => entry.km <= MAX_DISTANCE_KM)
+      .sort((a, b) => a.km - b.km)
+      .slice(0, Math.max(1, maxDestinations))
+      .map(entry => entry.index);
+  }
+
+  private ambulancePoint(input: HospitalRankingInput): GeoPoint | null {
+    const latitude = Number(input.ambulanceLatitude);
+    const longitude = Number(input.ambulanceLongitude);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+    return { latitude, longitude };
+  }
+
+  private hospitalPoint(hospital: Hospital): GeoPoint {
+    return { latitude: Number(hospital.latitude), longitude: Number(hospital.longitude) };
   }
 
   // ---------------------------------------------------------------------------
@@ -105,41 +258,59 @@ export class HospitalRankingService {
     hospital: Hospital,
     input: HospitalRankingInput,
     weights: RankingWeights,
+    leg: { transport: TravelEstimate; detourMinutes: number | null },
   ): HospitalScore {
-    const distanceKm = this.haversine(
-      input.pickupLatitude,
-      input.pickupLongitude,
-      Number(hospital.latitude),
-      Number(hospital.longitude),
-    );
-
-    const distanceScore     = this.scoreDistance(distanceKm);
-    const icuScore          = this.scoreIcu(hospital, input.severity);
-    const bedScore          = this.scoreBeds(hospital);
+    const travelTimeScore     = this.scoreTravelTime(leg.transport.minutes);
+    const approachScore       = this.scoreApproach(leg.detourMinutes);
+    const icuScore            = this.scoreIcu(hospital, input.severity);
+    const bedScore            = this.scoreBeds(hospital);
     const specializationScore = this.scoreSpecialization(hospital, input.emergencyType);
-    const loadScore         = this.scoreLoad(hospital);
+    const loadScore           = this.scoreLoad(hospital);
 
     const totalScore =
-      weights.distance        * distanceScore +
+      weights.travelTime      * travelTimeScore +
+      weights.approach        * approachScore +
       weights.icuAvailability * icuScore +
       weights.bedAvailability * bedScore +
       weights.specialization  * specializationScore +
       weights.hospitalLoad    * loadScore;
 
-    return {
-      hospital,
-      totalScore,
-      breakdown: { distanceKm, distanceScore, icuScore, bedScore, specializationScore, loadScore },
+    const breakdown: HospitalScoreBreakdown = {
+      distanceKm: leg.transport.distanceKm,
+      transportMinutes: leg.transport.minutes,
+      travelTimeSource: leg.transport.source,
+      detourMinutes: leg.detourMinutes,
+      travelTimeScore,
+      approachScore,
+      icuScore,
+      bedScore,
+      specializationScore,
+      loadScore,
     };
+
+    return { hospital, totalScore, reason: this.explain(hospital, input, breakdown), breakdown };
   }
 
   /**
-   * Distance score: linear decay from 1.0 at 0 km to 0.0 at MAX_DISTANCE_KM.
-   * Hospitals beyond the threshold still receive a small positive score (never 0)
-   * so they remain selectable as a last resort.
+   * Travel-time score: exponential decay over transport minutes.
+   *
+   * Never reaches 0, so a distant hospital stays selectable when it is the only
+   * one that can take the patient.
    */
-  private scoreDistance(distanceKm: number): number {
-    return Math.max(0.01, 1 - distanceKm / MAX_DISTANCE_KM);
+  private scoreTravelTime(minutes: number): number {
+    return Math.max(0.01, Math.exp(-Math.max(0, minutes) / TRANSPORT_TIME_DECAY_MINUTES));
+  }
+
+  /**
+   * Approach score: how much time is lost by collecting the patient before
+   * heading to this hospital, given where the ambulance actually is.
+   *
+   * Neutral (0.5) when there is no ambulance position to reason from — an
+   * unknown position must not advantage or penalise anyone.
+   */
+  private scoreApproach(detourMinutes: number | null): number {
+    if (detourMinutes === null) return 0.5;
+    return 1 / (1 + detourMinutes / DETOUR_TOLERANCE_MINUTES);
   }
 
   /**
@@ -218,6 +389,50 @@ export class HospitalRankingService {
   }
 
   // ---------------------------------------------------------------------------
+  // Explanation
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A sentence a dispatcher can read: how long, whether the ICU and the
+   * specialist unit can take the patient, and whether it is on the way.
+   */
+  private explain(
+    hospital: Hospital,
+    input: HospitalRankingInput,
+    breakdown: HospitalScoreBreakdown,
+  ): string {
+    const parts: string[] = [];
+
+    const timing = breakdown.travelTimeSource === 'google' ? 'in current traffic' : 'estimated';
+    parts.push(`${breakdown.transportMinutes} min away (${breakdown.distanceKm} km, ${timing})`);
+
+    if (input.severity === SeverityLevel.CRITICAL) {
+      parts.push(breakdown.icuScore >= 0.5 ? 'ICU has headroom' : 'limited or no ICU');
+    }
+
+    const required = input.emergencyType ? this.resolveCapability(input.emergencyType) : null;
+    if (required) {
+      parts.push(
+        breakdown.specializationScore >= 1 ? `${required} unit accepting`
+          : breakdown.specializationScore > 0 ? `${required} unit limited`
+          : `no ${required} unit`,
+      );
+    }
+
+    parts.push(`${hospital.availableBeds ?? 0} beds free`);
+
+    if (breakdown.detourMinutes !== null) {
+      parts.push(
+        breakdown.detourMinutes <= 2
+          ? 'on the ambulance’s route'
+          : `${breakdown.detourMinutes} min detour from the ambulance’s position`,
+      );
+    }
+
+    return parts.join('; ');
+  }
+
+  // ---------------------------------------------------------------------------
   // Emergency-type → capability mapping
   // ---------------------------------------------------------------------------
 
@@ -255,8 +470,9 @@ export class HospitalRankingService {
   // ---------------------------------------------------------------------------
 
   private logScoreTable(scores: HospitalScore[], input: HospitalRankingInput): void {
+    const origin = input.patientOnBoard ? 'ambulance (patient on board)' : 'patient location';
     this.logger.log(
-      `[HospitalRanking] Ranked ${scores.length} hospital(s) | ` +
+      `[HospitalRanking] Ranked ${scores.length} hospital(s) from ${origin} | ` +
       `severity=${input.severity ?? 'n/a'} emergencyType=${input.emergencyType ?? 'n/a'}`,
     );
     scores.forEach((s, i) => {
@@ -264,30 +480,13 @@ export class HospitalRankingService {
       this.logger.log(
         `[HospitalRanking]  #${i + 1} "${s.hospital.name}" ` +
         `TOTAL=${s.totalScore.toFixed(4)} | ` +
-        `dist=${b.distanceScore.toFixed(3)} (${b.distanceKm.toFixed(1)}km) ` +
+        `time=${b.travelTimeScore.toFixed(3)} (${b.transportMinutes}min/${b.distanceKm}km ${b.travelTimeSource}) ` +
+        `approach=${b.approachScore.toFixed(3)} (detour=${b.detourMinutes ?? 'n/a'}) ` +
         `icu=${b.icuScore.toFixed(3)} ` +
         `beds=${b.bedScore.toFixed(3)} ` +
         `spec=${b.specializationScore.toFixed(3)} ` +
         `load=${b.loadScore.toFixed(3)}`,
       );
     });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Haversine formula (self-contained — no external dependency)
-  // ---------------------------------------------------------------------------
-
-  private haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371;
-    const dLat = this.rad(lat2 - lat1);
-    const dLon = this.rad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(this.rad(lat1)) * Math.cos(this.rad(lat2)) * Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  }
-
-  private rad(deg: number): number {
-    return deg * (Math.PI / 180);
   }
 }

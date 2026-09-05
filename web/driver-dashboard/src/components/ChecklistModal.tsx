@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 import { tokenStorage } from '../utils/tokenStorage';
+import { API_BASE_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 const C = {
   overlay:   'rgba(0,0,0,0.5)',

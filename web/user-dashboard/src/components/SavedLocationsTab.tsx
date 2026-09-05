@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { API_BASE_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 interface SavedLocation {
   id: string;

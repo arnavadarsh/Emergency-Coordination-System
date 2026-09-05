@@ -1,0 +1,77 @@
+# Serves the four dashboards, and — when BACKEND_ORIGIN is set — proxies the API
+# and WebSocket to the backend so the browser only ever talks to one origin.
+#
+# Rendered at container start by 30-render-nginx-conf.sh, which fills in the
+# listen port from $PORT and splices in the API/WebSocket proxy only when
+# BACKEND_ORIGIN is set.
+#
+# Two supported shapes:
+#   same-origin  (Compose, a VPS): BACKEND_ORIGIN=http://backend:3000
+#   split hosts  (Railway):        BACKEND_ORIGIN unset; the dashboards are
+#                                  built against the backend's public URL, and
+#                                  the backend allows this origin via CORS.
+
+server {
+    listen __PORT__;
+    server_name _;
+
+    # Chat images can be a few MB before the client downscales them.
+    client_max_body_size 12m;
+
+    # Behind a TLS terminator these tell the app who the real client is, which
+    # is what per-caller rate limiting keys on. Set RATE_LIMIT_TRUST_PROXY=true
+    # on the backend for them to be believed.
+    proxy_set_header Host              $host;
+    proxy_set_header X-Real-IP         $remote_addr;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    gzip on;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+    gzip_min_length 1024;
+
+    # nginx's own liveness, distinct from the backend's.
+    location = /healthz {
+        access_log off;
+        return 200 "ok\n";
+    }
+
+__PROXY_BLOCK__
+
+    # ── Dashboards ───────────────────────────────────────────────────────────
+    # Hashed asset filenames, so they can be cached indefinitely.
+    location ~* \.(js|css|woff2?|png|jpe?g|gif|svg|ico)$ {
+        root /usr/share/nginx/html;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+        try_files $uri =404;
+    }
+
+    location /admin/ {
+        alias /usr/share/nginx/html/admin/;
+        try_files $uri $uri/ /admin/index.html;
+    }
+
+    location /driver/ {
+        alias /usr/share/nginx/html/driver/;
+        try_files $uri $uri/ /driver/index.html;
+    }
+
+    location /hospital/ {
+        alias /usr/share/nginx/html/hospital/;
+        try_files $uri $uri/ /hospital/index.html;
+    }
+
+    # The user dashboard at the root. The SPA fallback is what makes the public
+    # tracking deep link work: /track/<token> is a client-side route, and
+    # without this a family member opening it from an SMS would get a 404.
+    location / {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /index.html;
+
+        # index.html itself must never be cached, or a deploy leaves browsers
+        # loading asset URLs that no longer exist.
+        add_header Cache-Control "no-cache";
+    }
+}

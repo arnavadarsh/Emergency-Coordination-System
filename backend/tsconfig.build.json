@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  // What `nest build` compiles into dist.
+  //
+  // Only the application: without this, tsc also picks up `scripts/`, and
+  // preserving the directory structure pushed the entry point to
+  // dist/src/main.js while package.json's start:prod pointed at dist/main.
+  // Tests are excluded so no spec ever ships inside a runtime image.
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "test", "**/*.spec.ts", "**/*.e2e-spec.ts"]
+}

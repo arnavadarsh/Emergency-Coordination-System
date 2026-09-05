@@ -1,0 +1,27 @@
+    # ── Backend ──────────────────────────────────────────────────────────────
+    location /api/ {
+        proxy_pass __BACKEND_ORIGIN__;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        # An emergency booking runs triage and dispatch inline.
+        proxy_read_timeout 60s;
+    }
+
+    # Live dispatch, tracking and case chat all ride this socket.
+    location /socket.io/ {
+        proxy_pass __BACKEND_ORIGIN__;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        # Long-lived: a driver's dashboard holds this open for a whole shift.
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+
+    # Development-only fallback for chat images. With Supabase Storage
+    # configured — as a deployment must be — attachment URLs point at Supabase
+    # and never reach this.
+    location /uploads/ {
+        proxy_pass __BACKEND_ORIGIN__;
+        proxy_http_version 1.1;
+    }

@@ -5,6 +5,7 @@ import {
   CreateDateColumn,
   Index,
 } from 'typeorm';
+import { jsonColumnType } from '../../common/column-types';
 
 /**
  * Audit log entity
@@ -27,13 +28,13 @@ export class AuditLog {
   @Column({ type: 'varchar', length: 50 })
   action: string;
 
-  @Column({ type: 'jsonb', nullable: true })
+  @Column({ type: jsonColumnType(), nullable: true })
   changes: any;
 
-  @Column({ type: 'jsonb', nullable: true, name: 'before_state' })
+  @Column({ type: jsonColumnType(), nullable: true, name: 'before_state' })
   beforeState: any;
 
-  @Column({ type: 'jsonb', nullable: true, name: 'after_state' })
+  @Column({ type: jsonColumnType(), nullable: true, name: 'after_state' })
   afterState: any;
 
   @Column({ type: 'uuid', nullable: true, name: 'user_id' })

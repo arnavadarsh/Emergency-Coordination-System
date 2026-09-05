@@ -3,9 +3,13 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import TokenStorage from '../utils/tokenStorage';
 import '../styles/Dashboard.css';
+import { formatIstClock, formatIstDate, formatIstDateTime, formatIstFull, formatTimeAgo } from '../utils/datetime';
 import { BarChart, Bar, PieChart, Pie, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
+import CaseReportModal from '../components/CaseReportModal';
+import OperationsMap from '../components/OperationsMap';
+import { normalizeMedicalProfile, type MedicalProfile } from '../types/medicalProfile';
+import { API_BASE_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8'];
 
@@ -62,6 +66,8 @@ interface User {
   role: string;
   isActive: boolean;
   createdAt: string;
+  /** Patient's Medical Profile — carried on the row so it exports with the user report. */
+  medicalProfile: MedicalProfile;
 }
 
 interface Hospital {
@@ -99,9 +105,13 @@ interface Booking {
   severity: string;
   pickupAddress: string;
   createdAt: string;
+  patientName: string;
+  patientPhone: string | null;
+  /** Patient's Medical Profile, resolved live so exports carry the latest values. */
+  medicalProfile: MedicalProfile;
 }
 
-type TabType = 'dashboard' | 'users' | 'hospitals' | 'ambulances' | 'pending' | 'bookings' | 'audit';
+type TabType = 'dashboard' | 'map' | 'users' | 'hospitals' | 'ambulances' | 'pending' | 'bookings' | 'audit';
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -117,6 +127,9 @@ const Dashboard = () => {
   const [userPage, setUserPage] = useState(1);
   const [userLimit] = useState(10);
   const [totalUsers, setTotalUsers] = useState(0);
+  // Booking whose full ECS case report (patient, Medical Profile, triage,
+  // dispatch) is open. Null when the report modal is closed.
+  const [reportBookingId, setReportBookingId] = useState<string | null>(null);
   
   const [hospitalSearch, setHospitalSearch] = useState('');
   const [ambulanceSearch, setAmbulanceSearch] = useState('');
@@ -135,20 +148,6 @@ const Dashboard = () => {
   const [ambulances, setAmbulances] = useState<Ambulance[]>([]);
   const [pendingAmbulances, setPendingAmbulances] = useState<PendingAmbulance[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
-
-  const formatTimeAgo = (dateStr: string): string => {
-    if (!dateStr) return 'Just now';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins} min ago`;
-    const diffHrs = Math.floor(diffMins / 60);
-    if (diffHrs < 24) return `${diffHrs} hr ago`;
-    return `${Math.floor(diffHrs / 24)} days ago`;
-  };
 
   const fetchDashboardData = async () => {
     try {
@@ -189,7 +188,8 @@ const Dashboard = () => {
             email: u.email,
             role: u.role,
             isActive: u.isActive,
-            createdAt: u.createdAt
+            createdAt: u.createdAt,
+            medicalProfile: normalizeMedicalProfile(u.medicalProfile ?? u)
           })));
           setTotalUsers(data.users.length);
         }
@@ -245,7 +245,8 @@ const Dashboard = () => {
           email: u.email,
           role: u.role,
           isActive: u.isActive,
-          createdAt: u.createdAt
+          createdAt: u.createdAt,
+          medicalProfile: normalizeMedicalProfile(u.medicalProfile ?? u)
         })));
         setTotalUsers(response.data.length);
       } else if (response.data.users) {
@@ -254,7 +255,8 @@ const Dashboard = () => {
           email: u.email,
           role: u.role,
           isActive: u.isActive,
-          createdAt: u.createdAt
+          createdAt: u.createdAt,
+          medicalProfile: normalizeMedicalProfile(u.medicalProfile ?? u)
         })));
         setTotalUsers(response.data.total || response.data.users.length);
       }
@@ -263,7 +265,29 @@ const Dashboard = () => {
     }
   };
 
-  const exportToCSV = (data: any[], filename: string) => {
+  /**
+   * Flatten a row for export.
+   *
+   * The Medical Profile is nested on the row, so it is spread into four named
+   * columns here rather than serialised as an object. Fields the patient never
+   * supplied export as "Not Provided", which keeps a blank cell from being read
+   * as "no allergies".
+   */
+  const toReportRow = (row: any) => {
+    const { medicalProfile, ...rest } = row;
+    if (!medicalProfile) return rest;
+    const profile = normalizeMedicalProfile(medicalProfile);
+    return {
+      ...rest,
+      bloodGroup: profile.display.bloodGroup,
+      allergies: profile.display.allergies,
+      chronicConditions: profile.display.chronicConditions,
+      currentMedications: profile.display.currentMedications,
+    };
+  };
+
+  const exportToCSV = (rows: any[], filename: string) => {
+    const data = (rows || []).map(toReportRow);
     if (!data || data.length === 0) {
       alert('No data to export');
       return;
@@ -306,7 +330,10 @@ const Dashboard = () => {
         status: b.status,
         severity: b.severity,
         pickupAddress: b.pickupAddress,
-        createdAt: b.createdAt
+        createdAt: b.createdAt,
+        patientName: b.patientName || 'Patient',
+        patientPhone: b.patientPhone ?? null,
+        medicalProfile: normalizeMedicalProfile(b.medicalProfile)
       })));
     } catch (err) {
       console.error('Failed to fetch bookings:', err);
@@ -461,14 +488,6 @@ const Dashboard = () => {
     }
   };
 
-  const getStatusColor = (status: string) => {
-    switch (status?.toUpperCase()) {
-      case 'ACTIVE': case 'AVAILABLE': case 'ACCEPTING': return '#00875a';
-      case 'INACTIVE': case 'OFFLINE': case 'DIVERT': return '#de350b';
-      case 'BUSY': case 'LIMITED': case 'IN_PROGRESS': return '#ff8b00';
-      default: return '#6b778c';
-    }
-  };
 
   if (loading) {
     return (
@@ -606,12 +625,12 @@ const Dashboard = () => {
                   cx="50%"
                   cy="50%"
                   labelLine={false}
-                  label={({ name, percent }) => `${name}: ${(percent * 100).toFixed(0)}%`}
+                  label={({ name, percent }) => `${name}: ${((percent ?? 0) * 100).toFixed(0)}%`}
                   outerRadius={80}
                   fill="#8884d8"
                   dataKey="value"
                 >
-                  {bookingStatusData.map((entry, index) => (
+                  {bookingStatusData.map((_entry, index) => (
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
                 </Pie>
@@ -841,7 +860,7 @@ const Dashboard = () => {
                           {user.isActive ? 'Active' : 'Inactive'}
                         </span>
                       </td>
-                      <td>{new Date(user.createdAt).toLocaleDateString()}</td>
+                      <td title={formatIstFull(user.createdAt)}>{formatIstDate(user.createdAt)}</td>
                       <td>
                         <button 
                           onClick={() => handleUpdateUserStatus(user.id, !user.isActive)} 
@@ -1227,16 +1246,27 @@ const Dashboard = () => {
             <thead>
               <tr>
                 <th>Booking ID</th>
+                <th>Patient</th>
+                <th>Blood Group</th>
                 <th>Status</th>
                 <th>Severity</th>
                 <th>Pickup Address</th>
                 <th>Created</th>
+                <th>Report</th>
               </tr>
             </thead>
             <tbody>
               {bookings.map(booking => (
                 <tr key={booking.id} className="table-row-hover">
                   <td><code style={{ background: '#f0f0f0', padding: '4px 8px', borderRadius: '4px', fontFamily: 'monospace', fontSize: '13px' }}>{booking.id.slice(0, 8)}</code></td>
+                  <td>{booking.patientName}</td>
+                  <td>
+                    {/* Straight from the patient's Medical Profile; "Not Provided"
+                        when they have not recorded a blood group. */}
+                    <span style={{ color: booking.medicalProfile.bloodGroup ? '#172b4d' : '#97a0af', fontStyle: booking.medicalProfile.bloodGroup ? 'normal' : 'italic' }}>
+                      {booking.medicalProfile.display.bloodGroup}
+                    </span>
+                  </td>
                   <td>
                     <span className={`status-badge status-${booking.status.toLowerCase().replace('_', '-')}`}>
                       {booking.status}
@@ -1250,7 +1280,20 @@ const Dashboard = () => {
                   <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                     {booking.pickupAddress || 'N/A'}
                   </td>
-                  <td>{new Date(booking.createdAt).toLocaleString()}</td>
+                  <td title={formatIstFull(booking.createdAt)}>{formatIstDateTime(booking.createdAt)}</td>
+                  <td>
+                    <button
+                      onClick={() => setReportBookingId(booking.id)}
+                      style={{
+                        padding: '6px 12px', background: '#f4f5f7', color: '#172b4d',
+                        border: '1px solid #dfe1e6', borderRadius: '6px',
+                        fontSize: '12px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+                      }}
+                      title="Full case report: patient, Medical Profile, triage and dispatch"
+                    >
+                      📄 View
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -1337,7 +1380,7 @@ const Dashboard = () => {
                 </div>
                 <div className="detail-row">
                   <span className="detail-label">Submitted</span>
-                  <span className="detail-value">{new Date(ambulance.createdAt).toLocaleString()}</span>
+                  <span className="detail-value" title={formatIstFull(ambulance.createdAt)}>{formatIstDateTime(ambulance.createdAt)}</span>
                 </div>
               </div>
               
@@ -1358,6 +1401,7 @@ const Dashboard = () => {
 
   const renderContent = () => {
     switch (activeTab) {
+      case 'map': return <OperationsMap />;
       case 'users': return renderUsersTab();
       case 'hospitals': return renderHospitalsTab();
       case 'ambulances': return renderAmbulancesTab();
@@ -1370,6 +1414,7 @@ const Dashboard = () => {
 
   const getTabTitle = () => {
     switch (activeTab) {
+      case 'map': return 'Live Operations Map';
       case 'users': return 'User Management';
       case 'hospitals': return 'Hospital Management';
       case 'ambulances': return 'Ambulance Management';
@@ -1397,6 +1442,10 @@ const Dashboard = () => {
           <a href="#" className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
             Dashboard
+          </a>
+          <a href="#" className={`nav-item ${activeTab === 'map' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('map'); }}>
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 3l-.16.03L15 5.1 9 3 3.36 4.9c-.21.07-.36.25-.36.48V20.5c0 .28.22.5.5.5l.16-.03L9 18.9l6 2.1 5.64-1.9c.21-.07.36-.25.36-.48V3.5c0-.28-.22-.5-.5-.5zM15 19l-6-2.11V5l6 2.11V19z"/></svg>
+            Live Map
           </a>
           <a href="#" className={`nav-item ${activeTab === 'users' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('users'); }}>
             <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
@@ -1441,10 +1490,7 @@ const Dashboard = () => {
         <div className="top-bar">
           <div className="top-bar-left">
             <h1>{getTabTitle()}</h1>
-            <div className="time">{currentTime.toLocaleString('en-US', { 
-              weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', 
-              hour: '2-digit', minute: '2-digit' 
-            })}</div>
+            <div className="time">{formatIstClock(currentTime)}</div>
           </div>
           <div className="top-bar-right">
             <div className="system-status">
@@ -1612,6 +1658,16 @@ const Dashboard = () => {
         .reject-btn { flex: 1; padding: 12px; background: white; color: #de350b; border: 2px solid #de350b; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
         .reject-btn:hover { background: #de350b; color: white; }
       `}</style>
+
+      {/* Full ECS case report — patient, Medical Profile, triage and dispatch. */}
+      {reportBookingId && (
+        <CaseReportModal
+          bookingId={reportBookingId}
+          apiBaseUrl={API_BASE_URL}
+          token={TokenStorage.getToken() || ''}
+          onClose={() => setReportBookingId(null)}
+        />
+      )}
     </div>
   );
 };

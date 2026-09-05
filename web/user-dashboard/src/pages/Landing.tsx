@@ -3,6 +3,14 @@ import { useNavigate } from 'react-router-dom';
 import ApiClient from '../services/api';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import MedicalProfileFields from '../components/MedicalProfileFields';
+import {
+  EMPTY_MEDICAL_PROFILE_FORM,
+  isMedicalProfileFormEmpty,
+  toMedicalProfilePayload,
+  type MedicalProfileForm,
+} from '../types/medicalProfile';
+import { API_BASE_URL, ROLE_APP_URLS } from '../config/api';
 
 // ── Palette ──────────────────────────────────────────────────
 const C = {
@@ -210,6 +218,11 @@ const Landing: React.FC = () => {
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [selectedCoords, setSelectedCoords] = useState<{ lat: number; lon: number } | null>(null);
   const [showMap, setShowMap] = useState(false);
+  // Optional Medical Profile captured while creating the patient ID. Collapsed by
+  // default so it never gets in the way of an urgent sign-up; the ID is created
+  // whether or not any of it is filled in.
+  const [medicalProfile, setMedicalProfile] = useState<MedicalProfileForm>({ ...EMPTY_MEDICAL_PROFILE_FORM });
+  const [showMedicalProfile, setShowMedicalProfile] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
@@ -271,10 +284,9 @@ const Landing: React.FC = () => {
     e.preventDefault(); setError(''); setLoading(true);
     try {
       const { accessToken, user } = await ApiClient.login(email, password);
-      const urls: Record<string, string> = { USER: '/dashboard', HOSPITAL: 'http://localhost:3004/dashboard', DRIVER: 'http://localhost:3003/dashboard', ADMIN: 'http://localhost:3002/dashboard' };
-      if (!urls[user.role]) throw new Error('Unknown role.');
+      if (!ROLE_APP_URLS[user.role]) throw new Error('Unknown role.');
       if (user.role === 'USER') navigate('/dashboard');
-      else window.location.href = `${urls[user.role]}#token=${encodeURIComponent(accessToken)}`;
+      else window.location.href = `${ROLE_APP_URLS[user.role]}#token=${encodeURIComponent(accessToken)}`;
     } catch (err: any) { setError(err.response?.data?.message || err.message || 'Login failed'); }
     finally { setLoading(false); }
   };
@@ -285,11 +297,24 @@ const Landing: React.FC = () => {
       const body: any = { email, password, firstName, lastName, phoneNumber, role: selectedRole };
       if (selectedRole === 'HOSPITAL') { body.hospitalName = hospitalName; body.address = address; if (selectedCoords) { body.latitude = selectedCoords.lat; body.longitude = selectedCoords.lon; } }
       else if (selectedRole === 'DRIVER') { body.licenseNumber = licenseNumber; body.vehicleNumber = vehicleNumber; }
-      else if (selectedRole === 'USER') { body.address = address; if (selectedCoords) { body.latitude = selectedCoords.lat; body.longitude = selectedCoords.lon; } }
-      const res = await fetch('http://localhost:3000/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      else if (selectedRole === 'USER') {
+        body.address = address;
+        if (selectedCoords) { body.latitude = selectedCoords.lat; body.longitude = selectedCoords.lon; }
+        // Only sent when the patient actually entered something — an untouched
+        // Medical Profile is simply omitted, and the ID is created regardless.
+        if (!isMedicalProfileFormEmpty(medicalProfile)) {
+          body.medicalProfile = toMedicalProfilePayload(medicalProfile);
+        }
+      }
+      const res = await fetch(`${API_BASE_URL}/auth/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message || 'Registration failed');
-      setSuccess('Account created! You can now log in.'); setMode('login'); setPassword('');
+      setSuccess(
+        isMedicalProfileFormEmpty(medicalProfile)
+          ? 'Account created! You can now log in. You can add your Medical Profile any time from Profile.'
+          : 'Account created! You can now log in. Your Medical Profile was saved and can be updated any time from Profile.',
+      );
+      setMode('login'); setPassword('');
     } catch (err: any) { setError(err.message || 'Registration failed'); }
     finally { setLoading(false); }
   };
@@ -425,7 +450,7 @@ const Landing: React.FC = () => {
             /* REGISTER form */
             <form onSubmit={handleRegister}>
               <SelectField label="Account type" value={selectedRole}
-                onChange={e => { setSelectedRole(e.target.value as any); setShowMap(false); setAddress(''); setHospitalName(''); setLicenseNumber(''); setVehicleNumber(''); }}>
+                onChange={e => { setSelectedRole(e.target.value as any); setShowMap(false); setAddress(''); setHospitalName(''); setLicenseNumber(''); setVehicleNumber(''); setShowMedicalProfile(false); setMedicalProfile({ ...EMPTY_MEDICAL_PROFILE_FORM }); }}>
                 <option value="USER">Patient / User</option>
                 <option value="HOSPITAL">Hospital Staff</option>
                 <option value="DRIVER">Ambulance Driver</option>
@@ -490,6 +515,48 @@ const Landing: React.FC = () => {
                           {s.display_name}
                         </div>
                       ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Optional Medical Profile — patients only. Collapsed by default and
+                  clearly marked optional; skipping it does not block the ID. */}
+              {selectedRole === 'USER' && (
+                <div style={{ marginBottom: '16px', border: `1.5px solid ${C.border}`, borderRadius: '10px', overflow: 'hidden', background: C.bg }}>
+                  <button
+                    type="button"
+                    onClick={() => setShowMedicalProfile(v => !v)}
+                    aria-expanded={showMedicalProfile}
+                    style={{
+                      width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
+                      padding: '12px 14px', background: 'transparent', border: 'none',
+                      cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+                    }}
+                  >
+                    <span style={{ fontSize: '16px' }} aria-hidden="true">🩺</span>
+                    <span style={{ flex: 1 }}>
+                      <span style={{ display: 'block', fontSize: '13px', fontWeight: 700, color: C.navy }}>
+                        Medical Profile <span style={{ color: C.sub, fontWeight: 500 }}>(optional)</span>
+                      </span>
+                      <span style={{ display: 'block', fontSize: '11px', color: C.sub, marginTop: '2px' }}>
+                        Blood group, allergies, conditions and medications. You can skip this and add or
+                        update it any time from your Profile.
+                      </span>
+                    </span>
+                    <span style={{ fontSize: '12px', color: C.teal, fontWeight: 700, flexShrink: 0 }}>
+                      {showMedicalProfile ? 'Hide' : 'Add'}
+                    </span>
+                  </button>
+
+                  {showMedicalProfile && (
+                    <div style={{ padding: '4px 14px 14px', background: C.white, borderTop: `1px solid ${C.border}` }}>
+                      <p style={{ fontSize: '11px', color: C.sub, margin: '10px 0 14px', lineHeight: 1.5 }}>
+                        Every field is optional. Anything you leave blank is recorded as
+                        <strong> Not Provided</strong> and shown that way to responders — it is never guessed.
+                        Whatever you save here is what triage, hospital pre-alerts and reports will show.
+                      </p>
+                      <MedicalProfileFields value={medicalProfile} onChange={setMedicalProfile} compact />
                     </div>
                   )}
                 </div>

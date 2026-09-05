@@ -4,6 +4,7 @@ import ApiClient from '../services/api';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import '../styles/Landing.css';
+import { API_BASE_URL } from '../config/api';
 
 interface LocationSuggestion {
   display_name: string;
@@ -278,7 +279,7 @@ const Landing: React.FC = () => {
     }
 
     try {
-      const response = await fetch('http://localhost:3000/api/ambulances/register', {
+      const response = await fetch(`${API_BASE_URL}/ambulances/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

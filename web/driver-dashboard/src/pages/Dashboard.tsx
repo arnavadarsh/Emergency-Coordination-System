@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { io } from 'socket.io-client';
@@ -8,8 +8,11 @@ import { DriverRouteMap } from '../components/DriverRouteMap';
 import ActiveCaseCard from '../components/ActiveCaseCard';
 import ChecklistModal from '../components/ChecklistModal';
 import CaseChat from '../components/CaseChat';
+import { useCaseChats } from '../hooks/useCaseChats';
+import { formatIstDateTime, formatIstFull } from '../utils/datetime';
+import { normalizeMedicalProfile, type MedicalProfile } from '../types/medicalProfile';
+import { API_BASE_URL, SOCKET_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 // ── Palette (matches user dashboard) ─────────────────────────
 const C = {
@@ -50,6 +53,9 @@ interface Booking {
   patientName?: string;
   patientPhone?: string;
   description?: string;
+  /** Patient's standing clinical background, resolved from their profile.
+   *  Always present — unset fields read "Not Provided". */
+  medicalProfile: MedicalProfile;
 }
 
 interface Dispatch {
@@ -71,6 +77,7 @@ interface DriverProfile {
   name: string;
   licenseNumber: string;
   phoneNumber: string;
+  photoUrl?: string | null;
   address?: string;
   ambulanceId: string;
   ambulance?: { vehicleNumber: string; type: string; status: string; currentLatitude?: number; currentLongitude?: number };
@@ -85,7 +92,7 @@ function sevColor(s?: string) {
 function statusLabel(s: string) { return s.replace(/_/g, ' '); }
 
 // ── Sidebar NavButton ─────────────────────────────────────────
-function NavItem({ icon, label, active, onClick }: { icon: string; label: string; active: boolean; onClick: () => void }) {
+function NavItem({ icon, label, active, onClick, badge = 0 }: { icon: string; label: string; active: boolean; onClick: () => void; badge?: number }) {
   return (
     <button onClick={onClick} style={{
       display: 'flex', alignItems: 'center', gap: '12px',
@@ -97,7 +104,16 @@ function NavItem({ icon, label, active, onClick }: { icon: string; label: string
       transition: 'all 0.2s',
     }}>
       <span style={{ fontSize: '18px' }}>{icon}</span>
-      {label}
+      <span style={{ flex: 1 }}>{label}</span>
+      {badge > 0 && (
+        <span style={{
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          minWidth: '20px', height: '20px', padding: '0 6px', borderRadius: '9999px',
+          background: C.red, color: 'white', fontSize: '11px', fontWeight: 700,
+        }}>
+          {badge}
+        </span>
+      )}
     </button>
   );
 }
@@ -138,9 +154,22 @@ function Dashboard() {
   const [historyFilter, setHistoryFilter] = useState<'ALL' | 'COMPLETED' | 'CANCELLED'>('ALL');
   const [historySearch, setHistorySearch] = useState('');
   const [editingProfile, setEditingProfile] = useState(false);
-  const [profileForm, setProfileForm] = useState({ firstName: '', lastName: '', phoneNumber: '', address: '' });
+  const [profileForm, setProfileForm] = useState({ firstName: '', lastName: '', phoneNumber: '', address: '', profilePhotoUrl: '' });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+
+  // Chat lives at dashboard level so it keeps receiving while the driver is on another tab.
+  const chatRooms = useMemo(
+    () => (activeDispatch?.booking?.id ? [{ bookingId: activeDispatch.booking.id, dispatchId: activeDispatch.id }] : []),
+    [activeDispatch?.booking?.id, activeDispatch?.id],
+  );
+  const chat = useCaseChats({
+    rooms: chatRooms,
+    role: 'driver',
+    senderName: driverProfile?.name || 'Driver',
+    apiBaseUrl: API_BASE_URL,
+    getToken: () => tokenStorage.getToken(),
+  });
 
   const fetchData = async () => {
     try {
@@ -153,6 +182,7 @@ function Dashboard() {
           name: data.driver.name || `${data.driver.firstName||''} ${data.driver.lastName||''}`.trim() || 'Driver',
           licenseNumber: data.driver.licenseNumber || 'N/A',
           phoneNumber: data.driver.phoneNumber || 'N/A',
+          photoUrl: data.driver.photoUrl || null,
           address: data.driver.address || '', ambulanceId: data.driver.ambulanceId || '',
           ambulance: data.ambulance ? {
             vehicleNumber: data.ambulance.vehicleNumber || 'N/A', type: data.ambulance.type || 'STANDARD',
@@ -163,7 +193,8 @@ function Dashboard() {
         };
         setDriverProfile(p);
         setProfileForm({ firstName: p.firstName||'', lastName: p.lastName||'',
-          phoneNumber: p.phoneNumber==='N/A'?'':p.phoneNumber, address: p.address||'' });
+          phoneNumber: p.phoneNumber==='N/A'?'':p.phoneNumber, address: p.address||'',
+          profilePhotoUrl: p.photoUrl||'' });
       }
       if (data.dispatches?.length) {
         const fmt = data.dispatches.map((d: any): Dispatch => ({
@@ -182,9 +213,12 @@ function Dashboard() {
             selectedHospitalAddress: d.booking?.selectedHospitalAddress||d.hospital?.address||'',
             bookingType: d.booking?.bookingType||'EMERGENCY', severity: d.booking?.severity||'MEDIUM',
             status: d.booking?.status||'IN_PROGRESS', createdAt: d.booking?.createdAt||d.assignedAt,
-            patientName: d.booking?.user?.name||d.booking?.userName||'Patient',
-            patientPhone: d.booking?.user?.phoneNumber||d.booking?.userPhone,
+            patientName: d.booking?.patientName||d.booking?.user?.name||d.booking?.userName||'Patient',
+            patientPhone: d.booking?.patientPhone||d.booking?.user?.phoneNumber||d.booking?.userPhone,
             description: d.booking?.triageData?.chiefComplaint||d.booking?.description,
+            // Read live from the patient's profile on every poll, so a profile
+            // edit shows up here without the case being re-created.
+            medicalProfile: normalizeMedicalProfile(d.booking?.medicalProfile),
           }
         }));
         setDispatches(fmt);
@@ -201,7 +235,7 @@ function Dashboard() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
   useEffect(() => {
-    const socket = io('http://localhost:3000', { transports: ['websocket'] });
+    const socket = io(SOCKET_URL, { transports: ['websocket'] });
     const onRerouteSearchStarted = (p: any) => {
       toast.error(p?.message || 'Assigned hospital is currently unable to accept the patient. Searching for the next best hospital.', { duration: 7000 });
       fetchData();
@@ -348,7 +382,7 @@ function Dashboard() {
 
         {/* Nav */}
         <nav style={{ flex:1, padding:'16px', display:'flex', flexDirection:'column', gap:'4px' }}>
-          {NAV.map(n => <NavItem key={n.id} icon={n.icon} label={n.label} active={activeTab===n.id} onClick={() => { setActiveTab(n.id); if (isMobile) setSidebarOpen(false); }} />)}
+          {NAV.map(n => <NavItem key={n.id} icon={n.icon} label={n.label} active={activeTab===n.id} badge={n.id==='active' ? chat.totalUnread : 0} onClick={() => { setActiveTab(n.id); if (isMobile) setSidebarOpen(false); }} />)}
         </nav>
 
         {/* Driver info + logout */}
@@ -435,10 +469,17 @@ function Dashboard() {
                 <div style={{ marginTop:'20px' }}>
                   <CaseChat
                     bookingId={activeDispatch.booking.id}
-                    dispatchId={activeDispatch.id}
                     currentRole="driver"
-                    senderName={driverProfile?.name || 'Driver'}
                     title="Chat with Patient"
+                    active={activeTab === 'active'}
+                    connected={chat.connected}
+                    thread={chat.threads[activeDispatch.booking.id]}
+                    onSend={text => chat.send(activeDispatch.booking.id, text)}
+                    onSendImage={file => { void chat.sendImage(activeDispatch.booking.id, file); }}
+                    onRetry={clientId => chat.retry(activeDispatch.booking.id, clientId)}
+                    apiBaseUrl={API_BASE_URL}
+                    onVisibilityChange={visible => chat.setRoomVisible(activeDispatch.booking.id, visible)}
+                    theme={{ border: C.cardBorder, surface: C.pageBg, muted: C.textSecondary, accent: C.accent, disabled: '#D9DEE7', shadow: '0 2px 8px rgba(0,0,0,0.04)' }}
                   />
                 </div>
               </>
@@ -512,7 +553,7 @@ function Dashboard() {
                     <span>🏥</span>
                     <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{d.booking.selectedHospitalName||d.booking.dropoffLocation}</span>
                   </div>
-                  <div style={{ fontSize:'12px', color: C.textMuted }}>{new Date(d.assignedAt).toLocaleString()}</div>
+                  <div style={{ fontSize:'12px', color: C.textMuted }} title={formatIstFull(d.assignedAt)}>{formatIstDateTime(d.assignedAt)}</div>
                 </Card>
               )) : (
                 <Card style={{ padding:'48px 24px', textAlign:'center' }}>
@@ -529,6 +570,30 @@ function Dashboard() {
         {activeTab==='profile' && (
           <div style={{ maxWidth:'560px', margin:'0 auto' }}>
             <h1 style={{ fontSize:'28px', fontWeight:700, color: C.textPrimary, margin:'0 0 24px' }}>My Profile</h1>
+
+            {/* How patients and the receiving hospital see you on their tracking / pre-arrival screens. */}
+            <Card style={{ padding:'20px', marginBottom:'16px', display:'flex', alignItems:'center', gap:'16px' }}>
+              {driverProfile?.photoUrl ? (
+                <img src={driverProfile.photoUrl} alt={driverProfile.name}
+                  onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                  style={{ width:'64px', height:'64px', borderRadius:'50%', objectFit:'cover',
+                    border:`2px solid ${C.accent}`, flexShrink:0, background: C.input }} />
+              ) : (
+                <div style={{ width:'64px', height:'64px', borderRadius:'50%', flexShrink:0,
+                  background: C.accentSoft, color: C.accent, border:`2px solid ${C.accent}`,
+                  display:'flex', alignItems:'center', justifyContent:'center', fontSize:'20px', fontWeight:700 }}>
+                  {(driverProfile?.name || '?').split(/\s+/).filter(Boolean).slice(0,2).map(w => w[0]?.toUpperCase()).join('')}
+                </div>
+              )}
+              <div style={{ minWidth:0 }}>
+                <FieldLabel>Identity shown to patients &amp; hospitals</FieldLabel>
+                <div style={{ fontSize:'18px', fontWeight:700, color: C.textPrimary }}>{driverProfile?.name}</div>
+                <div style={{ fontSize:'13px', color: C.textSecondary, marginTop:'2px' }}>
+                  {driverProfile?.ambulance?.vehicleNumber || 'No vehicle assigned'}
+                  {!driverProfile?.photoUrl && ' · Add a Photo URL below to show your photo'}
+                </div>
+              </div>
+            </Card>
 
             {driverProfile?.ambulance && (
               <Card style={{ padding:'20px', marginBottom:'16px', background: C.accentSoft, borderColor: C.accent }}>
@@ -567,7 +632,7 @@ function Dashboard() {
                     </div>
                   ))
                 ) : (
-                  [['First Name','firstName'],['Last Name','lastName'],['Phone','phoneNumber'],['Address','address']].map(([label, key]) => (
+                  [['First Name','firstName'],['Last Name','lastName'],['Phone','phoneNumber'],['Address','address'],['Photo URL','profilePhotoUrl']].map(([label, key]) => (
                     <div key={key}>
                       <label style={{ display:'block', fontSize:'13px', fontWeight:600, color: C.textPrimary, marginBottom:'6px' }}>{label}</label>
                       <input value={(profileForm as any)[key]} onChange={e => setProfileForm(p => ({...p,[key]:e.target.value}))}

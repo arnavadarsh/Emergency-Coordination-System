@@ -10,6 +10,7 @@ import {
   OneToOne,
 } from 'typeorm';
 import { BookingStatus, SeverityLevel } from '../../common/enums';
+import { enumColumnType, timestampColumnType } from '../../common/column-types';
 import { User } from '../../users/entities/user.entity';
 import { TriageReport } from '../../triage/entities/triage.entity';
 import { Ambulance } from '../../ambulances/entities/ambulance.entity';
@@ -36,7 +37,7 @@ export class Booking {
   user: User;
 
   @Column({
-    type: 'enum',
+    type: enumColumnType(),
     enum: BookingStatus,
     default: BookingStatus.PENDING,
   })
@@ -51,7 +52,7 @@ export class Booking {
   bookingType: string;
 
   @Column({
-    type: 'enum',
+    type: enumColumnType(),
     enum: SeverityLevel,
     nullable: true,
   })
@@ -78,10 +79,10 @@ export class Booking {
   @Column({ type: 'text', nullable: true, name: 'destination_address' })
   destinationAddress: string;
 
-  @Column({ type: 'timestamp', nullable: true, name: 'completed_at' })
+  @Column({ type: timestampColumnType(), nullable: true, name: 'completed_at' })
   completedAt: Date;
 
-  @Column({ type: 'timestamp', nullable: true, name: 'cancelled_at' })
+  @Column({ type: timestampColumnType(), nullable: true, name: 'cancelled_at' })
   cancelledAt: Date;
 
   @CreateDateColumn({ name: 'created_at' })

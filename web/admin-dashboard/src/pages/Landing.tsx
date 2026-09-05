@@ -4,6 +4,7 @@ import ApiClient from '../services/api';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import '../styles/Landing.css';
+import { API_BASE_URL } from '../config/api';
 
 interface AddressSuggestion {
   display_name: string;
@@ -156,9 +157,7 @@ const Landing: React.FC = () => {
     setLoading(true);
 
     try {
-      const response = await ApiClient.login(email, password);
-      // Navigate based on user role
-      const userRole = response.user.role;
+      await ApiClient.login(email, password);
       navigate('/dashboard');
     } catch (err: any) {
       setError(err.response?.data?.message || err.message || 'Login failed');
@@ -202,7 +201,7 @@ const Landing: React.FC = () => {
         }
       }
 
-      const response = await fetch('http://localhost:3000/api/auth/register', {
+      const response = await fetch(`${API_BASE_URL}/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(registrationData),

@@ -11,6 +11,8 @@ import { User } from '../users/entities/user.entity';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { TriageModule } from '../triage/triage.module';
 import { HospitalsModule } from '../hospitals/hospitals.module';
+import { UsersModule } from '../users/users.module';
+import { TrackingModule } from '../tracking/tracking.module';
 
 @Module({
   imports: [
@@ -18,6 +20,8 @@ import { HospitalsModule } from '../hospitals/hospitals.module';
     RealtimeModule,
     forwardRef(() => TriageModule),
     HospitalsModule,
+    UsersModule,
+    TrackingModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],

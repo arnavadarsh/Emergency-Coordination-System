@@ -9,6 +9,7 @@ import { Dispatch } from '../dispatch/entities/dispatch.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { User } from '../users/entities/user.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
+import { UsersModule } from '../users/users.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { AuditLog } from '../audit/entities/audit-log.entity';
       User,
       AuditLog,
     ]),
+    UsersModule,
   ],
   controllers: [DashboardController],
   providers: [DashboardService],

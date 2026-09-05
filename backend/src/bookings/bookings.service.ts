@@ -14,6 +14,11 @@ import { CreateEmergencyBookingDto } from './dto/create-emergency-booking.dto';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { TriageService } from '../triage/triage.service';
 import { HospitalRankingService } from '../hospitals/hospital-ranking.service';
+import { DriverIdentityService } from '../users/driver-identity.service';
+import { MedicalProfileService } from '../users/medical-profile.service';
+import { TrackingService } from '../tracking/tracking.service';
+import { TrackingNotifierService } from '../tracking/tracking-notifier.service';
+import { TravelTimeService } from '../common/travel-time/travel-time.service';
 
 /**
  * Bookings Service
@@ -39,6 +44,11 @@ export class BookingsService {
     private readonly eventEmitter: EventEmitter2,
     private readonly triageService: TriageService,
     private readonly hospitalRankingService: HospitalRankingService,
+    private readonly driverIdentityService: DriverIdentityService,
+    private readonly medicalProfileService: MedicalProfileService,
+    private readonly trackingService: TrackingService,
+    private readonly trackingNotifier: TrackingNotifierService,
+    private readonly travelTime: TravelTimeService,
   ) {}
 
   private isHospitalAccepting(status?: string): boolean {
@@ -135,14 +145,132 @@ export class BookingsService {
   }
 
   /**
-   * Find all bookings
+   * Find all bookings, each carrying the patient's identity and Medical Profile.
+   *
+   * Feeds the admin booking list and its exported report, which is why the
+   * Medical Profile rides along: the profile is resolved from the patient row at
+   * read time, so an exported report always reflects the latest saved values.
    */
-  findAll(findBookingsDto: FindBookingsDto): Promise<Booking[]> {
-    return this.bookingRepository.find({
+  async findAll(findBookingsDto: FindBookingsDto): Promise<any[]> {
+    const bookings = await this.bookingRepository.find({
       where: findBookingsDto,
       relations: ['user'],
       order: { createdAt: 'DESC' },
     });
+
+    return bookings.map(booking => ({
+      ...booking,
+      patientName: this.patientDisplayName(booking.user),
+      patientEmail: booking.user?.email ?? null,
+      patientPhone: booking.user?.phoneNumber ?? null,
+      medicalProfile: this.medicalProfileService.fromUser(booking.user),
+    }));
+  }
+
+  /** Patient's display name, falling back to the email local part. */
+  private patientDisplayName(patient?: User | null): string {
+    if (!patient) return 'Patient';
+    const fullName = `${patient.firstName ?? ''} ${patient.lastName ?? ''}`.trim();
+    return fullName || patient.email?.split('@')[0] || 'Patient';
+  }
+
+  /**
+   * Full ECS case report for one booking.
+   *
+   * Combines, in one record: the patient, their Medical Profile, the emergency,
+   * the triage assessment and the dispatch/treatment timeline. The Medical
+   * Profile is supporting patient information presented alongside the triage
+   * data — it does not alter how the case was triaged.
+   *
+   * The profile is read live from the patient's row, so a report generated after
+   * a profile edit shows the updated information.
+   */
+  async buildCaseReport(id: string): Promise<any> {
+    const booking = await this.bookingRepository.findOne({
+      where: { id },
+      relations: ['user', 'triageReport'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    const dispatch = await this.dispatchRepository.findOne({
+      where: { bookingId: id },
+      relations: ['ambulance', 'hospital'],
+      order: { createdAt: 'DESC' },
+    });
+
+    const driver = dispatch
+      ? await this.driverIdentityService.resolveOne({
+          driverId: dispatch.driverId,
+          ambulanceId: dispatch.ambulanceId,
+          vehicleNumber: dispatch.ambulance?.vehicleNumber ?? null,
+        })
+      : null;
+
+    const medicalProfile = this.medicalProfileService.fromUser(booking.user);
+    const triage = booking.triageReport ?? null;
+
+    return {
+      reportId: `ECS-${booking.id.slice(0, 8).toUpperCase()}`,
+      generatedAt: new Date().toISOString(),
+
+      patient: {
+        id: booking.userId,
+        name: this.patientDisplayName(booking.user),
+        email: booking.user?.email ?? null,
+        phoneNumber: booking.user?.phoneNumber ?? null,
+        dateOfBirth: booking.user?.dateOfBirth ?? null,
+        address: booking.user?.address ?? null,
+        emergencyContact: booking.user?.emergencyContact ?? null,
+      },
+
+      // Supporting patient information — the standing clinical background.
+      medicalProfile,
+
+      emergency: {
+        bookingId: booking.id,
+        status: booking.status,
+        bookingType: booking.bookingType,
+        severity: booking.severity,
+        description: booking.description ?? null,
+        pickupAddress: booking.pickupAddress ?? null,
+        pickupLatitude: booking.pickupLatitude ?? null,
+        pickupLongitude: booking.pickupLongitude ?? null,
+        destinationAddress: booking.destinationAddress ?? null,
+        createdAt: booking.createdAt ?? null,
+        completedAt: booking.completedAt ?? null,
+        cancelledAt: booking.cancelledAt ?? null,
+      },
+
+      triage: triage ? {
+        emergencyType: triage.emergencyType,
+        breathing: triage.breathing,
+        bleeding: triage.bleeding,
+        conscious: triage.conscious,
+        painLevel: triage.painLevel,
+        pregnancy: triage.pregnancy,
+      } : null,
+
+      treatment: dispatch ? {
+        dispatchId: dispatch.id,
+        status: dispatch.status,
+        ambulanceVehicleNumber: dispatch.ambulance?.vehicleNumber ?? null,
+        ambulanceType: dispatch.ambulance?.vehicleType ?? null,
+        driver,
+        hospitalName: dispatch.hospital?.name ?? booking.destinationAddress ?? null,
+        hospitalAddress: dispatch.hospital?.address ?? null,
+        dispatchedAt: dispatch.dispatchedAt ?? null,
+        arrivedAtPickup: dispatch.arrivedAtPickup ?? null,
+        departedPickup: dispatch.departedPickup ?? null,
+        arrivedAtHospital: dispatch.arrivedAtHospital ?? null,
+        completedAt: dispatch.completedAt ?? null,
+        estimatedPickupTimeMinutes: dispatch.estimatedPickupTime ?? null,
+        actualDistanceKm: dispatch.actualDistanceKm ?? null,
+        notes: dispatch.notes ?? null,
+      } : null,
+    };
   }
 
   /**
@@ -258,10 +386,15 @@ export class BookingsService {
     const emergencyTypeForRanking =
       preloadedTriage?.emergencyType ?? booking.triageReport?.emergencyType ?? null;
 
-    // Rank hospitals using weighted scoring (distance, ICU, beds, specialization, load)
-    const ranking = this.hospitalRankingService.selectBest(eligibleHospitals, {
+    // Rank hospitals on driving time and suitability, from both real positions:
+    // the patient's (where the transport leg starts) and the assigned
+    // ambulance's (which decides whether a hospital is ahead of it or behind).
+    const ranking = await this.hospitalRankingService.selectBest(eligibleHospitals, {
       pickupLatitude: booking.pickupLatitude,
       pickupLongitude: booking.pickupLongitude,
+      ambulanceLatitude: nearestAmbulance.currentLatitude,
+      ambulanceLongitude: nearestAmbulance.currentLongitude,
+      patientOnBoard: false,
       severity: booking.severity ?? undefined,
       emergencyType: emergencyTypeForRanking,
     });
@@ -269,13 +402,27 @@ export class BookingsService {
     const selectedHospital: Hospital | null = ranking?.best ?? null;
 
     if (selectedHospital) {
-      this.logger.log(`[autoDispatch] Selected hospital: "${selectedHospital.name}" (${selectedHospital.id})`);
+      this.logger.log(
+        `[autoDispatch] Selected hospital: "${selectedHospital.name}" (${selectedHospital.id}) — ` +
+        `${ranking?.rankedList[0]?.reason ?? 'no reasoning available'}`,
+      );
       booking.destinationLatitude = Number(selectedHospital.latitude);
       booking.destinationLongitude = Number(selectedHospital.longitude);
       booking.destinationAddress = selectedHospital.name;
     } else {
       this.logger.warn(`[autoDispatch] No hospitals in DB — proceeding without hospital assignment`);
     }
+
+    // Time for the ambulance to reach the patient, from where it actually is —
+    // live traffic when a routing key is configured, a distance estimate
+    // otherwise. This is the ETA the patient and their family are shown.
+    const pickupEta = await this.travelTime.estimateOne(
+      {
+        latitude: Number(nearestAmbulance.currentLatitude ?? booking.pickupLatitude),
+        longitude: Number(nearestAmbulance.currentLongitude ?? booking.pickupLongitude),
+      },
+      { latitude: Number(booking.pickupLatitude), longitude: Number(booking.pickupLongitude) },
+    );
 
     // Create dispatch
     const dispatch = this.dispatchRepository.create({
@@ -284,7 +431,9 @@ export class BookingsService {
       hospitalId: selectedHospital?.id,
       status: 'DISPATCHED',
       dispatchedAt: new Date(),
-      estimatedPickupTime: Math.round(minDistance * 3), // 3 min per km
+      estimatedPickupTime: pickupEta.minutes,
+      // Transport leg to the selected hospital, from the same ranking pass.
+      estimatedHospitalTime: ranking?.bestEtaMinutes,
     });
     await this.dispatchRepository.save(dispatch);
     this.logger.log(`[autoDispatch] Dispatch saved: ${dispatch.id}`);
@@ -297,7 +446,14 @@ export class BookingsService {
     booking.status = BookingStatus.ASSIGNED;
     await this.bookingRepository.save(booking);
 
-    // Broadcast to all dashboards
+    // An ambulance is now assigned, which is the moment this case becomes
+    // followable: mint the private tracking link and text it to the patient's
+    // emergency contacts.
+    await this.openTrackingForCase(booking, dispatch);
+
+    // Broadcast to all dashboards. Note the tracking link is deliberately NOT
+    // in this payload — it is a secret, and this event goes to every connected
+    // dashboard. The patient fetches it from the authenticated share endpoint.
     this.realtimeGateway.server.emit('dispatch_assigned', {
       dispatchId: dispatch.id,
       bookingId: booking.id,
@@ -322,11 +478,25 @@ export class BookingsService {
       this.logger.log(`[autoDispatch] Triage: ${triage ? 'YES (type=' + triage.emergencyType + ', breathing=' + triage.breathing + ')' : 'NO (null)'}`);
       this.logger.log(`[autoDispatch] Emitting pre_arrival_alert to room hospital:${selectedHospital.id} severity=${booking.severity}`);
 
+      // Identify the driver so the receiving hospital knows who is bringing the patient in.
+      const driver = await this.driverIdentityService.resolveOne({
+        driverId: dispatch.driverId,
+        ambulanceId: nearestAmbulance.id,
+        vehicleNumber: nearestAmbulance.vehicleNumber,
+      });
+
+      // Pull the patient's Medical Profile fresh at alert time so the hospital
+      // receives the most recently saved information. Fields the patient never
+      // supplied arrive as null and render as "Not Provided" — the alert never
+      // carries a guessed blood group, allergy or medication.
+      const medicalProfile = await this.medicalProfileService.resolveOne(booking.userId);
+
       this.realtimeGateway.emitToHospital(selectedHospital.id, 'pre_arrival_alert', {
         dispatchId: dispatch.id,
         bookingId: booking.id,
         ambulanceId: nearestAmbulance.id,
         ambulanceVehicleNumber: nearestAmbulance.vehicleNumber,
+        driver,
         ambulanceLocation: {
           latitude: nearestAmbulance.currentLatitude ?? null,
           longitude: nearestAmbulance.currentLongitude ?? null,
@@ -340,6 +510,7 @@ export class BookingsService {
           painLevel: triage.painLevel,
           pregnancy: triage.pregnancy,
         } : null,
+        medicalProfile,
         etaMinutes: dispatch.estimatedPickupTime ?? null,
         status: dispatch.status,
         alertedAt: new Date().toISOString(),
@@ -347,6 +518,31 @@ export class BookingsService {
     }
 
     this.logger.log(`[autoDispatch] DONE — ambulance ${nearestAmbulance.vehicleNumber} → booking ${booking.id}`);
+  }
+
+  /**
+   * Open shareable tracking for a case and tell the family.
+   *
+   * Relatives get a link they can open in any browser — no login, no app — so
+   * whoever is with the patient never has to break off to make phone calls.
+   *
+   * Neither half of this may hold up or fail a dispatch: the link is created
+   * inside a try/catch, and the SMS fan-out is deliberately not awaited, since
+   * an SMS gateway's latency has no business sitting in the dispatch path.
+   */
+  private async openTrackingForCase(booking: Booking, dispatch: Dispatch): Promise<void> {
+    try {
+      const link = await this.trackingService.issueForCase(booking.id, dispatch.id);
+      this.logger.log(`[autoDispatch] Tracking link ready for booking ${booking.id}`);
+
+      this.trackingNotifier
+        .notifyContactsForCase(booking.userId, booking.id, link)
+        .catch(err =>
+          this.logger.error(`[autoDispatch] Emergency contact alerts failed for booking ${booking.id}`, err.stack),
+        );
+    } catch (err) {
+      this.logger.error(`[autoDispatch] Could not open tracking for booking ${booking.id}`, err.stack);
+    }
   }
 
   /**
@@ -389,8 +585,10 @@ export class BookingsService {
       booking.status = data.status;
       if (data.status === BookingStatus.COMPLETED) {
         booking.completedAt = new Date();
+        await this.trackingService.closeForBooking(booking.id, 'COMPLETED');
       } else if (data.status === BookingStatus.CANCELLED) {
         booking.cancelledAt = new Date();
+        await this.trackingService.closeForBooking(booking.id, 'CANCELLED');
       }
     }
 
@@ -449,6 +647,9 @@ export class BookingsService {
       }
     }
 
+    // The case is over, so the shared link stops working for everyone holding it.
+    await this.trackingService.closeForBooking(id, 'CANCELLED');
+
     return savedBooking;
   }
 
@@ -471,6 +672,14 @@ export class BookingsService {
       relations: ['ambulance'],
       order: { createdAt: 'DESC' },
     });
+
+    const driverIdentity = dispatch
+      ? await this.driverIdentityService.resolveOne({
+          driverId: dispatch.driverId,
+          ambulanceId: dispatch.ambulanceId,
+          vehicleNumber: dispatch.ambulance?.vehicleNumber ?? null,
+        })
+      : null;
 
     return {
       booking: {
@@ -507,6 +716,7 @@ export class BookingsService {
           },
           status: dispatch.ambulance.status,
         } : null,
+        driver: driverIdentity,
       } : null,
     };
   }

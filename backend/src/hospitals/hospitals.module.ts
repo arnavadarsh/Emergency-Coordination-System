@@ -8,9 +8,10 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { HospitalRankingService } from './hospital-ranking.service';
 import { AuditModule } from '../audit/audit.module';
+import { UsersModule } from '../users/users.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Hospital, HospitalCapability, Dispatch, Booking]), RealtimeModule, AuditModule],
+  imports: [TypeOrmModule.forFeature([Hospital, HospitalCapability, Dispatch, Booking]), RealtimeModule, AuditModule, UsersModule],
   controllers: [HospitalsController],
   providers: [HospitalsService, HospitalRankingService],
   exports: [HospitalsService, HospitalRankingService],

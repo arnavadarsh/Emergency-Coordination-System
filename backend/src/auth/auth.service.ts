@@ -10,25 +10,42 @@ import * as bcrypt from 'bcrypt';
  */
 @Injectable()
 export class AuthService {
+  /**
+   * bcrypt work factor. 12 is the current sensible default — roughly a quarter second
+   * per hash, which is painless on login but expensive to brute force offline.
+   */
+  private static readonly BCRYPT_ROUNDS = 12;
+
+  /**
+   * Compared against when no user matches, so a wrong email and a wrong password take
+   * the same time. Without this, response timing tells an attacker which emails exist.
+   */
+  private static readonly DUMMY_HASH =
+    '$2b$12$lWe1vgzXE4E/silQYHH0ceSw0aqlbYXSLuHv/JGEvGpRaBynvUYF.';
+
   constructor(
     private usersService: UsersService,
     private jwtService: JwtService,
   ) {}
 
+  /** Hash a plain password for storage. */
+  static hashPassword(plain: string): Promise<string> {
+    return bcrypt.hash(plain, AuthService.BCRYPT_ROUNDS);
+  }
+
   /**
    * Authenticates a user and returns a JWT token
    */
   async login(loginDto: LoginDto) {
-    const user = await this.usersService.findByEmail(loginDto.email);
+    const user = await this.usersService.findByEmailWithPassword(loginDto.email);
 
-    if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
+    // Always run a comparison, even for an unknown email, to keep timing uniform.
+    const isPasswordValid = await bcrypt.compare(
+      loginDto.password,
+      user?.password || AuthService.DUMMY_HASH,
+    );
 
-    // Direct plain text password comparison (no hashing)
-    const isPasswordValid = loginDto.password === user.password;
-
-    if (!isPasswordValid) {
+    if (!user || !isPasswordValid) {
       throw new UnauthorizedException('Invalid credentials');
     }
 
@@ -72,10 +89,9 @@ export class AuthService {
       throw new ConflictException('User with this email already exists');
     }
 
-    // Create user with plain password (no hashing)
     const user = await this.usersService.create({
       email: registerDto.email,
-      password: registerDto.password,
+      password: await AuthService.hashPassword(registerDto.password),
       role: registerDto.role,
       profile: {
         firstName: registerDto.firstName,
@@ -84,6 +100,9 @@ export class AuthService {
         address: registerDto.address,
         latitude: registerDto.latitude,
         longitude: registerDto.longitude,
+        // Optional — the patient ID is created just the same when it is absent,
+        // and the profile can be filled in later from the Profile section.
+        medicalProfile: registerDto.medicalProfile,
       },
     });
 

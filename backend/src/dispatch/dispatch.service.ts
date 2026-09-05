@@ -6,6 +6,7 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { UserRole, BookingStatus, AmbulanceStatus } from '../common/enums';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { TrackingService } from '../tracking/tracking.service';
 
 /**
  * Dispatch Service
@@ -21,6 +22,7 @@ export class DispatchService {
     @InjectRepository(Ambulance)
     private ambulanceRepository: Repository<Ambulance>,
     private readonly realtimeGateway: RealtimeGateway,
+    private readonly trackingService: TrackingService,
   ) {}
 
   /**
@@ -105,6 +107,12 @@ export class DispatchService {
     }
 
     const savedDispatch = await this.dispatchRepository.save(dispatch);
+
+    // Once the case is over the shared tracking link stops working, for the
+    // family and for anyone the link was forwarded to.
+    if (status === 'COMPLETED' || status === 'CANCELLED') {
+      await this.trackingService.closeForBooking(savedDispatch.bookingId, status);
+    }
 
     this.realtimeGateway.server.emit('dispatch_status_updated', {
       dispatchId: savedDispatch.id,

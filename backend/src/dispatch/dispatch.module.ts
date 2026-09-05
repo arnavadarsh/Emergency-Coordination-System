@@ -6,9 +6,10 @@ import { Dispatch } from './entities';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { RealtimeModule } from '../realtime/realtime.module';
+import { TrackingModule } from '../tracking/tracking.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Dispatch, Booking, Ambulance]), RealtimeModule],
+  imports: [TypeOrmModule.forFeature([Dispatch, Booking, Ambulance]), RealtimeModule, TrackingModule],
   controllers: [DispatchController],
   providers: [DispatchService],
   exports: [DispatchService],

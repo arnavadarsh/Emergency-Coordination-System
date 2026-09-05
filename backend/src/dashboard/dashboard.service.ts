@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThanOrEqual } from 'typeorm';
+import { Repository, MoreThanOrEqual, In } from 'typeorm';
 import { Hospital } from '../hospitals/entities/hospital.entity';
 import { HospitalCapability } from '../hospitals/entities/hospital-capability.entity';
 import { Booking } from '../bookings/entities/booking.entity';
@@ -8,6 +8,8 @@ import { Dispatch } from '../dispatch/entities/dispatch.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { User } from '../users/entities/user.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
+import { DriverIdentityService } from '../users/driver-identity.service';
+import { MedicalProfileService } from '../users/medical-profile.service';
 import { BookingStatus, UserRole } from '../common/enums';
 
 const EARTH_RADIUS_KM = 6371;
@@ -29,10 +31,19 @@ export class DashboardService {
     private userRepository: Repository<User>,
     @InjectRepository(AuditLog)
     private auditRepository: Repository<AuditLog>,
+    private readonly driverIdentityService: DriverIdentityService,
+    private readonly medicalProfileService: MedicalProfileService,
   ) {}
 
   private toRadians(degrees: number): number {
     return (degrees * Math.PI) / 180;
+  }
+
+  /** Patient's display name, falling back to the email local part. */
+  private patientDisplayName(patient?: User | null): string {
+    if (!patient) return 'Patient';
+    const fullName = `${patient.firstName ?? ''} ${patient.lastName ?? ''}`.trim();
+    return fullName || patient.email?.split('@')[0] || 'Patient';
   }
 
   private calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -163,16 +174,35 @@ export class DashboardService {
       [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status),
     ).length;
 
-    const preArrivalAlerts = hospitalDispatches
-      .filter(d =>
-        d.booking &&
-        [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
-      )
+    const alertDispatches = hospitalDispatches.filter(d =>
+      d.booking &&
+      [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
+    );
+
+    // Resolve every alert's driver in one batch so the pre-arrival report can show who is driving.
+    const alertDrivers = await this.driverIdentityService.resolveMany(
+      alertDispatches.map(d => ({
+        driverId: d.driverId,
+        ambulanceId: d.ambulanceId,
+        vehicleNumber: d.ambulance?.vehicleNumber ?? null,
+      })),
+    );
+
+    // Batch-resolve each incoming patient's Medical Profile straight from their
+    // profile, so the pre-alert always carries the latest saved information.
+    const alertMedicalProfiles = await this.medicalProfileService.resolveMany(
+      alertDispatches.map(d => d.booking?.userId),
+    );
+
+    const preArrivalAlerts = alertDispatches
       .map(d => ({
         dispatchId: d.id,
         bookingId: d.bookingId,
         ambulanceId: d.ambulanceId,
         ambulanceVehicleNumber: d.ambulance?.vehicleNumber ?? 'N/A',
+        driver: alertDrivers.get(
+          this.driverIdentityService.refKey({ driverId: d.driverId, ambulanceId: d.ambulanceId }),
+        ) ?? null,
         ambulanceLocation: {
           latitude: d.ambulance?.currentLatitude ?? null,
           longitude: d.ambulance?.currentLongitude ?? null,
@@ -180,6 +210,7 @@ export class DashboardService {
         patientSeverity: d.booking?.severity ?? 'MEDIUM',
         emergencyType: null,
         triage: null,
+        medicalProfile: this.medicalProfileService.fromMap(alertMedicalProfiles, d.booking?.userId),
         etaMinutes: d.estimatedPickupTime ?? null,
         status: d.status,
         alertedAt: d.dispatchedAt?.toISOString() ?? d.createdAt?.toISOString() ?? new Date().toISOString(),
@@ -213,6 +244,156 @@ export class DashboardService {
       preArrivalAlerts,
     };
   }
+
+  /**
+   * Live Operations Map — every ambulance and hospital in the system, with the
+   * work currently tying them together.
+   *
+   * Read-only snapshot for the admin map. The map keeps itself current from
+   * realtime events (ambulance_location_updated, ambulance_status_updated,
+   * hospital_status_updated) and re-fetches this endpoint as a fallback, so the
+   * shape here is the same one those events patch into.
+   *
+   * Units with no coordinates on record are still returned, flagged
+   * `hasLocation: false`, so the map can report "3 ambulances not shown"
+   * rather than silently dropping them.
+   */
+  async getOperationsMap() {
+    const [ambulances, hospitals, dispatches] = await Promise.all([
+      this.ambulanceRepository.find({ order: { vehicleNumber: 'ASC' } }),
+      this.hospitalRepository.find({ relations: ['capabilities'], order: { name: 'ASC' } }),
+      this.dispatchRepository.find({ relations: ['booking', 'hospital'] }),
+    ]);
+
+    // Only dispatches still in flight matter to an operations view.
+    const liveDispatches = dispatches.filter(d =>
+      d.booking && [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status),
+    );
+
+    const drivers = await this.driverIdentityService.resolveMany(
+      liveDispatches.map(d => ({
+        driverId: d.driverId,
+        ambulanceId: d.ambulanceId,
+        vehicleNumber: ambulances.find(a => a.id === d.ambulanceId)?.vehicleNumber ?? null,
+      })),
+    );
+
+    const dispatchByAmbulance = new Map<string, typeof liveDispatches[number]>();
+    for (const d of liveDispatches) {
+      // If an ambulance somehow has two live dispatches, the newest one wins.
+      const existing = dispatchByAmbulance.get(d.ambulanceId);
+      if (!existing || (d.dispatchedAt ?? d.createdAt) > (existing.dispatchedAt ?? existing.createdAt)) {
+        dispatchByAmbulance.set(d.ambulanceId, d);
+      }
+    }
+
+    const num = (v: any): number | null => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+
+    const mappedAmbulances = ambulances.map(a => {
+      const latitude = num(a.currentLatitude);
+      const longitude = num(a.currentLongitude);
+      const dispatch = dispatchByAmbulance.get(a.id) ?? null;
+
+      return {
+        id: a.id,
+        vehicleNumber: a.vehicleNumber,
+        vehicleType: a.vehicleType,
+        status: a.status,
+        latitude,
+        longitude,
+        hasLocation: latitude !== null && longitude !== null,
+        lastLocationUpdate: a.lastLocationUpdate?.toISOString() ?? null,
+        driver: dispatch
+          ? drivers.get(this.driverIdentityService.refKey({ driverId: dispatch.driverId, ambulanceId: dispatch.ambulanceId })) ?? null
+          : null,
+        assignment: dispatch ? {
+          dispatchId: dispatch.id,
+          bookingId: dispatch.bookingId,
+          dispatchStatus: dispatch.status,
+          bookingStatus: dispatch.booking?.status ?? null,
+          severity: dispatch.booking?.severity ?? null,
+          etaMinutes: dispatch.estimatedPickupTime ?? null,
+          pickup: {
+            latitude: num(dispatch.booking?.pickupLatitude),
+            longitude: num(dispatch.booking?.pickupLongitude),
+            address: dispatch.booking?.pickupAddress ?? null,
+          },
+          destination: dispatch.hospital ? {
+            id: dispatch.hospital.id,
+            name: dispatch.hospital.name,
+            latitude: num(dispatch.hospital.latitude),
+            longitude: num(dispatch.hospital.longitude),
+          } : null,
+        } : null,
+      };
+    });
+
+    const incomingByHospital = new Map<string, number>();
+    for (const d of liveDispatches) {
+      if (d.hospitalId) incomingByHospital.set(d.hospitalId, (incomingByHospital.get(d.hospitalId) ?? 0) + 1);
+    }
+
+    const mappedHospitals = hospitals.map(h => {
+      const latitude = num(h.latitude);
+      const longitude = num(h.longitude);
+      const totalBeds = h.totalBeds ?? 0;
+      const availableBeds = h.availableBeds ?? 0;
+
+      return {
+        id: h.id,
+        name: h.name,
+        address: h.address ?? null,
+        phoneNumber: h.phoneNumber ?? null,
+        status: h.status,
+        latitude,
+        longitude,
+        hasLocation: latitude !== null && longitude !== null,
+        totalBeds,
+        availableBeds,
+        occupiedBeds: Math.max(0, totalBeds - availableBeds),
+        // Guard against a zero bed count so the map never shows NaN%.
+        occupancyPercent: totalBeds > 0 ? Math.round(((totalBeds - availableBeds) / totalBeds) * 100) : null,
+        capabilities: (h.capabilities ?? []).map(c => ({
+          type: c.capabilityType,
+          status: c.status,
+        })),
+        incomingAmbulances: incomingByHospital.get(h.id) ?? 0,
+      };
+    });
+
+    const countBy = (rows: { status: any }[], status: string) =>
+      rows.filter(r => String(r.status).toUpperCase() === status).length;
+
+    return {
+      generatedAt: new Date().toISOString(),
+      ambulances: mappedAmbulances,
+      hospitals: mappedHospitals,
+      summary: {
+        ambulances: {
+          total: mappedAmbulances.length,
+          available: countBy(mappedAmbulances, 'AVAILABLE'),
+          busy: countBy(mappedAmbulances, 'BUSY'),
+          maintenance: countBy(mappedAmbulances, 'MAINTENANCE'),
+          offline: countBy(mappedAmbulances, 'OFFLINE'),
+          withoutLocation: mappedAmbulances.filter(a => !a.hasLocation).length,
+        },
+        hospitals: {
+          total: mappedHospitals.length,
+          accepting: countBy(mappedHospitals, 'ACCEPTING'),
+          limited: countBy(mappedHospitals, 'LIMITED'),
+          divert: countBy(mappedHospitals, 'DIVERT'),
+          withoutLocation: mappedHospitals.filter(h => !h.hasLocation).length,
+          totalBeds: mappedHospitals.reduce((s, h) => s + h.totalBeds, 0),
+          availableBeds: mappedHospitals.reduce((s, h) => s + h.availableBeds, 0),
+        },
+        activeDispatches: liveDispatches.length,
+      },
+    };
+  }
+
   /**
    * Get admin dashboard stats
    */
@@ -395,12 +576,24 @@ export class DashboardService {
       d.booking && d.booking.status === BookingStatus.COMPLETED
     );
 
+    // The responder triages the patient from this screen, so each dispatch carries
+    // the patient's identity and Medical Profile — read live from the patient's
+    // profile — alongside the emergency details.
+    const patientIds = [...new Set(
+      dispatches.map(d => d.booking?.userId).filter((id): id is string => !!id),
+    )];
+    const patients = patientIds.length > 0
+      ? await this.userRepository.find({ where: { id: In(patientIds) } })
+      : [];
+    const patientsById = new Map(patients.map(p => [p.id, p]));
+
     return {
       driver: driver ? {
         id: driver.id,
         name: driver.firstName && driver.lastName ? `${driver.firstName} ${driver.lastName}` : driver.email.split('@')[0],
         email: driver.email,
         phoneNumber: driver.phoneNumber || 'N/A',
+        photoUrl: driver.profilePhotoUrl || null,
         licenseNumber: driver.emergencyContact || 'DL-12345',
         ambulanceId: assignedAmbulance?.id,
       } : null,
@@ -423,6 +616,9 @@ export class DashboardService {
         booking: d.booking ? {
           id: d.booking.id,
           userId: d.booking.userId,
+          patientName: this.patientDisplayName(patientsById.get(d.booking.userId)),
+          patientPhone: patientsById.get(d.booking.userId)?.phoneNumber || null,
+          medicalProfile: this.medicalProfileService.fromUser(patientsById.get(d.booking.userId)),
           pickupLocation: d.booking.pickupAddress,
           pickupLatitude: d.booking.pickupLatitude,
           pickupLongitude: d.booking.pickupLongitude,
@@ -477,6 +673,15 @@ export class DashboardService {
       dispatches = dispatches.filter(d => bookingIds.includes(d.bookingId));
     }
 
+    // Resolve the driver behind each dispatch once, so the tracking view can name the person driving.
+    const dispatchDrivers = await this.driverIdentityService.resolveMany(
+      dispatches.map(d => ({
+        driverId: d.driverId,
+        ambulanceId: d.ambulanceId,
+        vehicleNumber: d.ambulance?.vehicleNumber ?? null,
+      })),
+    );
+
     // Build bookings with dispatch info
     const bookingsWithDispatch = bookings.map(b => {
       const dispatch = dispatches.find(d => d.bookingId === b.id);
@@ -509,6 +714,12 @@ export class DashboardService {
             currentLatitude: dispatch.ambulance.currentLatitude,
             currentLongitude: dispatch.ambulance.currentLongitude,
           } : undefined,
+          driver: dispatchDrivers.get(
+            this.driverIdentityService.refKey({
+              driverId: dispatch.driverId,
+              ambulanceId: dispatch.ambulanceId,
+            }),
+          ) ?? null,
         } : undefined,
         hospital: dispatch?.hospital ? {
           id: dispatch.hospital.id,
@@ -524,9 +735,15 @@ export class DashboardService {
         email: user.email,
         name: user.firstName && user.lastName ? `${user.firstName} ${user.lastName}` : user.email.split('@')[0],
         phoneNumber: user.phoneNumber || 'N/A',
+        firstName: user.firstName,
+        lastName: user.lastName,
+        address: user.address,
+        dateOfBirth: user.dateOfBirth,
         emergencyContact: user.emergencyContact,
         bloodType: user.bloodType,
         medicalHistory: user.medicalNotes,
+        // Single source of truth for the patient's standing clinical background.
+        medicalProfile: this.medicalProfileService.fromUser(user),
       } : null,
       bookings: bookingsWithDispatch,
       activeBooking: activeBooking ? bookingsWithDispatch.find(b => b.id === activeBooking.id) : null,

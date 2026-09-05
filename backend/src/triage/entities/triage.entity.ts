@@ -1,6 +1,7 @@
 
 import { Entity, PrimaryGeneratedColumn, Column, OneToOne } from 'typeorm';
 import { Booking } from '../../bookings/entities/booking.entity';
+import { enumColumnType } from '../../common/column-types';
 
 export enum EmergencyType {
   CARDIAC = 'CARDIAC',
@@ -14,7 +15,7 @@ export class TriageReport {
   id: string;
 
   @Column({
-    type: 'enum',
+    type: enumColumnType(),
     enum: EmergencyType,
   })
   emergencyType: EmergencyType;

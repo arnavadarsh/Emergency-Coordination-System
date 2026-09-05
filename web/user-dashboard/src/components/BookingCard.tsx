@@ -1,5 +1,6 @@
 import React from 'react';
 import StatusBadge from './StatusBadge';
+import { formatIstDateTime } from '../utils/datetime';
 
 interface Booking {
   id: string;
@@ -32,24 +33,9 @@ const BookingCard: React.FC<BookingCardProps> = ({ booking, onTrack, onCancel, s
 
   const formatDate = (dateStr: string) => {
     if (!dateStr) return '—';
-    try {
-      // Postgres stores UTC (09:05) -> TypeORM reads as local (09:05 IST) -> sends as UTC (03:35Z)
-      // Browser receives 03:35Z -> reads as local (09:05 IST) -> displays 9:05 am instead of 2:35 pm.
-      // Fix: Add exactly 5.5 hours to the parsed epoch to restore the true local time.
-      const d = new Date(new Date(dateStr).getTime() + 5.5 * 60 * 60 * 1000);
-      
-      const datePart = d.toLocaleDateString('en-GB', { 
-        day: '2-digit', month: 'short', year: 'numeric' 
-      });
-      
-      const timePart = d.toLocaleTimeString('en-US', { 
-        hour: 'numeric', minute: '2-digit', hour12: true 
-      }).toLowerCase();
-
-      return `${datePart}, ${timePart}`;
-    } catch {
-      return dateStr;
-    }
+    // The backend runs in UTC and sends true UTC instants, so this just renders in IST.
+    // (A manual +5:30 shift used to live here, compensating for a driver-level timezone bug.)
+    return formatIstDateTime(dateStr) || dateStr;
   };
 
 

@@ -1,16 +1,24 @@
 import {
   Controller,
   Post,
+  Get,
   Body,
   HttpCode,
   HttpStatus,
   UsePipes,
+  UseGuards,
   ValidationPipe,
 } from '@nestjs/common';
 import { TriageService, TriageScoreResult } from './triage.service';
 import { TriageLlmService, TriageConverseResult } from './triage-llm.service';
 import { TriageScoreDto } from './dto/triage-score.dto';
 import { TriageConverseDto } from './dto/triage-converse.dto';
+import { RateLimit } from '../common/rate-limit/rate-limit.decorator';
+import { RateLimitGuard } from '../common/rate-limit/rate-limit.guard';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../auth/guards/roles.guard';
+import { Roles } from '../common/decorators';
+import { UserRole } from '../common/enums';
 
 /**
  * Triage Controller
@@ -32,12 +40,45 @@ export class TriageController {
    * Gemini-powered natural-language triage. Accepts the running conversation
    * and returns the next reply, extracted answers, quick replies, and a `done`
    * flag. Falls back gracefully (`available: false`) when no API key is set.
+   *
+   * This route is intentionally open — a bystander calling for someone else has
+   * no account — so it is also the one route where an outsider can spend money.
+   * Two controls sit in front of it:
+   *
+   *   - this per-caller ceiling, which answers 429 to a caller sending too much
+   *     (the client treats that like any other failure and drops to its offline
+   *     rule-based engine, so a throttled patient is still triaged);
+   *   - the global rate, daily request/token budgets, concurrency cap and
+   *     upstream cooldown inside GeminiBudgetService, which protect the bill
+   *     across all callers.
    */
   @Post('converse')
   @HttpCode(HttpStatus.OK)
+  @UseGuards(RateLimitGuard)
+  @RateLimit({
+    bucket: 'triage-converse',
+    limit: 15,
+    windowSeconds: 60,
+    limitPath: 'gemini.limits.perCallerPerMinute',
+  })
   @UsePipes(new ValidationPipe({ whitelist: true, transform: true }))
   async converse(@Body() body: TriageConverseDto): Promise<TriageConverseResult> {
     return this.triageLlmService.converse(body.messages, body.lang);
+  }
+
+  /**
+   * GET /api/triage/llm/usage
+   *
+   * What the triage LLM has cost so far and what is currently allowed: rolling
+   * request and token counts, the configured ceilings, why calls were refused,
+   * and an approximate spend. Admin-only — it reports operational state, not
+   * anything clinical.
+   */
+  @Get('llm/usage')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN)
+  getLlmUsage() {
+    return this.triageLlmService.getUsage();
   }
 
   /**

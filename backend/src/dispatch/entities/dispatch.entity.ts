@@ -11,6 +11,7 @@ import {
 import { Booking } from '../../bookings/entities/booking.entity';
 import { Ambulance } from '../../ambulances/entities/ambulance.entity';
 import { Hospital } from '../../hospitals/entities/hospital.entity';
+import { nowDefault, timestampColumnType } from '../../common/column-types';
 
 /**
  * Dispatch entity
@@ -53,19 +54,19 @@ export class Dispatch {
   @Column({ type: 'varchar', length: 30, default: 'DISPATCHED' })
   status: string;
 
-  @Column({ type: 'timestamp', nullable: true, default: () => 'NOW()', name: 'dispatched_at' })
+  @Column({ type: timestampColumnType(), nullable: true, default: () => nowDefault(), name: 'dispatched_at' })
   dispatchedAt: Date;
 
-  @Column({ type: 'timestamp', nullable: true, name: 'arrived_at_pickup' })
+  @Column({ type: timestampColumnType(), nullable: true, name: 'arrived_at_pickup' })
   arrivedAtPickup: Date;
 
-  @Column({ type: 'timestamp', nullable: true, name: 'departed_pickup' })
+  @Column({ type: timestampColumnType(), nullable: true, name: 'departed_pickup' })
   departedPickup: Date;
 
-  @Column({ type: 'timestamp', nullable: true, name: 'arrived_at_hospital' })
+  @Column({ type: timestampColumnType(), nullable: true, name: 'arrived_at_hospital' })
   arrivedAtHospital: Date;
 
-  @Column({ type: 'timestamp', nullable: true, name: 'completed_at' })
+  @Column({ type: timestampColumnType(), nullable: true, name: 'completed_at' })
   completedAt: Date;
 
   @Column({ type: 'int', nullable: true, name: 'estimated_pickup_time' })

@@ -33,6 +33,17 @@ export class DashboardController {
   }
 
   /**
+   * Live Operations Map — every ambulance and hospital, plus the dispatches
+   * linking them. Backs the admin map's initial paint and its periodic
+   * reconcile; live movement arrives over WebSocket in between.
+   */
+  @Get('admin/operations-map')
+  @Roles(UserRole.ADMIN)
+  async getOperationsMap() {
+    return this.dashboardService.getOperationsMap();
+  }
+
+  /**
    * Get driver dashboard stats
    */
   @Get('driver')

@@ -15,6 +15,12 @@ import {
   type Clarifier,
 } from '../services/nlpTriage';
 import { converse, type ConverseMessage } from '../services/triageApi';
+import MedicalProfilePanel from './MedicalProfilePanel';
+import {
+  medicalProfileAlerts,
+  normalizeMedicalProfile,
+  type MedicalProfile,
+} from '../types/medicalProfile';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -39,6 +45,16 @@ export interface SharedLocation {
 }
 
 interface TriageChatProps {
+  /**
+   * The patient's Medical Profile, read from their profile record. Shown
+   * alongside the triage conversation and repeated in the assessment summary so
+   * the responder never has to leave the triage screen to check for allergies,
+   * existing conditions or current medication. Supporting information only — it
+   * does not feed the triage scoring.
+   */
+  medicalProfile?: MedicalProfile | null;
+  /** Patient's name, shown on the Medical Profile panel header. */
+  patientName?: string;
   onComplete: (result: TriageResult) => void;
   /** Fired the moment a CRITICAL life-threat is detected, so the parent can
    *  dispatch an ambulance immediately (before the full Q&A finishes). */
@@ -282,7 +298,19 @@ const TTS_SUPPORTED = !!synth;
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function TriageChat({ onComplete, onFastTrack, onLocation, onTrack }: TriageChatProps) {
+export default function TriageChat({
+  medicalProfile,
+  patientName,
+  onComplete,
+  onFastTrack,
+  onLocation,
+  onTrack,
+}: TriageChatProps) {
+  // Normalised once so every render — rail, summary — reads the same complete
+  // shape, with "Not Provided" already filled in for anything unset.
+  const profile = normalizeMedicalProfile(medicalProfile);
+  const profileAlerts = medicalProfileAlerts(profile);
+
   const [engine, setEngine] = useState<Engine>('llm');
   const [lang, setLang] = useState<LangCode>('en');
   const [location, setLocation] = useState<SharedLocation | null>(null);
@@ -829,6 +857,45 @@ export default function TriageChat({ onComplete, onFastTrack, onLocation, onTrac
         </div>
       </div>
 
+      {/* ── Medical Profile rail ──────────────────────────────────────────
+          The patient's saved clinical background, alongside the triage
+          conversation rather than behind a click, so allergies, conditions and
+          medication are in view while the assessment is being made. Read-only —
+          it is supporting information and never alters the triage outcome. */}
+      <aside className="triage-medical-rail" aria-label="Patient medical profile">
+        <div className="triage-medical-rail-head">
+          <span aria-hidden="true" style={{ fontSize: '15px' }}>🩺</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h4>Medical Profile</h4>
+            <p className="triage-medical-rail-patient">
+              {patientName ? `${patientName} · from patient profile` : 'From the patient profile'}
+            </p>
+          </div>
+        </div>
+
+        {profileAlerts.length > 0 && (
+          <div className="triage-medical-alerts" role="note">
+            <div className="triage-medical-alerts-title">⚠️ Note before treating</div>
+            <ul>
+              {profileAlerts.map((alert) => <li key={alert}>{alert}</li>)}
+            </ul>
+          </div>
+        )}
+
+        <MedicalProfilePanel
+          profile={profile}
+          title={null}
+          compact
+          style={{ border: 'none', padding: 0, background: 'transparent' }}
+        />
+
+        <p className="triage-medical-rail-note">
+          {profile.hasData
+            ? 'Latest details saved by the patient. Update them under Profile → Medical Profile.'
+            : 'Nothing recorded yet. The patient can add these under Profile → Medical Profile.'}
+        </p>
+      </aside>
+
       {/* ── Result modal (opened from the "See result" button) ── */}
       {triageResult && showResult && (
         <div className="triage-result-modal-overlay" onClick={() => setShowResult(false)} role="dialog" aria-modal="true">
@@ -841,8 +908,25 @@ export default function TriageChat({ onComplete, onFastTrack, onLocation, onTrac
                 <span className="severity-label">{triageResult.severity}</span>
               </div>
               <div className="triage-assessment-body">
+                {/* Patient Medical Profile — supporting information recorded
+                    alongside the assessment, not part of how it was scored. */}
                 <div className="triage-assessment-section">
-                  <h4>Assessment Summary</h4>
+                  <h4>Patient Medical Profile</h4>
+                  <MedicalProfilePanel
+                    profile={profile}
+                    title={null}
+                    compact
+                    style={{ border: '1px solid #e0e0e0', background: '#fbfcfd' }}
+                    footnote={
+                      profile.updatedAt
+                        ? 'Taken from the patient profile at the time of this assessment.'
+                        : 'No medical information on record for this patient.'
+                    }
+                  />
+                </div>
+
+                <div className="triage-assessment-section">
+                  <h4>Triage Information</h4>
                   <div className="triage-assessment-grid">
                     <div className="triage-assessment-item">
                       <div className="label">Severity</div>

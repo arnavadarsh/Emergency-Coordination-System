@@ -103,6 +103,20 @@ export class BookingsController {
     return this.bookingsService.getTrackingInfo(id);
   }
 
+  /**
+   * Full ECS case report: patient, Medical Profile, emergency, triage and the
+   * dispatch/treatment timeline in one record.
+   *
+   * The Medical Profile is resolved live from the patient's profile, so a report
+   * generated after a profile edit carries the updated values.
+   */
+  @Get(':id/report')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.HOSPITAL, UserRole.DRIVER)
+  async getCaseReport(@Param('id') id: string) {
+    return this.bookingsService.buildCaseReport(id);
+  }
+
   @Get('stats/overview')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN)

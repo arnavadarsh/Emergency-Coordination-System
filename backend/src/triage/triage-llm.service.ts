@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { GoogleGenAI, Type } from '@google/genai';
 import { ConverseMessageDto } from './dto/triage-converse.dto';
+import { GeminiBudgetService } from './gemini-budget.service';
 
 /**
  * Triage LLM Service (Google Gemini)
@@ -115,6 +117,15 @@ export interface TriageConverseResult {
   keywords: string[];
   /** True when enough has been gathered to finalize the assessment. */
   done: boolean;
+  /**
+   * True when the model was reachable but a request control (rate, budget,
+   * concurrency, cooldown) declined the call. The client treats this exactly
+   * like `available: false` and continues with its offline engine; it is
+   * reported separately so operators can tell throttling from an outage.
+   */
+  limited?: boolean;
+  /** Hint for when the LLM path is expected to work again. */
+  retryAfterSeconds?: number;
 }
 
 @Injectable()
@@ -123,9 +134,12 @@ export class TriageLlmService {
   private readonly client: GoogleGenAI | null;
   private readonly model: string;
 
-  constructor() {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-    this.model = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly budget: GeminiBudgetService,
+  ) {
+    const apiKey = this.configService.get<string>('gemini.apiKey', '');
+    this.model = this.configService.get<string>('gemini.model', 'gemini-2.5-flash');
     this.client = apiKey ? new GoogleGenAI({ apiKey }) : null;
     if (!this.client) {
       this.logger.warn(
@@ -138,6 +152,11 @@ export class TriageLlmService {
     return this.client !== null;
   }
 
+  /** Current spend and limits, for the admin usage endpoint. */
+  getUsage() {
+    return this.budget.report();
+  }
+
   async converse(
     messages: ConverseMessageDto[],
     lang?: string,
@@ -146,10 +165,15 @@ export class TriageLlmService {
       return this.unavailable();
     }
 
+    // Cap what goes upstream before asking permission: the transcript length is
+    // the single biggest lever on what a call costs, and it arrives from an
+    // unauthenticated endpoint.
+    const trimmed = this.trimTranscript(messages);
+
     // Map the transcript to Gemini's content format. Gemini expects the first
     // turn to be the user; drop any leading assistant turns (e.g. the static
     // welcome message the client shows but doesn't send).
-    const contents = messages
+    const contents = trimmed
       .map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: m.text }],
@@ -168,17 +192,34 @@ export class TriageLlmService {
         ? `${SYSTEM_PROMPT}\n\nLANGUAGE: Write "reply" and every string in "quick_replies" in ${cleanLang}. The caller speaks ${cleanLang}. IMPORTANT: keep all values inside the "answers" object EXACTLY as the English allowed values listed above — do NOT translate answer values or keywords.`
         : SYSTEM_PROMPT;
 
+    // Rate, daily request and token budgets, concurrency and cooldown. A
+    // refusal is not an error: triage carries on with the offline rule-based
+    // engine, which is the same path used when no API key is configured.
+    const admission = this.budget.admit();
+    if (!admission.allowed) {
+      return { ...this.unavailable(), limited: true, retryAfterSeconds: admission.retryAfterSeconds };
+    }
+
     try {
-      const response = await this.client.models.generateContent({
-        model: this.model,
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0,
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-        },
-      });
+      const response = await this.withDeadline(
+        this.client.models.generateContent({
+          model: this.model,
+          contents,
+          config: {
+            systemInstruction,
+            temperature: 0,
+            responseMimeType: 'application/json',
+            responseSchema: RESPONSE_SCHEMA,
+          },
+        }),
+      );
+
+      // Bill what was actually spent, in tokens, against the daily budget.
+      const usage: any = (response as any)?.usageMetadata ?? {};
+      this.budget.recordSuccess(
+        Number(usage.promptTokenCount ?? 0) || 0,
+        Number(usage.candidatesTokenCount ?? usage.totalTokenCount ?? 0) || 0,
+      );
 
       const text = response.text;
       if (!text) return this.unavailable();
@@ -216,9 +257,90 @@ export class TriageLlmService {
         done: Boolean(parsed.done),
       };
     } catch (err) {
+      // A failure also starts a cooldown, so an upstream quota rejection or an
+      // outage does not turn into a retry storm against a paid API.
+      this.budget.recordFailure(err);
       this.logger.error(`Gemini converse failed: ${err?.message || err}`);
-      return this.unavailable();
+      return { ...this.unavailable(), limited: true };
+    } finally {
+      this.budget.release();
     }
+  }
+
+  /**
+   * Fail the call once the deadline passes rather than letting an emergency
+   * intake sit behind a slow model. The abort signal asks the SDK to give up
+   * too, so a stalled request is not left running and billable.
+   */
+  private async withDeadline<T>(work: Promise<T>): Promise<T> {
+    const timeoutMs = this.configService.get<number>('gemini.limits.timeoutMs', 12_000);
+    if (timeoutMs <= 0) return work;
+
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`Gemini call exceeded ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Keep the transcript inside the configured message and character ceilings.
+   *
+   * When it is too long the middle goes, never the opening: the model re-derives
+   * the whole `answers` map from the transcript on every turn, and the first
+   * exchanges are where the emergency type and the critical yes/no answers were
+   * established. The most recent turns are kept because they carry the question
+   * currently on the table.
+   */
+  private trimTranscript(messages: ConverseMessageDto[]): ConverseMessageDto[] {
+    const maxMessages = this.configService.get<number>('gemini.limits.maxMessages', 40);
+    const maxChars = this.configService.get<number>('gemini.limits.maxTranscriptChars', 12_000);
+
+    let kept = messages;
+    if (maxMessages > 0 && kept.length > maxMessages) {
+      const head = Math.min(4, maxMessages);
+      kept = [...kept.slice(0, head), ...kept.slice(kept.length - (maxMessages - head))];
+    }
+
+    if (maxChars > 0) {
+      let total = kept.reduce((sum, m) => sum + m.text.length, 0);
+
+      // Drop from just after the opening turns until it fits, down to a floor
+      // of the first turn and the current one.
+      while (total > maxChars && kept.length > 2) {
+        const dropAt = Math.min(4, kept.length - 2);
+        total -= kept[dropAt].text.length;
+        kept = [...kept.slice(0, dropAt), ...kept.slice(dropAt + 1)];
+      }
+
+      // Two very long turns can still exceed the ceiling. This is a cost
+      // control, so it holds: share the budget across what is left rather than
+      // sending more than was authorised.
+      if (total > maxChars) {
+        const perMessage = Math.max(1, Math.floor(maxChars / kept.length));
+        kept = kept.map(message =>
+          message.text.length <= perMessage
+            ? message
+            : { ...message, text: message.text.slice(0, perMessage) },
+        );
+        this.logger.warn(
+          `[gemini] Transcript still over ${maxChars} chars after dropping turns — truncating each to ${perMessage}`,
+        );
+      }
+    }
+
+    if (kept.length !== messages.length) {
+      this.logger.log(
+        `[gemini] Trimmed transcript from ${messages.length} to ${kept.length} turns to stay inside the request budget`,
+      );
+    }
+    return kept;
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────

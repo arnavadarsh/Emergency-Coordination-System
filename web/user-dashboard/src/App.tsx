@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Landing from './pages/Landing';
 import DashboardRouter from './pages/DashboardRouter';
+import PublicTracking from './pages/PublicTracking';
 import TokenStorage from './utils/tokenStorage';
 
 /**
@@ -22,6 +23,9 @@ const App: React.FC = () => {
       <Toaster position="top-right" toastOptions={{ duration: 4000 }} />
       <Routes>
         <Route path="/" element={<Landing />} />
+        {/* Shared ambulance tracking. Deliberately outside ProtectedRoute:
+            relatives open this from an SMS with no account and no app. */}
+        <Route path="/track/:token" element={<PublicTracking />} />
         <Route
           path="/dashboard"
           element={

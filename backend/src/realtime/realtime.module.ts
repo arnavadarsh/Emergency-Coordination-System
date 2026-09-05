@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { RealtimeGateway } from './realtime.gateway';
+import { CaseChatMessage } from './entities/case-chat-message.entity';
 
 /**
  * Realtime Module
@@ -10,6 +12,7 @@ import { RealtimeGateway } from './realtime.gateway';
  */
 @Module({
   imports: [
+    TypeOrmModule.forFeature([CaseChatMessage]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({

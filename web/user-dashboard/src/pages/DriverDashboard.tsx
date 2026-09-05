@@ -2,10 +2,17 @@ import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import toast from 'react-hot-toast';
+import { formatIstDateTime, formatIstFull } from '../utils/datetime';
 import { tokenStorage } from '../utils/tokenStorage';
 import '../styles/DriverDashboard.css';
+import MedicalProfilePanel from '../components/MedicalProfilePanel';
+import {
+  medicalProfileAlerts,
+  normalizeMedicalProfile,
+  type MedicalProfile,
+} from '../types/medicalProfile';
+import { API_BASE_URL } from '../config/api';
 
-const API_BASE_URL = 'http://localhost:3000/api';
 
 interface Booking {
   id: string;
@@ -17,6 +24,9 @@ interface Booking {
   status: string;
   scheduledTime?: string;
   createdAt: string;
+  patientName?: string;
+  /** Patient's standing clinical background, resolved from their profile. */
+  medicalProfile: MedicalProfile;
 }
 
 interface Dispatch {
@@ -119,7 +129,11 @@ function Dashboard() {
             bookingType: d.booking?.bookingType || 'EMERGENCY',
             severity: d.booking?.severity || 'MEDIUM',
             status: d.booking?.status || 'IN_PROGRESS',
-            createdAt: d.booking?.createdAt || d.assignedAt
+            createdAt: d.booking?.createdAt || d.assignedAt,
+            patientName: d.booking?.patientName || 'Patient',
+            // Read live from the patient's profile on every refresh, so a profile
+            // edit shows up here without the case being re-created.
+            medicalProfile: normalizeMedicalProfile(d.booking?.medicalProfile)
           }
         }));
         
@@ -397,7 +411,7 @@ function Dashboard() {
                       <span>{dispatch.booking.dropoffLocation}</span>
                     </div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#666' }}>
-                      <span>{new Date(dispatch.assignedAt).toLocaleString()}</span>
+                      <span title={formatIstFull(dispatch.assignedAt)}>{formatIstDateTime(dispatch.assignedAt)}</span>
                       {dispatch.booking.severity && (
                         <span style={{ padding: '2px 8px', borderRadius: '8px', backgroundColor: getSeverityColor(dispatch.booking.severity), color: 'white' }}>
                           {dispatch.booking.severity}
@@ -476,6 +490,48 @@ function Dashboard() {
                     </div>
                   </div>
                 </div>
+
+                {/* Medical Profile — the patient's standing clinical background,
+                    on the triage screen itself so allergies, existing conditions
+                    and current medication are visible while assessing. Supporting
+                    information: it does not change the triage priority. */}
+                {(() => {
+                  const medical = normalizeMedicalProfile(activeDispatch.booking.medicalProfile);
+                  const alerts = medicalProfileAlerts(medical);
+                  return (
+                    <div style={{ margin: '20px 0' }}>
+                      {alerts.length > 0 && (
+                        <div style={{
+                          background: '#fff8f0', border: '1px solid #ffab00',
+                          borderRadius: '8px', padding: '10px 12px', marginBottom: '12px',
+                        }}>
+                          <div style={{
+                            fontSize: '10px', fontWeight: 800, color: '#b06000',
+                            textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '6px',
+                          }}>
+                            ⚠️ Note before treating
+                          </div>
+                          <ul style={{ margin: 0, paddingLeft: '16px' }}>
+                            {alerts.map(item => (
+                              <li key={item} style={{ fontSize: '12.5px', color: '#172b4d', lineHeight: 1.5 }}>
+                                {item}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      <MedicalProfilePanel
+                        profile={medical}
+                        compact
+                        footnote={
+                          medical.hasData
+                            ? 'Latest details from the patient profile.'
+                            : 'The patient has not recorded any medical information.'
+                        }
+                      />
+                    </div>
+                  );
+                })()}
 
                 <div className="status-controls">
                   {activeDispatch.status === 'ASSIGNED' || activeDispatch.status === 'DISPATCHED' ? (
@@ -574,7 +630,7 @@ function Dashboard() {
                     
                     <div className="dispatch-meta">
                       <span className="dispatch-time">
-                        {new Date(dispatch.assignedAt).toLocaleString()}
+                        {formatIstDateTime(dispatch.assignedAt)}
                       </span>
                       {dispatch.booking.severity && (
                         <span 

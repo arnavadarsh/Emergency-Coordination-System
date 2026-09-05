@@ -10,6 +10,7 @@ import {
 import { HospitalStatus } from '../../common/enums';
 import { HospitalCapability } from './hospital-capability.entity';
 import { Booking } from '../../bookings/entities/booking.entity';
+import { enumColumnType } from '../../common/column-types';
 
 /**
  * Hospital entity
@@ -40,7 +41,7 @@ export class Hospital {
   longitude: number;
 
   @Column({
-    type: 'enum',
+    type: enumColumnType(),
     enum: HospitalStatus,
     default: HospitalStatus.ACCEPTING,
     name: 'service_status',
