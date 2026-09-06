@@ -11,6 +11,7 @@ import {
   type MedicalProfileForm,
 } from '../types/medicalProfile';
 import { API_BASE_URL, ROLE_APP_URLS } from '../config/api';
+import TokenStorage from '../utils/tokenStorage';
 
 // ── Palette ──────────────────────────────────────────────────
 const C = {
@@ -285,8 +286,14 @@ const Landing: React.FC = () => {
     try {
       const { accessToken, user } = await ApiClient.login(email, password);
       if (!ROLE_APP_URLS[user.role]) throw new Error('Unknown role.');
-      if (user.role === 'USER') navigate('/dashboard');
-      else window.location.href = `${ROLE_APP_URLS[user.role]}#token=${encodeURIComponent(accessToken)}`;
+      if (user.role === 'USER') { navigate('/dashboard'); return; }
+
+      // Signing in stored the session here, but this app belongs to patients.
+      // Leaving a driver or hospital session behind made a later visit to this
+      // origin believe it was theirs. The token goes on to their app in the URL
+      // fragment; nothing stays here.
+      TokenStorage.clearToken();
+      window.location.href = `${ROLE_APP_URLS[user.role]}#token=${encodeURIComponent(accessToken)}`;
     } catch (err: any) { setError(err.response?.data?.message || err.message || 'Login failed'); }
     finally { setLoading(false); }
   };
