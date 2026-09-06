@@ -6,6 +6,9 @@ import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { UsersModule } from '../users/users.module';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { Hospital } from '../hospitals/entities/hospital.entity';
+import { Ambulance } from '../ambulances/entities/ambulance.entity';
 
 /**
  * Authentication Module
@@ -25,6 +28,9 @@ import { UsersModule } from '../users/users.module';
       inject: [ConfigService],
     }),
     UsersModule,
+    // Registration links a hospital account to its facility and a driver to
+    // their ambulance, so both repositories are needed here.
+    TypeOrmModule.forFeature([Hospital, Ambulance]),
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],

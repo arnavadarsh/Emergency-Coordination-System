@@ -1,6 +1,11 @@
-import { Injectable, UnauthorizedException, ConflictException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException, ConflictException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { UsersService } from '../users/users.service';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { Hospital } from '../hospitals/entities/hospital.entity';
+import { Ambulance } from '../ambulances/entities/ambulance.entity';
+import { UserRole, AmbulanceStatus } from '../common/enums';
 import { LoginDto, RegisterDto } from './dto';
 import * as bcrypt from 'bcrypt';
 
@@ -23,9 +28,15 @@ export class AuthService {
   private static readonly DUMMY_HASH =
     '$2b$12$lWe1vgzXE4E/silQYHH0ceSw0aqlbYXSLuHv/JGEvGpRaBynvUYF.';
 
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     private usersService: UsersService,
     private jwtService: JwtService,
+    @InjectRepository(Hospital)
+    private readonly hospitalRepository: Repository<Hospital>,
+    @InjectRepository(Ambulance)
+    private readonly ambulanceRepository: Repository<Ambulance>,
   ) {}
 
   /** Hash a plain password for storage. */
@@ -106,6 +117,10 @@ export class AuthService {
       },
     });
 
+    // A hospital or driver account is not usable until it points at the
+    // facility or vehicle it belongs to.
+    await this.linkRoleRecords(user.id, registerDto);
+
     // Generate JWT token
     const payload = { sub: user.id, email: user.email, role: user.role };
     const token = this.jwtService.sign(payload);
@@ -118,6 +133,92 @@ export class AuthService {
         role: user.role,
       },
     };
+  }
+
+  /**
+   * Give a hospital or driver account the records it needs.
+   *
+   * Failures here are logged and swallowed: the account itself was created
+   * successfully, and refusing the whole registration because a vehicle number
+   * was already taken would be worse than an account an admin can finish
+   * linking later.
+   */
+  private async linkRoleRecords(userId: string, dto: RegisterDto): Promise<void> {
+    try {
+      if (dto.role === UserRole.HOSPITAL) {
+        const hospitalId = await this.resolveHospital(dto);
+        if (hospitalId) await this.usersService.linkRoleRecords(userId, { hospitalId });
+        return;
+      }
+
+      if (dto.role === UserRole.DRIVER) {
+        const ambulanceId = await this.resolveAmbulance(dto);
+        await this.usersService.linkRoleRecords(userId, {
+          ambulanceId,
+          licenseNumber: dto.licenseNumber,
+        });
+      }
+    } catch (error: any) {
+      this.logger.error(
+        `Registered ${dto.email} but could not link its ${dto.role} records: ${error?.message ?? error}`,
+      );
+    }
+  }
+
+  /**
+   * The hospital this login administers: an existing one matched by name or by
+   * the account's own email, otherwise a new record from what the form supplied.
+   */
+  private async resolveHospital(dto: RegisterDto): Promise<string | null> {
+    const name = dto.hospitalName?.trim();
+
+    const existing = await this.hospitalRepository
+      .createQueryBuilder('hospital')
+      .where('LOWER(hospital.name) = LOWER(:name)', { name: name ?? '' })
+      .orWhere('LOWER(hospital.email) = LOWER(:email)', { email: dto.email })
+      .getOne();
+
+    if (existing) return existing.id;
+    if (!name) return null;
+
+    const created = await this.hospitalRepository.save(
+      this.hospitalRepository.create({
+        name,
+        address: dto.address ?? 'Address not provided',
+        phoneNumber: dto.phoneNumber ?? '',
+        email: dto.email,
+        latitude: dto.latitude ?? 0,
+        longitude: dto.longitude ?? 0,
+        totalBeds: 0,
+        availableBeds: 0,
+      }),
+    );
+    this.logger.log(`Created hospital "${created.name}" for new hospital account ${dto.email}`);
+    return created.id;
+  }
+
+  /**
+   * The ambulance this driver operates, matched by vehicle number. A number
+   * nobody has registered yet creates the unit as PENDING, which is the same
+   * state the ambulance registration endpoint uses — an admin verifies it
+   * before it can be dispatched.
+   */
+  private async resolveAmbulance(dto: RegisterDto): Promise<string | undefined> {
+    const vehicleNumber = dto.vehicleNumber?.trim();
+    if (!vehicleNumber) return undefined;
+
+    const existing = await this.ambulanceRepository.findOne({ where: { vehicleNumber } });
+    if (existing) return existing.id;
+
+    const created = await this.ambulanceRepository.save(
+      this.ambulanceRepository.create({
+        vehicleNumber,
+        vehicleType: 'BASIC',
+        status: AmbulanceStatus.PENDING,
+      }),
+    );
+    this.logger.log(`Registered ambulance ${vehicleNumber} (pending verification) for driver ${dto.email}`);
+    return created.id;
   }
 
   /**

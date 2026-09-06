@@ -73,6 +73,31 @@ export class UsersService {
   }
 
   /**
+   * Attach the records a non-patient account needs to be usable.
+   *
+   * A hospital login with no `hospitalId` cannot open its dashboard at all —
+   * the stats endpoint has nothing to report on and raises "No hospital is
+   * linked to this account". A driver with no ambulance shows up on a
+   * patient's tracking view without a vehicle. Both are set at registration.
+   *
+   * `licenseNumber` is stored in `emergencyContact`, which is where
+   * DriverIdentityService already reads a driver's licence from.
+   */
+  async linkRoleRecords(
+    userId: string,
+    links: { hospitalId?: string; ambulanceId?: string; licenseNumber?: string },
+  ): Promise<void> {
+    const update: Partial<User> = {};
+    if (links.hospitalId) update.hospitalId = links.hospitalId;
+    if (links.ambulanceId) update.ambulanceId = links.ambulanceId;
+    if (links.licenseNumber) update.emergencyContact = links.licenseNumber;
+
+    if (Object.keys(update).length > 0) {
+      await this.userRepository.update(userId, update);
+    }
+  }
+
+  /**
    * Create a new user with profile
    */
   async create(data: {

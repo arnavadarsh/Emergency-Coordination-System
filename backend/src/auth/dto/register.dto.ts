@@ -56,6 +56,30 @@ export class RegisterDto {
   @IsOptional()
   role?: UserRole;
 
+  // ── Role-specific details ────────────────────────────────────────────────
+  // The shared sign-up form collects these for hospital and driver accounts.
+  // They were previously undeclared, and the global ValidationPipe runs with
+  // forbidNonWhitelisted, so every hospital and driver registration was
+  // rejected with "property hospitalName should not exist".
+
+  /** HOSPITAL: the facility this login administers. Linked, or created. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(255)
+  hospitalName?: string;
+
+  /** DRIVER: driving licence number, shown to patients and hospitals. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(50)
+  licenseNumber?: string;
+
+  /** DRIVER: the ambulance to link this driver to. */
+  @IsString()
+  @IsOptional()
+  @MaxLength(20)
+  vehicleNumber?: string;
+
   /**
    * Optional Medical Profile captured while creating the patient ID.
    *
