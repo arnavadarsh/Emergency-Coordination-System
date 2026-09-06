@@ -76,8 +76,8 @@ export class AmbulancesService implements OnModuleInit {
     if (existingUnits.length > 0) {
       for (const unit of existingUnits) {
         unit.status = AmbulanceStatus.AVAILABLE;
-        if (!unit.currentLatitude) unit.currentLatitude = 12.9716;
-        if (!unit.currentLongitude) unit.currentLongitude = 77.5946;
+        if (!unit.currentLatitude) unit.currentLatitude = 28.6304;
+        if (!unit.currentLongitude) unit.currentLongitude = 77.2177;
       }
       await this.ambulanceRepository.save(existingUnits);
       return;
@@ -85,27 +85,30 @@ export class AmbulancesService implements OnModuleInit {
 
     const seedFleet = [
       {
-        vehicleNumber: 'KA01AA1001',
+        vehicleNumber: 'DL01AA1001',
         vehicleType: 'ALS',
         status: AmbulanceStatus.AVAILABLE,
-        currentLatitude: 12.9716,
-        currentLongitude: 77.5946,
+        // Connaught Place — central to the seeded Delhi hospitals.
+        currentLatitude: 28.6304,
+        currentLongitude: 77.2177,
         equipmentList: { oxygen: true, ventilator: true, monitor: true },
       },
       {
-        vehicleNumber: 'KA01AA1002',
+        vehicleNumber: 'DL01AA1002',
         vehicleType: 'BLS',
         status: AmbulanceStatus.AVAILABLE,
-        currentLatitude: 12.9865,
-        currentLongitude: 77.6046,
+        // South Delhi, near AIIMS and Safdarjung.
+        currentLatitude: 28.5729,
+        currentLongitude: 77.2090,
         equipmentList: { oxygen: true, defibrillator: true },
       },
       {
-        vehicleNumber: 'KA01AA1003',
+        vehicleNumber: 'DL01AA1003',
         vehicleType: 'BASIC',
         status: AmbulanceStatus.AVAILABLE,
-        currentLatitude: 12.9561,
-        currentLongitude: 77.7011,
+        // East Delhi, near Lok Nayak.
+        currentLatitude: 28.6450,
+        currentLongitude: 77.2500,
         equipmentList: { oxygen: true },
       },
     ];
