@@ -52,16 +52,31 @@ class ApiClient {
   /**
    * Login
    */
-  async login(email: string, password: string) {
+  /**
+   * Check credentials and return the session, WITHOUT storing it.
+   *
+   * This app hosts the shared sign-in as well as the patient dashboard, and a
+   * browser origin has one storage slot. Persisting every successful sign-in
+   * here meant that signing in as a driver, hospital or admin overwrote a
+   * patient who was already signed in — mid-case — even though that session was
+   * only passing through on its way to another app.
+   *
+   * The caller stores it when, and only when, it belongs to this origin.
+   */
+  async authenticate(email: string, password: string) {
     const response = await this.client.post(API_CONFIG.LOGIN, {
       email,
       password,
     });
-    
-    // Store token and user data (no role restriction - allow all roles)
-    TokenStorage.setToken(response.data.accessToken);
-    TokenStorage.setUser(response.data.user);
     return response.data;
+  }
+
+  /** Authenticate and keep the session on this origin. For patients. */
+  async login(email: string, password: string) {
+    const data = await this.authenticate(email, password);
+    TokenStorage.setToken(data.accessToken);
+    TokenStorage.setUser(data.user);
+    return data;
   }
 
   /**

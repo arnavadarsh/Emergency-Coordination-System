@@ -20,6 +20,7 @@ const Login: React.FC = () => {
     setLoading(true);
 
     try {
+      // Stores the session on this origin — only correct for a patient.
       await ApiClient.login(email, password);
       navigate('/dashboard');
     } catch (err: any) {

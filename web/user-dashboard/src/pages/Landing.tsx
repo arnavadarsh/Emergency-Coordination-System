@@ -293,15 +293,22 @@ const Landing: React.FC = () => {
   const handleLogin = async (e: FormEvent) => {
     e.preventDefault(); setError(''); setLoading(true);
     try {
-      const { accessToken, user } = await ApiClient.login(email, password);
+      // Deliberately does not store the session — see ApiClient.authenticate.
+      const { accessToken, user } = await ApiClient.authenticate(email, password);
       if (!ROLE_APP_URLS[user.role]) throw new Error('Unknown role.');
-      if (user.role === 'USER') { navigate('/dashboard'); return; }
 
-      // Signing in stored the session here, but this app belongs to patients.
-      // Leaving a driver or hospital session behind made a later visit to this
-      // origin believe it was theirs. The token goes on to their app in the URL
-      // fragment; nothing stays here.
-      TokenStorage.clearToken();
+      if (user.role === 'USER') {
+        // A patient's session belongs to this origin.
+        TokenStorage.setToken(accessToken);
+        TokenStorage.setUser(user);
+        navigate('/dashboard');
+        return;
+      }
+
+      // Every other role is only passing through: the token goes to their own
+      // app in the URL fragment and nothing is written here. That is what lets
+      // a patient stay signed in on this origin — in another tab, mid-case —
+      // while somebody signs in as a driver on this very page.
       window.location.href = `${ROLE_APP_URLS[user.role]}#token=${encodeURIComponent(accessToken)}`;
     } catch (err: any) { setError(err.response?.data?.message || err.message || 'Login failed'); }
     finally { setLoading(false); }
