@@ -236,17 +236,6 @@ curl https://your-host/api/health/ready   # database + storage
 configured; it returns `degraded` rather than failing, so a database blip does
 not pull every instance out of rotation mid-emergency.
 
-## First run (either path)
-
-Set `SEED_DEMO_DATA=true` for a test deployment: it writes sample Delhi
-hospitals and an available ambulance, without which nothing can be dispatched.
-It is **off by default in production** so a deploy never quietly adds demo rows
-to real data. Turn it off before real use.
-
-Register the first accounts at `https://your-host` — the sign-in screen also
-registers patients, drivers and hospitals. An admin account needs `role`
-`ADMIN`, which is set by an admin or directly in Supabase.
-
 ## Path C — Render (blueprint, free tier)
 
 `render.yaml` in the repo root describes both services, so Render can build the
@@ -282,6 +271,19 @@ against the backend's own URL and `CORS_ORIGINS` has to name the web origin.
 ---
 
 ---
+
+---
+
+## First run (any path)
+
+Set `SEED_DEMO_DATA=true` for a test deployment: it writes sample Delhi
+hospitals and an available ambulance, without which nothing can be dispatched.
+It is **off by default in production** so a deploy never quietly adds demo rows
+to real data. Turn it off before real use.
+
+Register the first accounts at `https://your-host` — the sign-in screen also
+registers patients, drivers and hospitals. An admin account needs `role`
+`ADMIN`, which is set by an admin or directly in Supabase.
 
 ## Notes that matter in production
 
