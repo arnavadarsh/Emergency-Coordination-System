@@ -225,6 +225,15 @@ const Landing: React.FC = () => {
   const [medicalProfile, setMedicalProfile] = useState<MedicalProfileForm>({ ...EMPTY_MEDICAL_PROFILE_FORM });
   const [showMedicalProfile, setShowMedicalProfile] = useState(false);
   const [error, setError] = useState('');
+
+  // Arriving here because a session was rejected — say so, rather than looking
+  // like the app simply threw the user out. See utils/authInterceptor.ts.
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get('signedOut') === '1') {
+      setError('Your session has ended. Please sign in again.');
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, []);
   const [success, setSuccess] = useState('');
   const [loading, setLoading] = useState(false);
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
