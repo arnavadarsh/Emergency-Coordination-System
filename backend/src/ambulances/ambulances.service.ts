@@ -86,7 +86,7 @@ export class AmbulancesService implements OnModuleInit {
     const seedFleet = [
       {
         vehicleNumber: 'DL01AA1001',
-        vehicleType: 'ALS',
+        vehicleType: 'ADVANCED',
         status: AmbulanceStatus.AVAILABLE,
         // Connaught Place — central to the seeded Delhi hospitals.
         currentLatitude: 28.6304,
@@ -95,7 +95,7 @@ export class AmbulancesService implements OnModuleInit {
       },
       {
         vehicleNumber: 'DL01AA1002',
-        vehicleType: 'BLS',
+        vehicleType: 'BASIC',
         status: AmbulanceStatus.AVAILABLE,
         // South Delhi, near AIIMS and Safdarjung.
         currentLatitude: 28.5729,

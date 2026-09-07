@@ -114,6 +114,10 @@ export class BookingsService {
       booking.userId           = userId;
       booking.pickupLatitude   = location.lat;
       booking.pickupLongitude  = location.lng;
+      // Set explicitly: the deployed schema declares booking_type NOT NULL with
+      // no database default, so relying on the entity's `default:` (which only
+      // applies when TypeORM generates the schema) inserted NULL and failed.
+      booking.bookingType      = 'EMERGENCY';
       booking.status           = BookingStatus.PENDING;
       booking.severity         = derivedSeverity;     // ← was missing before
       booking.triageReport     = savedTriageReport;
