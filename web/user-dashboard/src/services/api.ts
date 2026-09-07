@@ -33,15 +33,16 @@ class ApiClient {
       (response) => response,
       (error) => {
         if (error.response?.status === 401) {
-          // Token expired or missing — clear and redirect to login
+          // The server does not accept this session. Clear it and go to
+          // sign-in, which this app serves at the root — '/login' was not a
+          // route, so the old redirect landed on nothing.
           TokenStorage.removeToken();
-          window.location.href = '/login';
+          window.location.href = '/';
         } else if (error.response?.status === 403) {
-          // Wrong role — the stored token belongs to a different account type.
-          // Clear it so the user can log in with the correct credentials.
-          console.error('[User Dashboard] Access denied (403): account does not have USER role. Clearing token.');
-          TokenStorage.removeToken();
-          window.location.href = '/login';
+          // The account is valid but may not do this particular thing. That is
+          // not a reason to sign a patient out mid-emergency — surface it to
+          // the caller and leave the session alone.
+          console.error('[User Dashboard] Request refused (403):', error.response?.config?.url);
         }
         return Promise.reject(error);
       }
