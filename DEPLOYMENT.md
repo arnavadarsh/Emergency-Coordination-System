@@ -79,6 +79,7 @@ anything newer is real pending work and is never skipped.
 
 - **[Railway](#path-a--railway)** — two services from this repo, no server to run.
 - **[Docker Compose](#path-b--docker-compose-on-any-server)** — one host you control.
+- **[Render](#path-c--render-blueprint-free-tier)** — one-click from `render.yaml`, free tier available.
 
 ## Path A — Railway
 
@@ -245,6 +246,40 @@ to real data. Turn it off before real use.
 Register the first accounts at `https://your-host` — the sign-in screen also
 registers patients, drivers and hospitals. An admin account needs `role`
 `ADMIN`, which is set by an admin or directly in Supabase.
+
+## Path C — Render (blueprint, free tier)
+
+`render.yaml` in the repo root describes both services, so Render can build the
+whole system from one screen.
+
+1. **Render → New → Blueprint → select this repository → Apply.**
+   It creates `ecs-backend` (Docker) and `ecs-web` (static, all four dashboards).
+2. Render prompts for the values marked `sync: false`. The only one needed to
+   start is **`DATABASE_URL`** — your Supabase pooler connection string.
+   `deploy/.env`, generated locally and gitignored, already contains it along
+   with a freshly generated `JWT_SECRET`.
+3. When both services have URLs, set the four that reference them and redeploy:
+
+   | Service | Variable | Value |
+   |---|---|---|
+   | backend | `CORS_ORIGINS` | the web service URL |
+   | backend | `PUBLIC_TRACKING_BASE_URL` | `<web URL>/track` |
+   | web | `VITE_API_URL` | `<backend URL>/api` |
+   | web | `VITE_SOCKET_URL` | the backend URL |
+   | web | `VITE_LOGIN_URL` | the web URL |
+   | web | `VITE_*_APP_URL` | `<web URL>/hospital`, `/driver`, `/admin` |
+
+   The web service must be **rebuilt**, not restarted: Vite inlines `VITE_*` at
+   build time.
+4. Check `<backend>/api/health` and `<backend>/api/health/ready`.
+
+Two things specific to Render's free tier: services **sleep after inactivity**,
+so the first request after idling takes a few seconds — which matters for an
+emergency system and is a reason to move off free before real use. And a free
+static site has no server-side proxy, which is why the dashboards are built
+against the backend's own URL and `CORS_ORIGINS` has to name the web origin.
+
+---
 
 ---
 

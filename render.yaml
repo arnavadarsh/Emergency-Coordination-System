@@ -1,0 +1,113 @@
+# Render blueprint — deploys the whole system from this repository.
+#
+#   Render dashboard → New → Blueprint → pick this repo → Apply
+#
+# Two services, plus the Supabase project that holds every row. Secrets marked
+# `sync: false` are prompted for on first apply and never live in this file:
+# see deploy/.env, which is generated locally and gitignored.
+#
+# The web service is built against the backend's public URL, so the browser
+# talks to both directly. That avoids proxying and keeps CORS explicit.
+
+services:
+  # ── API ───────────────────────────────────────────────────────────────────
+  - type: web
+    name: ecs-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    region: singapore          # closest to the ap-south-1 Supabase project
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Supabase connection string — use the POOLER host, not the direct one.
+      - key: DATABASE_URL
+        sync: false
+      - key: DB_RUN_MIGRATIONS
+        value: "true"
+      - key: DB_POOL_MAX
+        value: "10"
+      # openssl rand -base64 48 — never the shipped default.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      # Render terminates TLS in front of the app, so the client IP arrives in
+      # X-Forwarded-For. Per-caller rate limiting depends on reading it.
+      - key: RATE_LIMIT_TRUST_PROXY
+        value: "true"
+      # Both need the web service's URL; fill them in after the first apply.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: PUBLIC_TRACKING_BASE_URL
+        sync: false
+      # Optional. Without these, image attachments are disabled and everything
+      # else runs normally.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: chat-attachments
+      # Optional integrations. Each degrades cleanly when unset: no Gemini key
+      # means triage uses the offline engine, no Maps key means travel times are
+      # estimated from distance, no Twilio means alerts only reach the log.
+      - key: SMS_PROVIDER
+        value: log
+      - key: SMS_DEFAULT_COUNTRY_CODE
+        value: "+91"
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      # The Supabase project already holds real hospitals and ambulances.
+      - key: SEED_DEMO_DATA
+        value: "false"
+
+  # ── Dashboards ────────────────────────────────────────────────────────────
+  # All four built into one static site: the patient app at the root (which is
+  # also the shared sign-in and the public /track page), the rest under a path.
+  - type: web
+    name: ecs-web
+    runtime: static
+    buildCommand: ./deploy/build-web.sh
+    staticPublishPath: ./deploy/public
+    pullRequestPreviewsEnabled: false
+    envVars:
+      # Vite inlines these at BUILD time, so changing one needs a rebuild.
+      - key: VITE_API_URL
+        sync: false           # https://ecs-backend.onrender.com/api
+      - key: VITE_SOCKET_URL
+        sync: false           # https://ecs-backend.onrender.com
+      - key: VITE_LOGIN_URL
+        sync: false           # this site's own URL
+      - key: VITE_HOSPITAL_APP_URL
+        sync: false           # <this site>/hospital
+      - key: VITE_DRIVER_APP_URL
+        sync: false           # <this site>/driver
+      - key: VITE_ADMIN_APP_URL
+        sync: false           # <this site>/admin
+    routes:
+      # Each dashboard is a single-page app, so an unknown path inside it must
+      # fall back to that app's index.html rather than 404. The root rule is
+      # what makes the shared /track/<token> link open from an SMS.
+      - type: rewrite
+        source: /admin/*
+        destination: /admin/index.html
+      - type: rewrite
+        source: /driver/*
+        destination: /driver/index.html
+      - type: rewrite
+        source: /hospital/*
+        destination: /hospital/index.html
+      - type: rewrite
+        source: /*
+        destination: /index.html

@@ -74,3 +74,6 @@ yarn-error.log*
 deploy/.env
 deploy/.env.*
 !deploy/.env.example
+
+# Assembled static site (built by deploy/build-web.sh)
+deploy/public/
