@@ -5,33 +5,38 @@ import { UNIFIED_LOGIN_URL } from '../config/api';
 /**
  * Sends the user back to sign in when the server rejects their session.
  *
- * The dashboards call the API with the global axios instance, which had no
- * error handling of its own — so a token the server no longer accepts produced
- * an endless "Unauthorized" banner with no way out. A stored token can stop
- * being valid for ordinary reasons: it was issued by a backend pointed at a
- * different database, the account was deactivated, or it simply expired. In
- * every case the answer is the same, and it is not to sit there.
+ * The dashboards poll the API every 30 seconds, so a session the server no
+ * longer accepts does not fail once — it fails forever, every 30 seconds. A
+ * stored token stops being valid for ordinary reasons: it expired, the account
+ * was deactivated, the backend was repointed at a different database, or the
+ * account was deleted outright. In every case the answer is to sign in again.
  *
  * Only 401 (this session is not valid) clears anything. A 403 means the account
- * is fine but may not perform that particular action, and must not destroy a
- * working session — during an emergency least of all.
+ * is fine but may not perform that one action, and must never destroy a working
+ * session — during an emergency least of all.
  */
+
+/** Debounce, so a burst of failing polls redirects once rather than fighting. */
+let lastRedirectAt = 0;
+const REDIRECT_DEBOUNCE_MS = 3000;
+
 export function installAuthInterceptor(): void {
   axios.interceptors.response.use(
     response => response,
     error => {
+      // Only act on a rejected *session*. With no token stored there is nothing
+      // to sign out of — which is also what keeps a failed login on the sign-in
+      // page from bouncing in a loop.
       if (error?.response?.status === 401 && TokenStorage.hasToken()) {
         TokenStorage.clearToken();
-        // Guard against a redirect loop if the sign-in page itself 401s.
-        if (!sessionStorage.getItem('ecs:auth-redirect')) {
-          sessionStorage.setItem('ecs:auth-redirect', '1');
+
+        const now = Date.now();
+        if (now - lastRedirectAt > REDIRECT_DEBOUNCE_MS) {
+          lastRedirectAt = now;
           window.location.href = UNIFIED_LOGIN_URL;
         }
       }
       return Promise.reject(error);
     },
   );
-
-  // A successful load means the session works; allow a future redirect again.
-  window.addEventListener('load', () => sessionStorage.removeItem('ecs:auth-redirect'));
 }
