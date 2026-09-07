@@ -25,7 +25,20 @@ interface BookingCardProps {
   showActions?: boolean;
 }
 
-const ACTIVE_STATUSES = ['PENDING', 'CONFIRMED', 'ASSIGNED', 'IN_PROGRESS'];
+/**
+ * The statuses that mean a request is still live, so it belongs under Current
+ * Bookings rather than History.
+ *
+ * CREATED was missing. A booking is CREATED the moment it is raised and only
+ * becomes ASSIGNED once auto-dispatch finds a free ambulance — so whenever the
+ * fleet is fully committed, a brand-new request stayed CREATED and disappeared
+ * from Current, filed under History while the patient was still waiting for it.
+ *
+ * CONFIRMED was listed but is not one of the backend's statuses (see
+ * BookingStatus: PENDING, CREATED, ASSIGNED, IN_PROGRESS, COMPLETED,
+ * CANCELLED), so it never matched anything.
+ */
+const ACTIVE_STATUSES = ['PENDING', 'CREATED', 'ASSIGNED', 'IN_PROGRESS'];
 
 const BookingCard: React.FC<BookingCardProps> = ({ booking, onTrack, onCancel, showActions = true }) => {
   const isActive = ACTIVE_STATUSES.includes(booking.status);
