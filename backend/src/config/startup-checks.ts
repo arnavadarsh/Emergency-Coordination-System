@@ -32,10 +32,15 @@ export function assertProductionConfig(): void {
   }
 
   // ── Uploads: chat images belong in Supabase Storage, not container disk ────
+  // A warning, not a refusal: everything except sending an image in case chat
+  // works without it, and refusing to start would hold the whole system back
+  // for one optional feature. The invariant it protects — never write uploads
+  // to an ephemeral container filesystem — is enforced at the upload instead,
+  // which fails cleanly rather than storing a file that will vanish.
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    problems.push(
-      'SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required so chat attachments are stored in Supabase Storage. ' +
-        'Without them uploads would be written to the container filesystem and lost on restart.',
+    warnings.push(
+      'SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not set, so chat image attachments are disabled. ' +
+        'Set them (and create the storage bucket) to turn them on. Everything else runs normally.',
     );
   }
 
