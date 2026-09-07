@@ -48,6 +48,7 @@ interface TrackingShareCardProps {
 const TrackingShareCard: React.FC<TrackingShareCardProps> = ({ apiBaseUrl, token, bookingId }) => {
   const [info, setInfo] = useState<ShareInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -66,27 +67,35 @@ const TrackingShareCard: React.FC<TrackingShareCardProps> = ({ apiBaseUrl, token
 
   useEffect(() => { load(); }, [load]);
 
-  const share = async () => {
+  /**
+   * Copy the link, and only the link.
+   *
+   * This used to hand off to navigator.share first. On a phone that is the
+   * fastest route into WhatsApp, but navigator.share also exists on desktop —
+   * where the share sheet's own "copy" puts the title, the message and the URL
+   * on the clipboard as one string. Pasting that into the address bar produces
+   * a mangled address and a link that looks broken. The URL is now shown on
+   * screen as well, so what gets shared is never in doubt.
+   */
+  const copyLink = async () => {
     if (!info?.url) return;
-
-    const shareText = 'Follow my ambulance live — no app or login needed.';
-
-    // The phone's own share sheet is the fastest route into WhatsApp or SMS;
-    // clipboard is the fallback everywhere else (and when the user cancels).
-    if (navigator.share) {
-      try {
-        await navigator.share({ title: 'Ambulance tracking', text: shareText, url: info.url });
-        return;
-      } catch {
-        // Cancelled or unsupported — fall through to copying.
-      }
-    }
-
     try {
       await navigator.clipboard.writeText(info.url);
-      toast.success('Tracking link copied — paste it to anyone who should follow along.');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+      toast.success('Tracking link copied.');
     } catch {
-      toast.error('Could not copy the link. Select and copy it manually.');
+      toast.error('Could not copy automatically — select the link above and copy it.');
+    }
+  };
+
+  /** The phone share sheet, as a deliberate choice rather than a silent default. */
+  const shareViaSheet = async () => {
+    if (!info?.url) return;
+    try {
+      await navigator.share({ title: 'Ambulance tracking', text: 'Follow my ambulance live.', url: info.url });
+    } catch {
+      // Cancelled, or the sheet is unavailable — nothing to report.
     }
   };
 
@@ -110,12 +119,43 @@ const TrackingShareCard: React.FC<TrackingShareCardProps> = ({ apiBaseUrl, token
             details, and stops working when the case ends.
           </div>
         </div>
-        <button
-          onClick={share}
-          style={{ padding: '9px 16px', borderRadius: '8px', border: 'none', background: C.blue, color: 'white', fontWeight: 600, fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap' }}
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button
+            onClick={copyLink}
+            style={{ padding: '9px 16px', borderRadius: '8px', border: 'none', background: copied ? C.green : C.blue, color: 'white', fontWeight: 600, fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap' }}
+          >
+            {copied ? '✓ Copied' : 'Copy link'}
+          </button>
+          {typeof navigator !== 'undefined' && 'share' in navigator && (
+            <button
+              onClick={shareViaSheet}
+              title="Open your device's share sheet"
+              style={{ padding: '9px 14px', borderRadius: '8px', border: `1px solid ${C.line}`, background: 'white', color: C.ink, fontWeight: 600, fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap' }}
+            >
+              Share…
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* The link itself, visible and selectable. A copy button alone gives no
+          way to tell a good link from a mangled one when a paste goes wrong. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '12px' }}>
+        <input
+          readOnly
+          value={info.url ?? ''}
+          onFocus={event => event.currentTarget.select()}
+          onClick={event => event.currentTarget.select()}
+          style={{ flex: 1, minWidth: 0, padding: '8px 10px', borderRadius: '7px', border: `1px solid ${C.line}`, background: '#f7f8fa', color: C.ink, fontSize: '12px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}
+        />
+        <a
+          href={info.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ padding: '8px 12px', borderRadius: '7px', border: `1px solid ${C.line}`, color: C.blue, fontSize: '12px', fontWeight: 600, textDecoration: 'none', whiteSpace: 'nowrap' }}
         >
-          Share link
-        </button>
+          Open ↗
+        </a>
       </div>
 
       {alerted.length > 0 && (
