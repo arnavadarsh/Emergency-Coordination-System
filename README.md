@@ -1,6 +1,6 @@
 # Emergency Coordination System (ECS)
 
-A production-grade emergency ambulance coordination platform with multi-role architecture, real-time dispatch, triage assessment, and hospital ranking — built with NestJS, React, TypeScript, and PostgreSQL.
+A production-grade emergency ambulance coordination platform with multi-role architecture, real-time dispatch, triage assessment, and hospital ranking : built with NestJS, React, TypeScript, and PostgreSQL.
 
 ---
 
