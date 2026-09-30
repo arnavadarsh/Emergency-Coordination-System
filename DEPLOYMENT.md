@@ -137,9 +137,11 @@ correct them in step 3.
 
 **+ New → GitHub Repo → the same repo.** Then:
 
-- **Settings → Root Directory:** leave as `/` (the repo root — the web
-  Dockerfile reads `deploy/` as well as `web/`)
-- **Settings → Build → Dockerfile Path:** `web/Dockerfile`
+- **Settings → Root Directory:** `web` — the same shape as the backend service.
+  Everything the image needs lives under `web/`, and `web/railway.json` selects
+  the Dockerfile builder from there. Leaving this unset makes Railway read the
+  repo root, find no config for this service, and fall back to Railpack, which
+  cannot build a four-app static bundle.
 - **Settings → Networking → Generate Domain** (note the URL)
 
 **Variables** — these are *build* arguments. Vite bakes them into the bundle, so
@@ -312,5 +314,5 @@ Every limit is tunable by environment — see `backend/.env.example`.
 
 **TLS.** Compose serves plain HTTP on `HTTP_PORT`. Put it behind a terminating
 proxy (Caddy, Traefik, a cloud load balancer) or add certificates to
-`deploy/nginx.conf`. Tracking links are shared by SMS and opened on phones —
+`web/nginx/nginx.conf.template`. Tracking links are shared by SMS and opened on phones —
 serve them over HTTPS.

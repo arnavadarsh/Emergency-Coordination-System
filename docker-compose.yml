@@ -59,9 +59,9 @@ services:
 
   web:
     build:
-      # Root context so the build can reach web/ and deploy/nginx.conf.
-      context: .
-      dockerfile: web/Dockerfile
+      # Everything the web image needs lives under web/, same as backend/.
+      context: ./web
+      dockerfile: Dockerfile
       args:
         # Same-origin: the browser talks only to this host, and nginx forwards
         # /api and /socket.io to the backend.

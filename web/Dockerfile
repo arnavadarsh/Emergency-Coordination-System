@@ -5,8 +5,9 @@
 #   /driver/    driver dashboard
 #   /hospital/  hospital dashboard
 #
-# Build context is the PROJECT ROOT, so this file can reach both web/ and
-# deploy/:  docker build -f web/Dockerfile .
+# Build context is THIS directory (web/), matching backend/, so a platform can
+# point a service at web/ and everything it needs is inside:
+#   docker build -f Dockerfile web/
 #
 # Vite inlines VITE_* values at BUILD time, so they arrive as build args. A
 # rebuild is required to point the bundles at a different backend.
@@ -31,19 +32,19 @@ WORKDIR /build
 
 # Each app is installed separately so one app's dependency change does not
 # invalidate the others' cached layers.
-COPY web/user-dashboard/package*.json ./user-dashboard/
+COPY user-dashboard/package*.json ./user-dashboard/
 RUN cd user-dashboard && npm ci
-COPY web/admin-dashboard/package*.json ./admin-dashboard/
+COPY admin-dashboard/package*.json ./admin-dashboard/
 RUN cd admin-dashboard && npm ci
-COPY web/driver-dashboard/package*.json ./driver-dashboard/
+COPY driver-dashboard/package*.json ./driver-dashboard/
 RUN cd driver-dashboard && npm ci
-COPY web/hospital-dashboard/package*.json ./hospital-dashboard/
+COPY hospital-dashboard/package*.json ./hospital-dashboard/
 RUN cd hospital-dashboard && npm ci
 
-COPY web/user-dashboard ./user-dashboard
-COPY web/admin-dashboard ./admin-dashboard
-COPY web/driver-dashboard ./driver-dashboard
-COPY web/hospital-dashboard ./hospital-dashboard
+COPY user-dashboard ./user-dashboard
+COPY admin-dashboard ./admin-dashboard
+COPY driver-dashboard ./driver-dashboard
+COPY hospital-dashboard ./hospital-dashboard
 
 RUN cd user-dashboard     && BASE_PATH=/          npm run build
 RUN cd admin-dashboard    && BASE_PATH=/admin/    npm run build
@@ -60,8 +61,8 @@ COPY --from=build /build/hospital-dashboard/dist /usr/share/nginx/html/hospital
 
 # The config is rendered at start, not baked in: the listen port and whether to
 # proxy the API both depend on where this runs. See the script for why.
-COPY deploy/nginx.conf.template deploy/nginx-proxy.partial /etc/nginx/ecs/
-COPY deploy/30-render-nginx-conf.sh /docker-entrypoint.d/30-render-nginx-conf.sh
+COPY nginx/nginx.conf.template nginx/nginx-proxy.partial /etc/nginx/ecs/
+COPY nginx/30-render-nginx-conf.sh /docker-entrypoint.d/30-render-nginx-conf.sh
 RUN chmod +x /docker-entrypoint.d/30-render-nginx-conf.sh \
  && rm -f /etc/nginx/conf.d/default.conf
 
