@@ -7,5 +7,5 @@ coverage
 !.env.example
 *.log
 ecs_local.db
-uploads
+/uploads
 .DS_Store

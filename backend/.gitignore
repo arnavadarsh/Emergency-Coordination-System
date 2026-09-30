@@ -39,5 +39,7 @@ lerna-debug.log*
 .env.local
 .env.*.local
 
-# Chat attachment uploads
-uploads/
+# Chat attachment uploads written at runtime. Anchored with a leading slash:
+# unanchored, this matched every directory named "uploads" at any depth and
+# silently kept backend/src/uploads out of the repository.
+/uploads/
