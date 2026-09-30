@@ -104,6 +104,14 @@ import { HealthModule } from './health/health.module';
           migrationsRun: configService.get<boolean>('database.migrationsRun', false),
           logging: configService.get('app.nodeEnv') === 'development',
           ssl: configService.get('database.ssl'),
+          // A paused Supabase project takes time to wake, and TypeORM's default
+          // of 10 attempts three seconds apart gives up after about 30 seconds —
+          // so the app exits before the database is ready and the platform's
+          // healthcheck never gets an answer. Wait long enough to outlast a
+          // cold start, while still failing eventually if the database is
+          // genuinely gone.
+          retryAttempts: parseInt(process.env.DB_RETRY_ATTEMPTS || '20', 10),
+          retryDelay: parseInt(process.env.DB_RETRY_DELAY_MS || '5000', 10),
           extra: {
             connectionTimeoutMillis: 15000,
             // Supabase's pooler caps connections; stay well inside it so a
