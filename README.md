@@ -1,5 +1,7 @@
 # Emergency Coordination System (ECS)
 
+Created by Arnav Adarsh & Yuvraj Rajput.
+
 An ambulance coordination platform. A patient requests an ambulance; the nearest
 free unit is dispatched; the best-suited hospital is chosen and alerted before
 arrival; the family follows the ambulance through a private tracking link; and an
