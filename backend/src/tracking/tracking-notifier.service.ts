@@ -1,4 +1,4 @@
-import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { TrackingLink } from './entities/tracking-link.entity';
@@ -7,6 +7,7 @@ import { EmergencyContact } from '../users/entities/emergency-contact.entity';
 import { User } from '../users/entities/user.entity';
 import { SmsService } from '../notifications/sms.service';
 import { TrackingService } from './tracking.service';
+import { SystemSettingsService } from '../settings/system-settings.service';
 
 /**
  * Tracking Notifier
@@ -38,6 +39,7 @@ export class TrackingNotifierService {
     private readonly userRepository: Repository<User>,
     private readonly smsService: SmsService,
     private readonly trackingService: TrackingService,
+    @Optional() private readonly settings?: SystemSettingsService,
   ) {}
 
   /**
@@ -52,6 +54,12 @@ export class TrackingNotifierService {
     link: TrackingLink,
   ): Promise<{ sent: number; skipped: number; failed: number }> {
     const tally = { sent: 0, skipped: 0, failed: 0 };
+
+    // An admin can pause contact texts (a drill, a misbehaving gateway).
+    if (this.settings && !this.settings.get('contactSmsEnabled')) {
+      this.logger.warn(`[tracking] Emergency contact SMS is switched off by an admin — none sent for booking ${bookingId}`);
+      return tally;
+    }
 
     const contacts = await this.contactRepository.find({
       where: { userId: patientId, notifyBySms: true, optedOutAt: IsNull() },

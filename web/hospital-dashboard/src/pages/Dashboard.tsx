@@ -4,18 +4,27 @@ import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
 import TokenStorage from '../utils/tokenStorage';
 import { API_CONFIG } from '../config/api';
-import { formatIstClock, formatIstFull, formatIstTime, formatTimeAgo } from '../utils/datetime';
+import { formatIstClock, formatIstFull, formatIstTime, formatTimeAgo } from '@shared/utils/datetime';
 import DriverIdentity, { type DriverInfo } from '../components/DriverIdentity';
-import MedicalProfilePanel from '../components/MedicalProfilePanel';
+import MedicalProfilePanel from '@shared/components/MedicalProfilePanel';
 import {
   medicalProfileAlerts,
   normalizeMedicalProfile,
   type MedicalProfile,
-} from '../types/medicalProfile';
+} from '@shared/types/medicalProfile';
+import { Icon, type IconName } from '@shared/components/ui/Icon';
+import { Badge, SeverityBadge, StatusBadge, severityMeta, statusMeta, toneClass, type Tone } from '@shared/components/ui/Status';
+import { AnimatedNumber, BrandMark, EmptyState, PageError, PageLoading } from '@shared/components/ui/primitives';
+import { Modal } from '@shared/components/ui/Modal';
+import { NoticeStack, useNotices } from '@shared/components/ui/Notices';
 import '../styles/Dashboard.css';
 
 const API_BASE_URL = API_CONFIG.BASE_URL;
 const SOCKET_URL = API_BASE_URL.replace(/\/api\/?$/, '');
+
+// Changes arrive over the socket as they happen. This slow poll only catches
+// anything missed while the connection was down.
+const FALLBACK_REFRESH_MS = 5 * 60_000;
 
 interface Capability {
   type: string;
@@ -98,6 +107,11 @@ const Dashboard = () => {
   const [bedUpdateValue, setBedUpdateValue] = useState(0);
   const [preArrivalAlerts, setPreArrivalAlerts] = useState<PreArrivalAlert[]>([]);
   const socketRef = useRef<Socket | null>(null);
+  // Presentation only: the mobile navigation drawer, and the alert awaiting
+  // a reject-and-reroute confirmation.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [rejectTarget, setRejectTarget] = useState<PreArrivalAlert | null>(null);
+  const { notices, notify, dismiss } = useNotices();
 
   const fetchDashboardData = async () => {
     try {
@@ -176,11 +190,21 @@ const Dashboard = () => {
     }
   };
 
+  // Several events can land together (an alert, then its status change); fold
+  // them into one refetch.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = () => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      fetchDashboardData();
+    }, 400);
+  };
+
   useEffect(() => {
     fetchDashboardData();
 
-    // Refresh data every 30 seconds
-    const refreshInterval = setInterval(fetchDashboardData, 30000);
+    const refreshInterval = setInterval(fetchDashboardData, FALLBACK_REFRESH_MS);
 
     // Update clock every second
     const clockTimer = setInterval(() => {
@@ -190,6 +214,7 @@ const Dashboard = () => {
     return () => {
       clearInterval(refreshInterval);
       clearInterval(clockTimer);
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     };
   }, []);
 
@@ -201,13 +226,20 @@ const Dashboard = () => {
 
   // Socket.IO connection for real-time pre-arrival alerts
   useEffect(() => {
+    // The server only accepts a signed-in socket, and places a hospital account
+    // in its own hospital's room from the token. Read the token on every
+    // (re)connect rather than once.
     const socket = io(SOCKET_URL, {
-      auth: { token: TokenStorage.getToken() },
+      auth: cb => cb({ token: TokenStorage.getToken() }),
     });
     socketRef.current = socket;
+    let connectedBefore = false;
 
     socket.on('connect', () => {
       console.log('[PreArrival] Socket connected, id=', socket.id);
+      // Catch up on anything that happened while the connection was down.
+      if (connectedBefore) scheduleRefresh();
+      connectedBefore = true;
       // Re-join hospital room on every (re)connect so we never miss alerts after a reconnect
       if (hospitalIdRef.current) {
         console.log('[PreArrival] Joining hospital room on connect, hospitalId=', hospitalIdRef.current);
@@ -236,6 +268,7 @@ const Dashboard = () => {
         }
         return [alert, ...prev];
       });
+      scheduleRefresh();
     });
 
     // Update status on existing alerts when dispatch progresses
@@ -244,11 +277,30 @@ const Dashboard = () => {
       setPreArrivalAlerts(prev =>
         prev.map(a => a.dispatchId === data.dispatchId ? { ...a, status: data.status } : a)
       );
+      // Counts (incoming, completed today) move with the status.
+      scheduleRefresh();
+    });
+
+    // An admin changed this hospital's status or beds.
+    socket.on('hospital_status_updated', scheduleRefresh);
+
+    // A message from the operations team.
+    socket.on('system_announcement', (p: { message: string; tone?: Tone }) => {
+      notify({ tone: p?.tone ?? 'info', title: 'Announcement', text: p.message, sticky: true });
+    });
+
+    // Moves the incoming ambulance on this hospital's view as it reports in.
+    socket.on('ambulance_location_updated', (payload: { id: string; latitude: number | null; longitude: number | null }) => {
+      setPreArrivalAlerts(prev =>
+        prev.map(a => a.ambulanceId === payload.id
+          ? { ...a, ambulanceLocation: { latitude: payload.latitude, longitude: payload.longitude } }
+          : a)
+      );
     });
 
     socket.on('hospital_reroute_search_started', (payload: any) => {
       console.log('[Reroute] hospital_reroute_search_started:', payload);
-      if (payload?.message) alert(payload.message);
+      if (payload?.message) notify({ tone: 'warning', title: 'Rerouting', text: payload.message, sticky: true });
       fetchDashboardData();
     });
 
@@ -260,7 +312,12 @@ const Dashboard = () => {
 
     socket.on('hospital_reroute_escalated', (payload: any) => {
       console.warn('[Reroute] hospital_reroute_escalated:', payload);
-      alert('No suitable hospital is currently available. Admin intervention is required.');
+      notify({
+        tone: 'danger',
+        title: 'Escalated to admin',
+        text: 'No suitable hospital is currently available. Admin intervention is required.',
+        sticky: true,
+      });
     });
 
     return () => {
@@ -284,7 +341,7 @@ const Dashboard = () => {
   const handleStatusChange = async (newStatus: string) => {
     const hospitalId = hospitalInfo.id;
     if (!hospitalId) {
-      alert('Hospital data not loaded yet, please wait');
+      notify({ tone: 'warning', text: 'Hospital data is still loading. Please try again in a moment.' });
       return;
     }
     try {
@@ -297,14 +354,14 @@ const Dashboard = () => {
       setHospitalInfo(prev => ({ ...prev, status: newStatus }));
     } catch (err) {
       console.error('Failed to update hospital status:', err);
-      alert('Failed to update hospital status');
+      notify({ tone: 'danger', title: 'Status not changed', text: 'Failed to update hospital status.' });
     }
   };
 
   const handleCapabilityStatusChange = async (capabilityType: string, newStatus: string) => {
     const hospitalId = hospitalInfo.id;
     if (!hospitalId) {
-      alert('Hospital data not loaded yet, please wait');
+      notify({ tone: 'warning', text: 'Hospital data is still loading. Please try again in a moment.' });
       return;
     }
     try {
@@ -321,14 +378,14 @@ const Dashboard = () => {
       );
     } catch (err) {
       console.error('Failed to update capability status:', err);
-      alert('Failed to update capability status');
+      notify({ tone: 'danger', title: 'Capability not changed', text: 'Failed to update capability status.' });
     }
   };
   
   const handleUpdateBeds = async (availableBeds: number) => {
     const hospitalId = hospitalInfo.id;
     if (!hospitalId) {
-      alert('Hospital data not loaded yet, please wait');
+      notify({ tone: 'warning', text: 'Hospital data is still loading. Please try again in a moment.' });
       return;
     }
     try {
@@ -343,21 +400,19 @@ const Dashboard = () => {
         availableBeds,
         occupiedBeds: prev.totalBeds - availableBeds,
       }));
+      notify({ tone: 'success', text: `Available beds set to ${availableBeds}.` });
     } catch (err) {
       console.error('Failed to update bed count:', err);
-      alert('Failed to update bed count');
+      notify({ tone: 'danger', title: 'Beds not updated', text: 'Failed to update bed count.' });
     }
   };
 
   const handleRejectIncoming = async (dispatchId: string) => {
     const hospitalId = hospitalInfo.id;
     if (!hospitalId) {
-      alert('Hospital data not loaded yet, please wait');
+      notify({ tone: 'warning', text: 'Hospital data is still loading. Please try again in a moment.' });
       return;
     }
-
-    const confirmed = window.confirm('Reject this incoming patient and search for the next best hospital?');
-    if (!confirmed) return;
 
     try {
       const token = TokenStorage.getToken();
@@ -370,525 +425,638 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to reject incoming patient:', err);
-      alert('Failed to reroute this patient');
+      notify({ tone: 'danger', title: 'Reroute failed', text: 'Failed to reroute this patient.' });
     }
   };
 
   const bedUtilization = stats.totalBeds > 0 ? Math.round((stats.occupiedBeds / stats.totalBeds) * 100) : 0;
-  
+
   if (loading) {
-    return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Loading...</div>
-          <div style={{ color: '#666' }}>Fetching data from server</div>
-        </div>
-      </div>
-    );
+    return <PageLoading label="Loading hospital dashboard…" />;
   }
 
   if (error) {
-    return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center', color: '#ff4444' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Error</div>
-          <div>{error}</div>
-          <button onClick={fetchDashboardData} style={{ marginTop: '20px', padding: '10px 20px', cursor: 'pointer' }}>Retry</button>
-        </div>
-      </div>
-    );
+    return <PageError message={error} onRetry={fetchDashboardData} />;
   }
 
+  const isOpen = (status: string) => status !== 'COMPLETED' && status !== 'CANCELLED';
+  const activeAlerts = preArrivalAlerts.filter(a => isOpen(a.status));
+  // Open cases first, soonest arrival at the top — the order staff receive them in.
+  const orderedAlerts = [...preArrivalAlerts].sort((a, b) => {
+    const open = Number(isOpen(b.status)) - Number(isOpen(a.status));
+    if (open !== 0) return open;
+    return (a.etaMinutes ?? Number.POSITIVE_INFINITY) - (b.etaMinutes ?? Number.POSITIVE_INFINITY);
+  });
+  const nextArrival = orderedAlerts.find(a => isOpen(a.status));
+  const hasCriticalInbound = activeAlerts.some(a => a.patientSeverity === 'CRITICAL');
+  const activeBookings = recentBookings.filter(b => isOpen(b.status));
+  const bedTone: Tone = bedUtilization >= 90 ? 'danger' : bedUtilization >= 75 ? 'warning' : 'success';
+
+  const NAV: { id: TabType; label: string; icon: IconName; badge?: number }[] = [
+    { id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
+    { id: 'prearrivals', label: 'Pre-Arrival', icon: 'ambulance', badge: activeAlerts.length },
+    { id: 'emergencies', label: 'Emergency Cases', icon: 'siren' },
+    { id: 'beds', label: 'Bed Management', icon: 'bed' },
+    { id: 'history', label: 'History', icon: 'history' },
+  ];
+
+  const TITLES: Record<TabType, { title: string; subtitle: string }> = {
+    dashboard: { title: 'Dashboard Overview', subtitle: 'Live intake, capacity and inbound ambulances' },
+    prearrivals: { title: 'Pre-Arrival Alerts', subtitle: 'Ambulances heading to this hospital' },
+    emergencies: { title: 'Emergency Cases', subtitle: 'Open cases linked to this hospital' },
+    beds: { title: 'Bed Management', subtitle: 'Keep available capacity accurate for dispatch' },
+    history: { title: 'Booking History', subtitle: 'Recent bookings for this hospital' },
+  };
+
+  const selectTab = (tab: TabType) => {
+    setActiveTab(tab);
+    setSidebarOpen(false);
+  };
+
   return (
-    <div className="dashboard-container">
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <div className="logo">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path d="M19 3H5c-1.1 0-1.99.9-1.99 2L3 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 11h-4v4h-4v-4H6v-4h4V6h4v4h4v4z"/>
-            </svg>
+    <div className="ui-app">
+      <a href="#main" className="ui-skip-link">Skip to content</a>
+      <div className={`ui-scrim${sidebarOpen ? ' is-visible' : ''}`} onClick={() => setSidebarOpen(false)} aria-hidden="true" />
+
+      <aside className={`ui-sidebar${sidebarOpen ? ' is-open' : ''}`} aria-label="Hospital navigation">
+        <div className="ui-sidebar__brand">
+          <BrandMark />
+          <div className="ui-sidebar__brand-text">
+            <div className="ui-sidebar__product">ECS Hospital</div>
+            <div className="ui-sidebar__portal">Emergency department</div>
           </div>
-          <h2>{hospitalInfo.name}</h2>
-          <div className={`hospital-status status-${hospitalInfo.status.toLowerCase()}`}>
-            {hospitalInfo.status}
+          <button type="button" className="ui-btn ui-btn--ghost ui-btn--icon ui-btn--sm ui-sidebar__close" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
+            <Icon name="x" />
+          </button>
+        </div>
+
+        <div className="ui-sidebar__context">
+          <div className="ui-sidebar__context-title">{hospitalInfo.name}</div>
+          <div className="ui-row">
+            <StatusBadge status={hospitalInfo.status} />
           </div>
         </div>
-        
-        <nav className="sidebar-nav">
-          <a href="#" className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
-            Dashboard
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'beds' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('beds'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 13c1.66 0 3-1.34 3-3S8.66 7 7 7s-3 1.34-3 3 1.34 3 3 3zm12-6h-8v7H3V7H1v10h22v-6c0-2.21-1.79-4-4-4z"/></svg>
-            Bed Management
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'emergencies' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('emergencies'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L1 21h22L12 2zm0 3.99L19.53 19H4.47L12 5.99zM11 16h2v2h-2zm0-6h2v4h-2z"/></svg>
-            Emergency Cases
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'history' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('history'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.99 2C6.47 2 2 6.48 2 12s4.47 10 9.99 10C17.52 22 22 17.52 22 12S17.52 2 11.99 2zM12 20c-4.42 0-8-3.58-8-8s3.58-8 8-8 8 3.58 8 8-3.58 8-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z"/></svg>
-            History
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'prearrivals' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('prearrivals'); }} style={{ position: 'relative' }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99zM6.5 16c-.83 0-1.5-.67-1.5-1.5S5.67 13 6.5 13s1.5.67 1.5 1.5S7.33 16 6.5 16zm11 0c-.83 0-1.5-.67-1.5-1.5s.67-1.5 1.5-1.5 1.5.67 1.5 1.5-.67 1.5-1.5 1.5zM5 11l1.5-4.5h11L19 11H5z"/></svg>
-            Pre-Arrival
-            {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length > 0 && (
-              <span style={{ position: 'absolute', top: '6px', right: '8px', background: '#de350b', color: 'white', borderRadius: '50%', width: '18px', height: '18px', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
-                {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length}
-              </span>
-            )}
-          </a>
+
+        <nav className="ui-nav" aria-label="Sections">
+          {NAV.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              className={`ui-nav__item${activeTab === item.id ? ' is-active' : ''}`}
+              aria-current={activeTab === item.id ? 'page' : undefined}
+              onClick={() => selectTab(item.id)}
+            >
+              <Icon name={item.icon} />
+              {item.label}
+              {!!item.badge && (
+                <span className="ui-nav__badge" aria-label={`${item.badge} active`}>{item.badge}</span>
+              )}
+            </button>
+          ))}
         </nav>
-        
-        <div className="sidebar-footer">
-          <button onClick={handleLogout} className="logout-btn">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
-            Logout
+
+        <div className="ui-sidebar__footer">
+          <button type="button" onClick={handleLogout} className="ui-btn ui-btn--ghost ui-btn--block hosp-signout">
+            <Icon name="logOut" />
+            Sign out
           </button>
         </div>
       </aside>
 
-      <main className="main-content">
-        <div className="top-bar">
-          <div className="top-bar-left">
-            <h1>{activeTab === 'dashboard' ? 'Dashboard Overview' : activeTab === 'beds' ? 'Bed Management' : activeTab === 'emergencies' ? 'Emergency Cases' : activeTab === 'prearrivals' ? 'Pre-Arrival Alerts' : 'Booking History'}</h1>
-            <div className="time">{formatIstClock(currentTime)}</div>
+      <div className="ui-main">
+        <header className="ui-topbar ui-topbar--wrap">
+          <button type="button" className="ui-btn ui-btn--secondary ui-btn--icon ui-menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+            <Icon name="menu" />
+          </button>
+          <div className="ui-topbar__titles">
+            <h1 className="ui-topbar__title">{TITLES[activeTab].title}</h1>
+            <div className="ui-topbar__subtitle ui-num">{formatIstClock(currentTime)}</div>
           </div>
-          <div className="top-bar-right">
-            <div className="status-buttons">
-              <button 
-                className={`status-btn ${hospitalInfo.status === 'ACCEPTING' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('ACCEPTING')}
-              >
-                Accepting
-              </button>
-              <button 
-                className={`status-btn ${hospitalInfo.status === 'LIMITED' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('LIMITED')}
-              >
-                Limited
-              </button>
-              <button 
-                className={`status-btn ${hospitalInfo.status === 'DIVERT' ? 'active' : ''}`}
-                onClick={() => handleStatusChange('DIVERT')}
-              >
-                Divert
-              </button>
+          <div className="ui-topbar__actions">
+            <div className="ui-segmented" role="radiogroup" aria-label="Hospital intake status">
+              {(['ACCEPTING', 'LIMITED', 'DIVERT'] as const).map(value => {
+                const meta = statusMeta(value);
+                const active = hospitalInfo.status === value;
+                return (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    className={`ui-segmented__item ${toneClass(meta.tone)}${active ? ' is-active' : ''}`}
+                    onClick={() => handleStatusChange(value)}
+                  >
+                    {meta.icon && <Icon name={meta.icon} size={15} />}
+                    {meta.label}
+                  </button>
+                );
+              })}
             </div>
           </div>
-        </div>
+        </header>
 
-        {activeTab === 'beds' ? (
-          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <h2 style={{ marginTop: 0 }}>Bed Management</h2>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '20px', marginBottom: '24px' }}>
-              <div style={{ padding: '20px', backgroundColor: '#e3f2fd', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '36px', fontWeight: 'bold', color: '#1976d2' }}>{stats.totalBeds}</div>
-                <div style={{ color: '#666', marginTop: '8px' }}>Total Beds</div>
-              </div>
-              <div style={{ padding: '20px', backgroundColor: '#e8f5e9', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '36px', fontWeight: 'bold', color: '#388e3c' }}>{stats.availableBeds}</div>
-                <div style={{ color: '#666', marginTop: '8px' }}>Available</div>
-              </div>
-              <div style={{ padding: '20px', backgroundColor: '#fff3e0', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '36px', fontWeight: 'bold', color: '#f57c00' }}>{stats.occupiedBeds}</div>
-                <div style={{ color: '#666', marginTop: '8px' }}>Occupied</div>
-              </div>
-              <div style={{ padding: '20px', backgroundColor: '#fce4ec', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '36px', fontWeight: 'bold', color: '#c2185b' }}>{bedUtilization}%</div>
-                <div style={{ color: '#666', marginTop: '8px' }}>Utilization</div>
+        <main id="main" className="ui-content" key={activeTab}>
+          {hospitalInfo.status === 'DIVERT' && (
+            <div className="ui-alert tone-danger hosp-banner ui-enter" role="status">
+              <Icon name="ban" size={18} />
+              <div>
+                <div className="ui-alert__title">This hospital is on divert</div>
+                New ambulances are being routed to other hospitals until intake is reopened.
               </div>
             </div>
-            <div style={{ padding: '20px', backgroundColor: '#f5f5f5', borderRadius: '8px' }}>
-              <h3 style={{ marginTop: 0 }}>Update Available Beds</h3>
-              <div style={{ display: 'flex', gap: '16px', alignItems: 'center' }}>
-                <input 
-                  type="number" 
-                  value={bedUpdateValue} 
-                  onChange={(e) => setBedUpdateValue(parseInt(e.target.value) || 0)}
-                  min={0}
-                  max={stats.totalBeds}
-                  style={{ padding: '12px', fontSize: '16px', border: '1px solid #ddd', borderRadius: '8px', width: '120px' }}
-                />
-                <button 
-                  onClick={() => handleUpdateBeds(bedUpdateValue)}
-                  style={{ padding: '12px 24px', backgroundColor: '#00875a', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '16px' }}
+          )}
+
+          {activeTab === 'dashboard' && (
+            <>
+              {nextArrival && (
+                <button
+                  type="button"
+                  className={`hosp-incoming ui-enter ${hasCriticalInbound ? 'tone-danger' : 'tone-info'}`}
+                  onClick={() => selectTab('prearrivals')}
                 >
-                  Update Beds
+                  <span className="ui-icon-tile">
+                    <Icon name="siren" size={22} />
+                  </span>
+                  <span className="hosp-incoming__text">
+                    <span className="hosp-incoming__title">
+                      <span className="ui-live" aria-hidden="true" />
+                      {activeAlerts.length} ambulance{activeAlerts.length === 1 ? '' : 's'} inbound
+                    </span>
+                    <span className="hosp-incoming__meta">
+                      Next: {severityMeta(nextArrival.patientSeverity).label} patient
+                      {nextArrival.emergencyType ? ` · ${nextArrival.emergencyType}` : ''}
+                      {nextArrival.etaMinutes != null ? ` · ${nextArrival.etaMinutes} min away` : ''}
+                      {nextArrival.ambulanceVehicleNumber ? ` · ${nextArrival.ambulanceVehicleNumber}` : ''}
+                    </span>
+                  </span>
+                  <span className="hosp-incoming__cta">
+                    View pre-arrival
+                    <Icon name="arrowRight" size={16} />
+                  </span>
                 </button>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button onClick={() => setBedUpdateValue(Math.max(0, bedUpdateValue - 1))} style={{ padding: '8px 16px', backgroundColor: '#de350b', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>-1</button>
-                  <button onClick={() => setBedUpdateValue(Math.min(stats.totalBeds, bedUpdateValue + 1))} style={{ padding: '8px 16px', backgroundColor: '#00875a', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>+1</button>
+              )}
+
+              <section className="ui-kpi-grid ui-kpi-grid--3" aria-label="Key figures">
+                <div className={`ui-card ui-kpi ui-enter ${stats.incomingAmbulances > 0 ? 'tone-danger ui-kpi--alert' : 'tone-neutral'}`} style={{ ['--i' as string]: 0 }}>
+                  <div className="ui-kpi__top">
+                    <span className="ui-kpi__label">Incoming ambulances</span>
+                    <span className="ui-kpi__icon"><Icon name="ambulance" /></span>
+                  </div>
+                  <div className="ui-kpi__value"><AnimatedNumber value={stats.incomingAmbulances} /></div>
+                  <div className="ui-kpi__meta">
+                    {stats.incomingAmbulances > 0 ? (
+                      <Badge tone="danger" dot>En route now</Badge>
+                    ) : (
+                      'None en route'
+                    )}
+                  </div>
                 </div>
-              </div>
-            </div>
-          </div>
-        ) : activeTab === 'emergencies' ? (
-          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h2 style={{ margin: 0 }}>Active Emergency Cases</h2>
-              <span style={{ background: '#ffebee', color: '#c62828', padding: '8px 16px', borderRadius: '20px', fontWeight: '600' }}>{stats.activeEmergencies} Active</span>
-            </div>
-            <div>
-              {recentBookings.filter(b => b.status !== 'COMPLETED' && b.status !== 'CANCELLED').length > 0 ? (
-                recentBookings.filter(b => b.status !== 'COMPLETED' && b.status !== 'CANCELLED').map(booking => (
-                  <div key={booking.id} style={{ padding: '16px', borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <div style={{ fontWeight: '600', marginBottom: '4px' }}>{booking.id}</div>
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <span style={{ padding: '2px 8px', borderRadius: '4px', backgroundColor: booking.type === 'EMERGENCY' ? '#ffebee' : '#e3f2fd', color: booking.type === 'EMERGENCY' ? '#c62828' : '#1565c0', fontSize: '12px' }}>{booking.type}</span>
-                        <span style={{ padding: '2px 8px', borderRadius: '4px', backgroundColor: booking.severity === 'CRITICAL' ? '#de350b' : booking.severity === 'HIGH' ? '#ff8b00' : '#ffab00', color: 'white', fontSize: '12px' }}>{booking.severity}</span>
-                      </div>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ padding: '4px 12px', borderRadius: '12px', backgroundColor: '#e8f5e9', color: '#2e7d32', fontSize: '12px' }}>{booking.status}</div>
-                      {booking.eta && <div style={{ marginTop: '4px', fontSize: '12px', color: '#666' }}>ETA: {booking.eta}</div>}
+
+                <div className={`ui-card ui-kpi ui-enter ${stats.activeEmergencies > 0 ? 'tone-orange' : 'tone-neutral'}`} style={{ ['--i' as string]: 1 }}>
+                  <div className="ui-kpi__top">
+                    <span className="ui-kpi__label">Active emergencies</span>
+                    <span className="ui-kpi__icon"><Icon name="siren" /></span>
+                  </div>
+                  <div className="ui-kpi__value"><AnimatedNumber value={stats.activeEmergencies} /></div>
+                  <div className="ui-kpi__meta">{stats.activeEmergencies > 0 ? <Badge tone="orange" icon="alertTriangle">Urgent</Badge> : 'All clear'}</div>
+                </div>
+
+                <div className={`ui-card ui-kpi ui-enter ${toneClass(bedTone)}`} style={{ ['--i' as string]: 2 }}>
+                  <div className="ui-kpi__top">
+                    <span className="ui-kpi__label">Available beds</span>
+                    <span className="ui-kpi__icon"><Icon name="bed" /></span>
+                  </div>
+                  <div className="ui-kpi__value">
+                    <AnimatedNumber value={stats.availableBeds} />
+                    <span className="ui-kpi__unit">/ {stats.totalBeds}</span>
+                  </div>
+                  <div className="ui-kpi__meta">{stats.occupiedBeds} occupied</div>
+                </div>
+
+                <div className={`ui-card ui-kpi ui-enter ${toneClass(bedTone)}`} style={{ ['--i' as string]: 3 }}>
+                  <div className="ui-kpi__top">
+                    <span className="ui-kpi__label">Bed utilization</span>
+                    <span className="ui-kpi__icon"><Icon name="gauge" /></span>
+                  </div>
+                  <div className="ui-kpi__value">
+                    <AnimatedNumber value={bedUtilization} />
+                    <span className="ui-kpi__unit">%</span>
+                  </div>
+                  <div className="ui-kpi__meta" style={{ display: 'block' }}>
+                    <div className="ui-meter" role="meter" aria-valuenow={bedUtilization} aria-valuemin={0} aria-valuemax={100} aria-label="Bed utilization">
+                      <div className="ui-meter__fill" style={{ width: `${Math.min(100, bedUtilization)}%` }} />
                     </div>
                   </div>
-                ))
+                </div>
+
+                <div className="ui-card ui-kpi ui-enter tone-success" style={{ ['--i' as string]: 4 }}>
+                  <div className="ui-kpi__top">
+                    <span className="ui-kpi__label">Completed today</span>
+                    <span className="ui-kpi__icon"><Icon name="checkCircle" /></span>
+                  </div>
+                  <div className="ui-kpi__value"><AnimatedNumber value={stats.completedToday} /></div>
+                  <div className="ui-kpi__meta">Bookings processed</div>
+                </div>
+
+                <div className="ui-card ui-kpi ui-enter tone-brand" style={{ ['--i' as string]: 5 }}>
+                  <div className="ui-kpi__top">
+                    <span className="ui-kpi__label">Capabilities</span>
+                    <span className="ui-kpi__icon"><Icon name="stethoscope" /></span>
+                  </div>
+                  <div className="ui-kpi__value"><AnimatedNumber value={capabilities.length} /></div>
+                  <div className="ui-kpi__meta">{capabilities.map(c => c.type).join(' · ') || 'None listed'}</div>
+                </div>
+              </section>
+
+              <div className="hosp-columns">
+                <section className="ui-card ui-enter" style={{ ['--i' as string]: 3 }} aria-labelledby="cap-title">
+                  <div className="ui-card__header">
+                    <div>
+                      <h2 id="cap-title" className="ui-card__title"><Icon name="sliders" size={17} />Capability status</h2>
+                      <div className="ui-card__subtitle">Set intake per unit — dispatch routes around anything not accepting</div>
+                    </div>
+                  </div>
+                  {capabilities.length === 0 ? (
+                    <EmptyState icon="stethoscope" title="No capabilities listed">Capabilities configured for this hospital will appear here.</EmptyState>
+                  ) : (
+                    <div className="ui-list">
+                      {capabilities.map(capability => (
+                        <div key={capability.type} className="ui-list__row hosp-capability">
+                          <div className="hosp-capability__info">
+                            <div className="hosp-capability__name">{capability.name}</div>
+                            <div className="hosp-capability__type">{capability.type}</div>
+                          </div>
+                          <div className="ui-segmented" role="radiogroup" aria-label={`${capability.name} status`}>
+                            {(['ACCEPTING', 'LIMITED', 'DIVERT'] as const).map(value => {
+                              const meta = statusMeta(value);
+                              const active = capability.status === value;
+                              return (
+                                <button
+                                  key={value}
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={active}
+                                  className={`ui-segmented__item ${toneClass(meta.tone)}${active ? ' is-active' : ''}`}
+                                  onClick={() => handleCapabilityStatusChange(capability.type, value)}
+                                >
+                                  {active && meta.icon && <Icon name={meta.icon} size={14} />}
+                                  {meta.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </section>
+
+                <section className="ui-card ui-enter" style={{ ['--i' as string]: 4 }} aria-labelledby="recent-title">
+                  <div className="ui-card__header">
+                    <div>
+                      <h2 id="recent-title" className="ui-card__title"><Icon name="clipboardList" size={17} />Recent bookings</h2>
+                      <div className="ui-card__subtitle">Newest first, colour-coded by severity</div>
+                    </div>
+                    <button type="button" className="ui-btn ui-btn--ghost ui-btn--sm" onClick={() => selectTab('history')}>
+                      View all
+                      <Icon name="chevronRight" size={15} />
+                    </button>
+                  </div>
+                  {recentBookings.length === 0 ? (
+                    <EmptyState icon="clipboardList" title="No bookings yet">Bookings routed to this hospital will appear here.</EmptyState>
+                  ) : (
+                    <div className="ui-list">
+                      {recentBookings.map(booking => <BookingRow key={booking.id} booking={booking} />)}
+                    </div>
+                  )}
+                </section>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'prearrivals' && (
+            <>
+              <div className="ui-page-header">
+                <div>
+                  <h2 className="ui-page-header__title">Incoming ambulances</h2>
+                  <p className="ui-page-header__text">
+                    Live pre-arrival alerts for {hospitalInfo.name}, soonest arrival first.
+                  </p>
+                </div>
+                {activeAlerts.length > 0 && (
+                  <Badge tone="danger" large dot>{activeAlerts.length} active</Badge>
+                )}
+              </div>
+
+              {orderedAlerts.length === 0 ? (
+                <div className="ui-card">
+                  <EmptyState icon="ambulance" title={`No incoming ambulances for ${hospitalInfo.name}`}>
+                    Pre-arrival alerts appear here as soon as a dispatch is assigned to this hospital.
+                  </EmptyState>
+                </div>
               ) : (
-                <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>No active emergency cases</div>
-              )}
-            </div>
-          </div>
-        ) : activeTab === 'prearrivals' ? (
-          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <div>
-                <h2 style={{ margin: 0 }}>Incoming Ambulances</h2>
-                <p style={{ margin: '4px 0 0', color: '#666', fontSize: '14px' }}>Real-time pre-arrival patient alerts via Socket.IO</p>
-              </div>
-              {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length > 0 && (
-                <span style={{ background: '#ffebee', color: '#c62828', padding: '8px 16px', borderRadius: '20px', fontWeight: '600' }}>
-                  {preArrivalAlerts.filter(a => a.status !== 'COMPLETED' && a.status !== 'CANCELLED').length} Active
-                </span>
-              )}
-            </div>
-            {preArrivalAlerts.length === 0 ? (
-              <div style={{ textAlign: 'center', padding: '60px 40px', color: '#888' }}>
-                <svg viewBox="0 0 24 24" fill="currentColor" style={{ width: '48px', height: '48px', color: '#ccc', marginBottom: '16px', display: 'block', margin: '0 auto 16px' }}>
-                  <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99z"/>
-                </svg>
-                <div style={{ fontSize: '16px', fontWeight: '500' }}>No incoming ambulances for {hospitalInfo.name}</div>
-                <div style={{ fontSize: '13px', marginTop: '6px' }}>Pre-arrival alerts appear here only when a dispatch is assigned to this hospital.</div>
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {preArrivalAlerts.map(alert => {
-                  const isActive = alert.status !== 'COMPLETED' && alert.status !== 'CANCELLED';
-                  const severityColor = alert.patientSeverity === 'CRITICAL' ? '#de350b' : alert.patientSeverity === 'HIGH' ? '#ff8b00' : alert.patientSeverity === 'MEDIUM' ? '#ffab00' : '#36b37e';
-                  const statusColor = alert.status === 'COMPLETED' ? '#36b37e' : alert.status === 'CANCELLED' ? '#97a0af' : '#de350b';
-                  const medical = normalizeMedicalProfile(alert.medicalProfile);
-                  const medicalAlerts = medicalProfileAlerts(medical);
-                  return (
-                    <div key={alert.dispatchId} style={{ border: `2px solid ${isActive ? severityColor : '#e0e0e0'}`, borderRadius: '10px', padding: '20px', background: isActive ? `${severityColor}08` : '#fafafa' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
-                        <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
-                          <span style={{ background: severityColor, color: 'white', padding: '4px 12px', borderRadius: '12px', fontWeight: '700', fontSize: '13px' }}>
-                            {alert.patientSeverity}
-                          </span>
-                          {alert.emergencyType && (
-                            <span style={{ background: '#e3f2fd', color: '#1565c0', padding: '4px 12px', borderRadius: '12px', fontSize: '13px' }}>
-                              {alert.emergencyType}
-                            </span>
-                          )}
-                          <span style={{ background: `${statusColor}20`, color: statusColor, padding: '4px 12px', borderRadius: '12px', fontSize: '13px', fontWeight: '600' }}>
-                            {alert.status.replace(/_/g, ' ')}
-                          </span>
-                        </div>
-                        {alert.etaMinutes != null && (
-                          <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                            <div style={{ fontSize: '28px', fontWeight: '700', color: isActive ? severityColor : '#666', lineHeight: 1 }}>{alert.etaMinutes}</div>
-                            <div style={{ fontSize: '11px', color: '#888', marginTop: '2px' }}>min ETA</div>
+                <div className="hosp-alerts">
+                  {orderedAlerts.map((alert, index) => {
+                    const active = isOpen(alert.status);
+                    const sev = severityMeta(alert.patientSeverity);
+                    const medical = normalizeMedicalProfile(alert.medicalProfile);
+                    const medicalAlerts = medicalProfileAlerts(medical);
+                    const hasGps = alert.ambulanceLocation.latitude != null && alert.ambulanceLocation.longitude != null;
+                    return (
+                      <article
+                        key={alert.dispatchId}
+                        className={`ui-card ui-accent ui-accent--${active ? sev.tone : 'neutral'} hosp-alert ui-enter${active ? '' : ' is-closed'}`}
+                        style={{ ['--i' as string]: index }}
+                        aria-label={`${sev.label} patient, ${alert.status.replace(/_/g, ' ').toLowerCase()}`}
+                      >
+                        <header className="hosp-alert__head">
+                          <div className="ui-row">
+                            <SeverityBadge severity={alert.patientSeverity} large />
+                            {alert.emergencyType && <Badge tone="info" icon="stethoscope" large>{alert.emergencyType}</Badge>}
+                            <StatusBadge status={alert.status} large />
                           </div>
-                        )}
-                      </div>
-
-                      <div style={{ marginBottom: '12px' }}>
-                        <DriverIdentity
-                          driver={alert.driver}
-                          vehicleNumber={alert.ambulanceVehicleNumber}
-                          accentColor={severityColor}
-                          compact
-                        />
-                      </div>
-
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '12px', marginBottom: '16px' }}>
-                        <div style={{ background: 'white', borderRadius: '8px', padding: '12px', border: '1px solid #eee' }}>
-                          <div style={{ fontSize: '11px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Ambulance Location</div>
-                          <div style={{ fontWeight: '600', fontSize: '15px' }}>
-                            {alert.ambulanceLocation.latitude
-                              ? `${Number(alert.ambulanceLocation.latitude).toFixed(4)}, ${Number(alert.ambulanceLocation.longitude).toFixed(4)}`
-                              : 'Awaiting GPS'}
-                          </div>
-                        </div>
-                        <div style={{ background: 'white', borderRadius: '8px', padding: '12px', border: '1px solid #eee' }}>
-                          <div style={{ fontSize: '11px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>Alerted</div>
-                          <div style={{ fontWeight: '500', fontSize: '14px' }}>{formatTimeAgo(alert.alertedAt)}</div>
-                          <div style={{ fontSize: '12px', color: '#888', marginTop: '2px' }} title={formatIstFull(alert.alertedAt)}>{formatIstTime(alert.alertedAt)}</div>
-                        </div>
-                      </div>
-
-                      {/* Medical Profile — included automatically with every
-                          pre-alert, using the patient's most recently saved
-                          details. Fields they never supplied read "Not Provided"
-                          rather than an assumed value. */}
-                      <div style={{ marginBottom: '16px' }}>
-                        {medicalAlerts.length > 0 && (
-                          <div style={{
-                            background: '#fff8f0', border: '1px solid #ffab00',
-                            borderRadius: '8px', padding: '10px 12px', marginBottom: '12px',
-                          }}>
-                            <div style={{
-                              fontSize: '10px', fontWeight: 800, color: '#b06000',
-                              textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '6px',
-                            }}>
-                              ⚠️ Prepare for
+                          {alert.etaMinutes != null && (
+                            <div className={`hosp-eta ${toneClass(active ? sev.tone : 'neutral')}`}>
+                              <span className="hosp-eta__value ui-num">{alert.etaMinutes}</span>
+                              <span className="hosp-eta__unit">min</span>
+                              <span className="hosp-eta__label">ETA</span>
                             </div>
-                            <ul style={{ margin: 0, paddingLeft: '16px' }}>
-                              {medicalAlerts.map(item => (
-                                <li key={item} style={{ fontSize: '12.5px', color: '#172b4d', lineHeight: 1.5 }}>
-                                  {item}
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        <MedicalProfilePanel
-                          profile={medical}
-                          compact
-                          accentColor={severityColor}
-                          footnote={
-                            medical.hasData
-                              ? 'Latest details from the patient profile.'
-                              : 'The patient has not recorded any medical information.'
-                          }
-                        />
-                      </div>
+                          )}
+                        </header>
 
-                      {alert.triage && (
-                        <div style={{ background: 'white', borderRadius: '8px', padding: '14px', border: '1px solid #eee' }}>
-                          <div style={{ fontSize: '12px', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '10px', fontWeight: '600' }}>Triage Notes</div>
-                          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
-                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: alert.triage.breathing ? '#e8f5e9' : '#ffebee', color: alert.triage.breathing ? '#2e7d32' : '#c62828' }}>
-                              Breathing: {alert.triage.breathing ? 'Yes' : 'No'}
-                            </span>
-                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: alert.triage.bleeding ? '#ffebee' : '#e8f5e9', color: alert.triage.bleeding ? '#c62828' : '#2e7d32' }}>
-                              Bleeding: {alert.triage.bleeding ? 'Yes' : 'No'}
-                            </span>
-                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: alert.triage.conscious ? '#e8f5e9' : '#ffebee', color: alert.triage.conscious ? '#2e7d32' : '#c62828' }}>
-                              Conscious: {alert.triage.conscious ? 'Yes' : 'No'}
-                            </span>
-                            <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: '#fff3e0', color: '#e65100' }}>
-                              Pain: {alert.triage.painLevel}/10
-                            </span>
-                            {alert.triage.pregnancy && (
-                              <span style={{ padding: '4px 10px', borderRadius: '6px', fontSize: '12px', background: '#fce4ec', color: '#880e4f' }}>
-                                Pregnancy
-                              </span>
+                        <div className="hosp-alert__body">
+                          <div className="hosp-alert__col">
+                            <DriverIdentity
+                              driver={alert.driver}
+                              vehicleNumber={alert.ambulanceVehicleNumber}
+                              accentColor="#0e7490"
+                              compact
+                            />
+
+                            <dl className="ui-dl hosp-alert__facts">
+                              <div className="ui-dl__item">
+                                <dt>Ambulance location</dt>
+                                <dd className={hasGps ? 'ui-num' : 'is-empty'}>
+                                  {hasGps
+                                    ? `${Number(alert.ambulanceLocation.latitude).toFixed(4)}, ${Number(alert.ambulanceLocation.longitude).toFixed(4)}`
+                                    : 'Awaiting GPS'}
+                                </dd>
+                              </div>
+                              <div className="ui-dl__item">
+                                <dt>Alerted</dt>
+                                <dd title={formatIstFull(alert.alertedAt)}>
+                                  {formatTimeAgo(alert.alertedAt)}
+                                  <span className="hosp-alert__time"> · {formatIstTime(alert.alertedAt)}</span>
+                                </dd>
+                              </div>
+                            </dl>
+
+                            {alert.triage && (
+                              <div className="hosp-triage">
+                                <div className="ui-eyebrow">Triage notes</div>
+                                <div className="ui-row">
+                                  <TriageChip ok={alert.triage.breathing} label="Breathing" />
+                                  <TriageChip ok={!alert.triage.bleeding} label="Bleeding" value={alert.triage.bleeding ? 'Yes' : 'No'} />
+                                  <TriageChip ok={alert.triage.conscious} label="Conscious" />
+                                  <Badge tone={alert.triage.painLevel >= 7 ? 'orange' : 'neutral'} icon="activity" large>
+                                    Pain {alert.triage.painLevel}/10
+                                  </Badge>
+                                  {alert.triage.pregnancy && <Badge tone="violet" icon="baby" large>Pregnancy</Badge>}
+                                </div>
+                              </div>
                             )}
                           </div>
+                          <div className="hosp-alert__col">
+                            {/* Medical Profile — included automatically with every
+                                pre-alert, using the patient's most recently saved
+                                details. Fields they never supplied read "Not Provided"
+                                rather than an assumed value. */}
+                            {medicalAlerts.length > 0 && (
+                              <div className="ui-alert tone-warning">
+                                <Icon name="alertTriangle" size={18} />
+                                <div>
+                                  <div className="ui-alert__title">Prepare for</div>
+                                  <ul>
+                                    {medicalAlerts.map(item => <li key={item}>{item}</li>)}
+                                  </ul>
+                                </div>
+                              </div>
+                            )}
+                            <MedicalProfilePanel
+                              profile={medical}
+                              compact
+                              accentColor={active ? undefined : '#94a3b8'}
+                              footnote={
+                                medical.hasData
+                                  ? 'Latest details from the patient profile.'
+                                  : 'The patient has not recorded any medical information.'
+                              }
+                            />
+                          </div>
                         </div>
-                      )}
 
-                      {isActive && (
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '16px' }}>
-                          <button
-                            onClick={() => handleRejectIncoming(alert.dispatchId)}
-                            style={{
-                              padding: '10px 16px',
-                              background: '#de350b',
-                              color: 'white',
-                              border: 'none',
-                              borderRadius: '6px',
-                              cursor: 'pointer',
-                              fontWeight: 700,
-                            }}
-                          >
-                            Reject and Reroute
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        ) : activeTab === 'history' ? (
-          <div style={{ background: 'white', borderRadius: '12px', padding: '24px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-              <h2 style={{ margin: 0 }}>Booking History</h2>
-              <span style={{ background: '#e3f2fd', color: '#1976d2', padding: '8px 16px', borderRadius: '20px' }}>{recentBookings.length} Total</span>
-            </div>
-            <div>
-              {recentBookings.length > 0 ? (
-                recentBookings.map(booking => (
-                  <div key={booking.id} style={{ padding: '16px', borderBottom: '1px solid #eee', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <div>
-                      <div style={{ fontWeight: '600', marginBottom: '4px' }}>{booking.id}</div>
-                      <div style={{ display: 'flex', gap: '8px' }}>
-                        <span style={{ padding: '2px 8px', borderRadius: '4px', backgroundColor: booking.type === 'EMERGENCY' ? '#ffebee' : '#e3f2fd', color: booking.type === 'EMERGENCY' ? '#c62828' : '#1565c0', fontSize: '12px' }}>{booking.type}</span>
-                        <span style={{ padding: '2px 8px', borderRadius: '4px', backgroundColor: booking.severity === 'CRITICAL' ? '#de350b' : booking.severity === 'HIGH' ? '#ff8b00' : '#ffab00', color: 'white', fontSize: '12px' }}>{booking.severity}</span>
-                      </div>
-                    </div>
-                    <div style={{ textAlign: 'right' }}>
-                      <div style={{ padding: '4px 12px', borderRadius: '12px', backgroundColor: booking.status === 'COMPLETED' ? '#e8f5e9' : booking.status === 'CANCELLED' ? '#ffebee' : '#fff3e0', color: booking.status === 'COMPLETED' ? '#2e7d32' : booking.status === 'CANCELLED' ? '#c62828' : '#e65100', fontSize: '12px' }}>{booking.status}</div>
-                      <div style={{ marginTop: '4px', fontSize: '12px', color: '#888' }}>{booking.time}</div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>No booking history</div>
+                        {active && (
+                          <footer className="ui-card__footer hosp-alert__footer">
+                            <span className="ui-help">Unable to receive this patient?</span>
+                            <button type="button" className="ui-btn ui-btn--danger-soft ui-btn--sm" onClick={() => setRejectTarget(alert)}>
+                              <Icon name="route" size={15} />
+                              Reject and reroute
+                            </button>
+                          </footer>
+                        )}
+                      </article>
+                    );
+                  })}
+                </div>
               )}
-            </div>
-          </div>
-        ) : (
-        <>
-        <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-header">
-              <h3>Total Beds</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 13c1.66 0 3-1.34 3-3S8.66 7 7 7s-3 1.34-3 3 1.34 3 3 3zm12-6h-8v7H3V7H1v10h22v-6c0-2.21-1.79-4-4-4z"/></svg>
-            </div>
-            <div className="stat-value">{stats.totalBeds}</div>
-            <div className="stat-footer">
-              <span className="stat-detail">Available: {stats.availableBeds}</span>
-              <span className="stat-detail">Occupied: {stats.occupiedBeds}</span>
-            </div>
-          </div>
+            </>
+          )}
 
-          <div className="stat-card">
-            <div className="stat-header">
-              <h3>Bed Utilization</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 6l2.29 2.29-4.88 4.88-4-4L2 16.59 3.41 18l6-6 4 4 6.3-6.29L22 12V6z"/></svg>
-            </div>
-            <div className="stat-value">{bedUtilization}%</div>
-            <div className="progress-bar">
-              <div className="progress-fill" style={{ width: `${bedUtilization}%` }}></div>
-            </div>
-          </div>
-
-          <div className="stat-card highlight">
-            <div className="stat-header">
-              <h3>Incoming Ambulances</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99z"/></svg>
-            </div>
-            <div className="stat-value">{stats.incomingAmbulances}</div>
-            <div className="stat-footer">
-              <span className="stat-badge live">EN ROUTE</span>
-            </div>
-          </div>
-
-          <div className="stat-card highlight">
-            <div className="stat-header">
-              <h3>Active Emergencies</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L1 21h22L12 2zm0 3.99L19.53 19H4.47L12 5.99zM11 16h2v2h-2zm0-6h2v4h-2z"/></svg>
-            </div>
-            <div className="stat-value">{stats.activeEmergencies}</div>
-            <div className="stat-footer">
-              <span className="stat-badge urgent">URGENT</span>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-header">
-              <h3>Completed Today</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>
-            </div>
-            <div className="stat-value">{stats.completedToday}</div>
-            <div className="stat-footer">
-              <span className="stat-detail">Bookings processed</span>
-            </div>
-          </div>
-
-          <div className="stat-card">
-            <div className="stat-header">
-              <h3>Capabilities</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-            </div>
-            <div className="stat-value">{capabilities.length}</div>
-            <div className="stat-footer">
-              <span className="stat-detail">{capabilities.map(c => c.type).join(', ')}</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="content-grid">
-          <div className="capabilities-card">
-            <div className="card-header">
-              <h3>Capability Status Management</h3>
-              <span className="help-text">Set individual status for each capability</span>
-            </div>
-            
-            <div className="capabilities-list">
-              {capabilities.map(capability => (
-                <div key={capability.type} className="capability-item">
-                  <div className="capability-info">
-                    <div className="capability-name">{capability.name}</div>
-                    <div className="capability-type">{capability.type}</div>
-                  </div>
-                  <div className="capability-status-controls">
-                    <button 
-                      className={`capability-status-btn accepting ${capability.status === 'ACCEPTING' ? 'active' : ''}`}
-                      onClick={() => handleCapabilityStatusChange(capability.type, 'ACCEPTING')}
-                    >
-                      Accepting
-                    </button>
-                    <button 
-                      className={`capability-status-btn limited ${capability.status === 'LIMITED' ? 'active' : ''}`}
-                      onClick={() => handleCapabilityStatusChange(capability.type, 'LIMITED')}
-                    >
-                      Limited
-                    </button>
-                    <button 
-                      className={`capability-status-btn divert ${capability.status === 'DIVERT' ? 'active' : ''}`}
-                      onClick={() => handleCapabilityStatusChange(capability.type, 'DIVERT')}
-                    >
-                      Divert
-                    </button>
-                  </div>
+          {activeTab === 'emergencies' && (
+            <section className="ui-card ui-enter" aria-labelledby="em-title">
+              <div className="ui-card__header">
+                <div>
+                  <h2 id="em-title" className="ui-card__title"><Icon name="siren" size={17} />Active emergency cases</h2>
+                  <div className="ui-card__subtitle">Open bookings for this hospital</div>
                 </div>
-              ))}
-            </div>
-          </div>
+                <Badge tone={stats.activeEmergencies > 0 ? 'danger' : 'neutral'} large dot>{stats.activeEmergencies} active</Badge>
+              </div>
+              {activeBookings.length > 0 ? (
+                <div className="ui-list">
+                  {activeBookings.map(booking => <BookingRow key={booking.id} booking={booking} />)}
+                </div>
+              ) : (
+                <EmptyState icon="checkCircle" tone="success" title="No active emergency cases">
+                  New emergencies routed to this hospital will appear here.
+                </EmptyState>
+              )}
+            </section>
+          )}
 
-          <div className="bookings-card">
-            <div className="card-header">
-              <h3>Recent Bookings</h3>
-              <a href="#" className="view-all">View All</a>
-            </div>
-            
-            <div className="bookings-list">
-              {recentBookings.map(booking => (
-                <div key={booking.id} className={`booking-item severity-${booking.severity.toLowerCase()}`}>
-                  <div className="booking-id">{booking.id}</div>
-                  <div className="booking-details">
-                    <div className="booking-type">
-                      <span className={`type-badge ${booking.type.toLowerCase()}`}>{booking.type}</span>
-                      <span className={`severity-badge ${booking.severity.toLowerCase()}`}>{booking.severity}</span>
+          {activeTab === 'history' && (
+            <section className="ui-card ui-enter" aria-labelledby="hist-title">
+              <div className="ui-card__header">
+                <div>
+                  <h2 id="hist-title" className="ui-card__title"><Icon name="history" size={17} />Booking history</h2>
+                  <div className="ui-card__subtitle">All recent bookings, newest first</div>
+                </div>
+                <Badge tone="info" large>{recentBookings.length} total</Badge>
+              </div>
+              {recentBookings.length > 0 ? (
+                <div className="ui-list">
+                  {recentBookings.map(booking => <BookingRow key={booking.id} booking={booking} />)}
+                </div>
+              ) : (
+                <EmptyState icon="history" title="No booking history">Completed and cancelled bookings will appear here.</EmptyState>
+              )}
+            </section>
+          )}
+
+          {activeTab === 'beds' && (
+            <>
+              <section className="ui-kpi-grid ui-kpi-grid--4" aria-label="Bed capacity">
+                {[
+                  { label: 'Total beds', value: stats.totalBeds, icon: 'bedDouble' as IconName, tone: 'brand' as Tone },
+                  { label: 'Available', value: stats.availableBeds, icon: 'bed' as IconName, tone: 'success' as Tone },
+                  { label: 'Occupied', value: stats.occupiedBeds, icon: 'users' as IconName, tone: 'warning' as Tone },
+                  { label: 'Utilization', value: bedUtilization, icon: 'gauge' as IconName, tone: bedTone, unit: '%' },
+                ].map((kpi, i) => (
+                  <div key={kpi.label} className={`ui-card ui-kpi ui-enter ${toneClass(kpi.tone)}`} style={{ ['--i' as string]: i }}>
+                    <div className="ui-kpi__top">
+                      <span className="ui-kpi__label">{kpi.label}</span>
+                      <span className="ui-kpi__icon"><Icon name={kpi.icon} /></span>
                     </div>
-                    <div className="booking-status">
-                      <span className={`status-indicator ${booking.status.toLowerCase()}`}></span>
-                      {booking.status.replace('_', ' ')}
+                    <div className="ui-kpi__value">
+                      <AnimatedNumber value={kpi.value} />
+                      {kpi.unit && <span className="ui-kpi__unit">{kpi.unit}</span>}
                     </div>
                   </div>
-                  <div className="booking-meta">
-                    {booking.eta && <span className="eta">ETA: {booking.eta}</span>}
-                    <span className="time-ago">{booking.time}</span>
+                ))}
+              </section>
+
+              <section className="ui-card ui-enter hosp-beds" style={{ ['--i' as string]: 4 }} aria-labelledby="beds-title">
+                <div className="ui-card__header">
+                  <div>
+                    <h2 id="beds-title" className="ui-card__title"><Icon name="bed" size={17} />Update available beds</h2>
+                    <div className="ui-card__subtitle">Dispatch uses this number to decide where to send patients</div>
                   </div>
                 </div>
-              ))}
+                <div className="ui-card__body">
+                  <div className="ui-field">
+                    <label className="ui-label" htmlFor="available-beds">Available beds</label>
+                    <div className="hosp-beds__row">
+                      <div className="hosp-stepper">
+                        <button
+                          type="button"
+                          className="ui-btn ui-btn--secondary ui-btn--icon ui-btn--lg"
+                          onClick={() => setBedUpdateValue(Math.max(0, bedUpdateValue - 1))}
+                          aria-label="Decrease by one"
+                        >
+                          <Icon name="minus" />
+                        </button>
+                        <input
+                          id="available-beds"
+                          type="number"
+                          className="ui-input ui-input--lg ui-num hosp-stepper__input"
+                          value={bedUpdateValue}
+                          onChange={(e) => setBedUpdateValue(parseInt(e.target.value) || 0)}
+                          min={0}
+                          max={stats.totalBeds}
+                          aria-describedby="beds-help"
+                        />
+                        <button
+                          type="button"
+                          className="ui-btn ui-btn--secondary ui-btn--icon ui-btn--lg"
+                          onClick={() => setBedUpdateValue(Math.min(stats.totalBeds, bedUpdateValue + 1))}
+                          aria-label="Increase by one"
+                        >
+                          <Icon name="plus" />
+                        </button>
+                      </div>
+                      <button type="button" className="ui-btn ui-btn--success ui-btn--lg" onClick={() => handleUpdateBeds(bedUpdateValue)}>
+                        <Icon name="save" size={17} />
+                        Update beds
+                      </button>
+                    </div>
+                    <div id="beds-help" className="ui-help">Of {stats.totalBeds} total beds. Currently recorded: {stats.availableBeds}.</div>
+                  </div>
+                </div>
+              </section>
+            </>
+          )}
+        </main>
+      </div>
+
+      {rejectTarget && (
+        <Modal onClose={() => setRejectTarget(null)} labelledBy="reject-title" describedBy="reject-desc" role="alertdialog">
+          <div className="ui-modal__header ui-modal__header--plain">
+            <span className="ui-icon-tile tone-danger"><Icon name="route" size={22} /></span>
+            <div>
+              <h2 id="reject-title" className="ui-modal__title">Reject and reroute this patient?</h2>
+              <p className="ui-modal__subtitle">
+                {severityMeta(rejectTarget.patientSeverity).label} patient · {rejectTarget.ambulanceVehicleNumber}
+                {rejectTarget.etaMinutes != null ? ` · ${rejectTarget.etaMinutes} min away` : ''}
+              </p>
             </div>
           </div>
-        </div>
-        </>
-        )}
-      </main>
+          <div className="ui-modal__body">
+            <p id="reject-desc" style={{ color: 'var(--text-2)' }}>
+              The ambulance will be sent to the next best hospital. Use this only when you cannot safely receive the patient.
+            </p>
+          </div>
+          <div className="ui-modal__footer">
+            <button type="button" className="ui-btn ui-btn--secondary" onClick={() => setRejectTarget(null)} data-autofocus>
+              Keep patient
+            </button>
+            <button
+              type="button"
+              className="ui-btn ui-btn--danger"
+              onClick={() => {
+                const dispatchId = rejectTarget.dispatchId;
+                setRejectTarget(null);
+                handleRejectIncoming(dispatchId);
+              }}
+            >
+              Reject and reroute
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      <NoticeStack notices={notices} onDismiss={dismiss} />
     </div>
   );
 };
 
+/** One row in the bookings lists, accented by severity. */
+function BookingRow({ booking }: { booking: Booking }) {
+  const sev = severityMeta(booking.severity);
+  return (
+    <div className={`ui-list__row ui-accent ui-accent--${sev.tone} hosp-booking`}>
+      <div className="hosp-booking__id ui-mono">{booking.id}</div>
+      <div className="hosp-booking__badges">
+        <StatusBadge status={booking.type} />
+        <SeverityBadge severity={booking.severity} />
+      </div>
+      <div className="hosp-booking__status">
+        <StatusBadge status={booking.status} variant="dot" />
+      </div>
+      <div className="hosp-booking__meta">
+        {booking.eta && <span className="hosp-booking__eta ui-num"><Icon name="timer" size={14} />ETA {booking.eta}</span>}
+        <span className="hosp-booking__time">{booking.time}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Yes/no triage observation. Green when reassuring, red when not — always with the word. */
+function TriageChip({ ok, label, value }: { ok: boolean; label: string; value?: string }) {
+  return (
+    <Badge tone={ok ? 'success' : 'danger'} icon={ok ? 'check' : 'alertTriangle'} large>
+      {label}: {value ?? (ok ? 'Yes' : 'No')}
+    </Badge>
+  );
+}
+
 export default Dashboard;
+

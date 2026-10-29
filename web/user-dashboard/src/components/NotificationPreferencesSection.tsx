@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import { API_BASE_URL } from '../config/api';
+import { Icon, type IconName } from '@shared/components/ui/Icon';
 
 
 interface NotificationPreferences {
@@ -57,125 +58,68 @@ export function NotificationPreferencesSection({ token }: NotificationPreference
     }
   };
 
+  const CHANNELS: { key: keyof NotificationPreferences; label: string; hint: string; icon: IconName }[] = [
+    { key: 'emailNotifications', label: 'Email Notifications', hint: 'Receive booking updates via email', icon: 'mail' },
+    { key: 'smsNotifications', label: 'SMS Notifications', hint: 'Get text messages for critical updates', icon: 'messageCircle' },
+    { key: 'pushNotifications', label: 'Push Notifications', hint: 'Receive instant alerts on your device', icon: 'bell' },
+  ];
+
   if (loading) {
     return (
-      <div className="bg-white border border-gray-200 rounded-lg p-6">
-        <div className="animate-pulse">
-          <div className="h-6 bg-gray-200 rounded w-1/3 mb-4"></div>
-          <div className="space-y-3">
-            <div className="h-4 bg-gray-200 rounded"></div>
-            <div className="h-4 bg-gray-200 rounded"></div>
-            <div className="h-4 bg-gray-200 rounded"></div>
-          </div>
+      <section className="ui-card" aria-busy="true">
+        <div className="ui-card__body" style={{ display: 'grid', gap: 12 }}>
+          <span className="ui-skeleton" style={{ height: 20, width: '40%' }} />
+          {[0, 1, 2].map(i => <span key={i} className="ui-skeleton" style={{ height: 44 }} />)}
         </div>
-      </div>
+      </section>
     );
   }
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-6">
-      <div className="flex items-center justify-between mb-4">
+    <section className="ui-card ui-enter" aria-labelledby="notif-title">
+      <div className="ui-card__header">
         <div>
-          <h3 className="text-lg font-semibold text-gray-900">🔔 Notification Preferences</h3>
-          <p className="text-sm text-gray-600 mt-1">Choose how you want to receive alerts and updates</p>
+          <h3 id="notif-title" className="ui-card__title"><Icon name="bell" size={17} />Notification Preferences</h3>
+          <div className="ui-card__subtitle">Choose how you want to receive alerts and updates</div>
         </div>
         {saved && (
-          <span className="text-green-600 text-sm font-medium animate-fade-in">
-            ✓ Saved
+          <span className="ui-badge tone-success ui-fade-in" role="status">
+            <Icon name="check" size={13} />
+            Saved
           </span>
         )}
       </div>
 
-      <div className="space-y-4">
-        {/* Email Notifications Toggle */}
-        <div className="flex items-center justify-between py-3 border-b border-gray-100">
-          <div className="flex items-center space-x-3">
-            <span className="text-2xl">📧</span>
-            <div>
-              <p className="font-medium text-gray-900">Email Notifications</p>
-              <p className="text-sm text-gray-500">Receive booking updates via email</p>
+      <div className="ui-list">
+        {CHANNELS.map(channel => {
+          const on = preferences[channel.key];
+          const id = `notif-${channel.key}`;
+          return (
+            <div key={channel.key} className="ui-list__row usr-pref">
+              <span className="ui-icon-tile ui-icon-tile--sm tone-neutral"><Icon name={channel.icon} size={17} /></span>
+              <div className="usr-pref__text">
+                <div id={id} className="usr-pref__label">{channel.label}</div>
+                <div className="ui-help">{channel.hint}</div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={on}
+                aria-labelledby={id}
+                className="ui-switch"
+                onClick={() => setPreferences({ ...preferences, [channel.key]: !on })}
+              />
             </div>
-          </div>
-          <button
-            onClick={() => setPreferences({ ...preferences, emailNotifications: !preferences.emailNotifications })}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 ${
-              preferences.emailNotifications ? 'bg-red-600' : 'bg-gray-200'
-            }`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                preferences.emailNotifications ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-        </div>
-
-        {/* SMS Notifications Toggle */}
-        <div className="flex items-center justify-between py-3 border-b border-gray-100">
-          <div className="flex items-center space-x-3">
-            <span className="text-2xl">💬</span>
-            <div>
-              <p className="font-medium text-gray-900">SMS Notifications</p>
-              <p className="text-sm text-gray-500">Get text messages for critical updates</p>
-            </div>
-          </div>
-          <button
-            onClick={() => setPreferences({ ...preferences, smsNotifications: !preferences.smsNotifications })}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 ${
-              preferences.smsNotifications ? 'bg-red-600' : 'bg-gray-200'
-            }`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                preferences.smsNotifications ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-        </div>
-
-        {/* Push Notifications Toggle */}
-        <div className="flex items-center justify-between py-3">
-          <div className="flex items-center space-x-3">
-            <span className="text-2xl">🔔</span>
-            <div>
-              <p className="font-medium text-gray-900">Push Notifications</p>
-              <p className="text-sm text-gray-500">Receive instant alerts on your device</p>
-            </div>
-          </div>
-          <button
-            onClick={() => setPreferences({ ...preferences, pushNotifications: !preferences.pushNotifications })}
-            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 ${
-              preferences.pushNotifications ? 'bg-red-600' : 'bg-gray-200'
-            }`}
-          >
-            <span
-              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                preferences.pushNotifications ? 'translate-x-6' : 'translate-x-1'
-              }`}
-            />
-          </button>
-        </div>
+          );
+        })}
       </div>
 
-      <div className="mt-6 flex justify-end">
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="bg-gradient-to-r from-red-600 to-red-700 text-white px-6 py-2 rounded-lg hover:from-red-700 hover:to-red-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl"
-        >
-          {saving ? (
-            <span className="flex items-center space-x-2">
-              <svg className="animate-spin h-4 w-4" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              <span>Saving...</span>
-            </span>
-          ) : (
-            'Save Preferences'
-          )}
+      <div className="ui-card__footer" style={{ justifyContent: 'flex-end' }}>
+        <button type="button" onClick={handleSave} disabled={saving} className="ui-btn ui-btn--primary">
+          {saving ? <span className="ui-spinner" aria-hidden="true" /> : <Icon name="save" size={16} />}
+          {saving ? 'Saving...' : 'Save Preferences'}
         </button>
       </div>
-    </div>
+    </section>
   );
 }

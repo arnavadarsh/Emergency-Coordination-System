@@ -4,8 +4,10 @@ import 'leaflet/dist/leaflet.css';
 import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
 import TokenStorage from '../utils/tokenStorage';
-import { formatIstFull, formatTimeAgo } from '../utils/datetime';
+import { formatIstFull, formatTimeAgo } from '@shared/utils/datetime';
 import { API_BASE_URL } from '../config/api';
+import { Icon, iconSvg } from '@shared/components/ui/Icon';
+import { Badge } from '@shared/components/ui/Status';
 
 /**
  * Live Operations Map.
@@ -24,33 +26,37 @@ import { API_BASE_URL } from '../config/api';
  */
 
 const SOCKET_URL = API_BASE_URL.replace(/\/api\/?$/, '');
-const RECONCILE_MS = 30000;
+// Movement arrives over the socket; this only reconciles anything missed while
+// the connection was down (it also refetches on every reconnect).
+const RECONCILE_MS = 5 * 60_000;
 
 /** Fallback view when nothing on the map has coordinates (central Delhi). */
 const FALLBACK_CENTER: L.LatLngTuple = [28.6139, 77.209];
 
+// Same vocabulary as the status badges elsewhere: green available/accepting,
+// blue on a case, amber limited/reserved, red only for divert.
 const AMBULANCE_STATUS = {
-  AVAILABLE:   { color: '#00875a', label: 'Available' },
-  BUSY:        { color: '#de350b', label: 'On a case' },
-  RESERVED:    { color: '#ff8b00', label: 'Reserved' },
-  MAINTENANCE: { color: '#8777d9', label: 'Maintenance' },
-  OFFLINE:     { color: '#97a0af', label: 'Offline' },
-  PENDING:     { color: '#6b778c', label: 'Pending' },
+  AVAILABLE:   { color: '#16a34a', label: 'Available' },
+  BUSY:        { color: '#2563eb', label: 'On a case' },
+  RESERVED:    { color: '#b45309', label: 'Reserved' },
+  MAINTENANCE: { color: '#7c3aed', label: 'Maintenance' },
+  OFFLINE:     { color: '#94a3b8', label: 'Offline' },
+  PENDING:     { color: '#64748b', label: 'Pending' },
 } as const;
 
 const HOSPITAL_STATUS = {
-  ACCEPTING: { color: '#0066cc', label: 'Accepting' },
-  LIMITED:   { color: '#ff8b00', label: 'Limited' },
-  DIVERT:    { color: '#de350b', label: 'On divert' },
+  ACCEPTING: { color: '#15803d', label: 'Accepting' },
+  LIMITED:   { color: '#b45309', label: 'Limited' },
+  DIVERT:    { color: '#dc2626', label: 'On divert' },
 } as const;
 
 const ambulanceStyle = (s: string) =>
   AMBULANCE_STATUS[String(s).toUpperCase() as keyof typeof AMBULANCE_STATUS]
-  ?? { color: '#6b778c', label: String(s || 'Unknown') };
+  ?? { color: '#64748b', label: String(s || 'Unknown') };
 
 const hospitalStyle = (s: string) =>
   HOSPITAL_STATUS[String(s).toUpperCase() as keyof typeof HOSPITAL_STATUS]
-  ?? { color: '#6b778c', label: String(s || 'Unknown') };
+  ?? { color: '#64748b', label: String(s || 'Unknown') };
 
 interface MapAmbulance {
   id: string;
@@ -104,12 +110,9 @@ const ambulanceIcon = (status: string, onCase: boolean) => {
   const { color } = ambulanceStyle(status);
   return L.divIcon({
     className: 'ops-marker',
-    html: `<div class="ops-amb${onCase ? ' ops-amb-active' : ''}" style="background:${color}">
-      <svg viewBox="0 0 24 24" width="13" height="13" fill="#fff" aria-hidden="true">
-        <path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99z"/>
-      </svg></div>`,
-    iconSize: [26, 26],
-    iconAnchor: [13, 13],
+    html: `<div class="ops-amb${onCase ? ' ops-amb-active' : ''}" style="background:${color};--ring:${color}">${iconSvg('ambulance', 15, 2.2)}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
   });
 };
 
@@ -118,9 +121,9 @@ const hospitalIcon = (status: string, availableBeds: number) => {
   const { color } = hospitalStyle(status);
   return L.divIcon({
     className: 'ops-marker',
-    html: `<div class="ops-hosp" style="background:${color}"><span>${availableBeds}</span></div>`,
-    iconSize: [30, 30],
-    iconAnchor: [15, 15],
+    html: `<div class="ops-hosp" style="background:${color}">${iconSvg('hospital', 13, 2.2)}<span>${availableBeds}</span></div>`,
+    iconSize: [44, 26],
+    iconAnchor: [22, 13],
   });
 };
 
@@ -167,10 +170,18 @@ const OperationsMap = () => {
 
   // ── Live updates ────────────────────────────────────────────────────────
   useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ['websocket'] });
+    // Signed-in admin sockets only; the server sends fleet and dispatch events
+    // to the admin room and nowhere else.
+    const socket = io(SOCKET_URL, { transports: ['websocket'], auth: cb => cb({ token: TokenStorage.getToken() }) });
     socketRef.current = socket;
 
-    socket.on('connect', () => setLive(true));
+    let connectedBefore = false;
+    socket.on('connect', () => {
+      setLive(true);
+      // Catch up on anything that moved while the connection was down.
+      if (connectedBefore) fetchData();
+      connectedBefore = true;
+    });
     socket.on('disconnect', () => setLive(false));
 
     // Patch just the unit that moved rather than re-fetching the whole fleet.
@@ -243,9 +254,12 @@ const OperationsMap = () => {
     const pts: L.LatLngTuple[] = [];
     if (showAmbulances) visibleAmbulances.forEach(a => pts.push([a.latitude as number, a.longitude as number]));
     if (showHospitals) visibleHospitals.forEach(h => pts.push([h.latitude as number, h.longitude as number]));
-    if (pts.length === 0) { map.setView(FALLBACK_CENTER, 11); return; }
-    if (pts.length === 1) { map.setView(pts[0], 13); return; }
-    map.fitBounds(L.latLngBounds(pts), { padding: [50, 50], maxZoom: 14 });
+    // Not animated: Leaflet 1.9 leaves a zoom-animation timer running after
+    // map.remove(), which throws (_leaflet_pos) if the operator switches tabs
+    // while the map is still framing.
+    if (pts.length === 0) { map.setView(FALLBACK_CENTER, 11, { animate: false }); return; }
+    if (pts.length === 1) { map.setView(pts[0], 13, { animate: false }); return; }
+    map.fitBounds(L.latLngBounds(pts), { padding: [50, 50], maxZoom: 14, animate: false });
   }, [showAmbulances, showHospitals, visibleAmbulances, visibleHospitals]);
 
   // ── Draw ────────────────────────────────────────────────────────────────
@@ -271,7 +285,11 @@ const OperationsMap = () => {
     if (showHospitals) {
       visibleHospitals.forEach(h => {
         const { color, label } = hospitalStyle(h.status);
-        L.marker([h.latitude as number, h.longitude as number], { icon: hospitalIcon(h.status, h.availableBeds) })
+        L.marker([h.latitude as number, h.longitude as number], {
+          icon: hospitalIcon(h.status, h.availableBeds),
+          // Names the marker for screen readers and shows on hover.
+          title: `${h.name} — ${label}, ${h.availableBeds} beds free`,
+        })
           .bindPopup(`
             <div class="ops-popup">
               <div class="ops-popup-title">${escapeHtml(h.name)}</div>
@@ -294,7 +312,7 @@ const OperationsMap = () => {
         const onCase = !!a.assignment;
         const pos: L.LatLngTuple = [a.latitude as number, a.longitude as number];
 
-        L.marker(pos, { icon: ambulanceIcon(a.status, onCase), zIndexOffset: 500 })
+        L.marker(pos, { icon: ambulanceIcon(a.status, onCase), zIndexOffset: 500, title: `Ambulance ${a.vehicleNumber} — ${label}` })
           .bindPopup(`
             <div class="ops-popup">
               <div class="ops-popup-title">${escapeHtml(a.vehicleNumber)}</div>
@@ -339,138 +357,105 @@ const OperationsMap = () => {
   const hiddenHosp = data?.summary?.hospitals?.withoutLocation ?? 0;
 
   return (
-    <div className="management-section">
-      <style>{`
-        .ops-marker { background: none; border: none; }
-        .ops-amb, .ops-hosp {
-          display: flex; align-items: center; justify-content: center;
-          box-shadow: 0 2px 6px rgba(9,30,66,.35); border: 2px solid #fff;
-        }
-        .ops-amb { width: 26px; height: 26px; border-radius: 50%; }
-        .ops-hosp { width: 30px; height: 30px; border-radius: 8px; }
-        .ops-hosp span { color: #fff; font-size: 11px; font-weight: 800; font-family: inherit; }
-        .ops-amb-active { animation: opsPulse 1.8s ease-out infinite; }
-        @keyframes opsPulse {
-          0%   { box-shadow: 0 0 0 0 rgba(222,53,11,.55), 0 2px 6px rgba(9,30,66,.35); }
-          70%  { box-shadow: 0 0 0 12px rgba(222,53,11,0), 0 2px 6px rgba(9,30,66,.35); }
-          100% { box-shadow: 0 0 0 0 rgba(222,53,11,0), 0 2px 6px rgba(9,30,66,.35); }
-        }
-        .ops-popup { font-family: inherit; min-width: 200px; }
-        .ops-popup-title { font-size: 14px; font-weight: 800; color: #172b4d; margin-bottom: 6px; }
-        .ops-popup-tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; margin-bottom: 8px; }
-        .ops-popup dl { margin: 0; display: grid; gap: 4px; }
-        .ops-popup dl div { display: flex; justify-content: space-between; gap: 12px; }
-        .ops-popup dt { font-size: 11px; color: #6b778c; text-transform: uppercase; letter-spacing: .4px; }
-        .ops-popup dd { margin: 0; font-size: 12px; color: #172b4d; font-weight: 600; text-align: right; }
-        .ops-toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-        .ops-toggle {
-          display: inline-flex; align-items: center; gap: 7px; padding: 7px 12px;
-          border-radius: 8px; border: 1px solid #dfe1e6; background: #fff;
-          font-size: 13px; font-weight: 600; color: #172b4d; cursor: pointer; font-family: inherit;
-        }
-        .ops-toggle[data-on="true"] { border-color: #0066cc; background: #e9f2ff; color: #0052cc; }
-        .ops-legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 12px; color: #42526e; }
-        .ops-legend span.dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-        .ops-legend span.sq { width: 11px; height: 11px; border-radius: 3px; display: inline-block; margin-right: 6px; }
-      `}</style>
-
-      <div className="section-header" style={{ flexWrap: 'wrap', gap: '12px' }}>
+    <section className="ops ui-enter">
+      <div className="ui-page-header">
         <div>
-          <h2 style={{ margin: 0 }}>Live Operations Map</h2>
-          <p style={{ margin: '4px 0 0', fontSize: '13px', color: '#6b778c' }}>
-            Every ambulance and hospital, updating as positions are reported.
-          </p>
+          <p className="ui-page-header__text">Every ambulance and hospital, updating as positions are reported.</p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{
-            display: 'inline-flex', alignItems: 'center', gap: '7px', padding: '6px 12px',
-            borderRadius: '20px', fontSize: '12px', fontWeight: 700,
-            background: live ? '#e3fcef' : '#fff4e6', color: live ? '#006644' : '#b06000',
-          }}>
-            <span style={{
-              width: '8px', height: '8px', borderRadius: '50%',
-              background: live ? '#00875a' : '#ff8b00',
-              animation: live ? 'opsPulse 1.8s ease-out infinite' : 'none',
-            }} />
+        <div className="ui-row">
+          <span className={`ui-badge ui-badge--lg ${live ? 'tone-success' : 'tone-warning'}`} role="status">
+            <span className={`ui-live${live ? '' : ' ui-live--static'}`} aria-hidden="true" />
             {live ? 'Live' : 'Reconnecting — polling'}
           </span>
-          <button onClick={frame} className="ops-toggle" title="Fit every marker in view">⤢ Fit all</button>
+          <button type="button" onClick={frame} className="ui-btn ui-btn--secondary ui-btn--sm" title="Fit every marker in view">
+            <Icon name="maximize" size={15} />
+            Fit all
+          </button>
         </div>
       </div>
 
       {/* Fleet + capacity at a glance */}
       {s && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '16px' }}>
+        <div className="ui-kpi-grid ui-kpi-grid--4 ops-stats">
           {[
-            { label: 'Ambulances', value: s.ambulances.total, sub: `${s.ambulances.available} available · ${s.ambulances.busy} on a case`, color: '#0066cc' },
-            { label: 'Active dispatches', value: s.activeDispatches, sub: 'in progress now', color: '#de350b' },
-            { label: 'Hospitals', value: s.hospitals.total, sub: `${s.hospitals.accepting} accepting · ${s.hospitals.divert} on divert`, color: '#00875a' },
-            { label: 'Beds free', value: s.hospitals.availableBeds, sub: `of ${s.hospitals.totalBeds} total`, color: '#8777d9' },
+            { label: 'Ambulances', value: s.ambulances.total, sub: `${s.ambulances.available} available · ${s.ambulances.busy} on a case`, tone: 'tone-brand', icon: 'ambulance' as const },
+            { label: 'Active dispatches', value: s.activeDispatches, sub: 'In progress now', tone: s.activeDispatches > 0 ? 'tone-danger' : 'tone-neutral', icon: 'siren' as const },
+            { label: 'Hospitals', value: s.hospitals.total, sub: `${s.hospitals.accepting} accepting · ${s.hospitals.divert} on divert`, tone: 'tone-success', icon: 'hospital' as const },
+            { label: 'Beds free', value: s.hospitals.availableBeds, sub: `of ${s.hospitals.totalBeds} total`, tone: 'tone-info', icon: 'bed' as const },
           ].map(c => (
-            <div key={c.label} style={{ background: '#fff', border: '1px solid #dfe1e6', borderRadius: '10px', padding: '14px 16px' }}>
-              <div style={{ fontSize: '11px', color: '#6b778c', textTransform: 'uppercase', letterSpacing: '.5px', fontWeight: 700 }}>{c.label}</div>
-              <div style={{ fontSize: '26px', fontWeight: 800, color: c.color, lineHeight: 1.2 }}>{c.value}</div>
-              <div style={{ fontSize: '12px', color: '#6b778c' }}>{c.sub}</div>
+            <div key={c.label} className={`ui-card ui-kpi ${c.tone}`}>
+              <div className="ui-kpi__top">
+                <span className="ui-kpi__label">{c.label}</span>
+                <span className="ui-kpi__icon"><Icon name={c.icon} size={17} /></span>
+              </div>
+              <div className="ui-kpi__value">{c.value}</div>
+              <div className="ui-kpi__meta">{c.sub}</div>
             </div>
           ))}
         </div>
       )}
 
-      <div className="ops-toolbar" style={{ marginBottom: '12px' }}>
-        <button className="ops-toggle" data-on={showAmbulances} onClick={() => setShowAmbulances(v => !v)}>
-          🚑 Ambulances ({visibleAmbulances.length})
-        </button>
-        <button className="ops-toggle" data-on={showHospitals} onClick={() => setShowHospitals(v => !v)}>
-          🏥 Hospitals ({visibleHospitals.length})
-        </button>
-        <button className="ops-toggle" data-on={onlyActive} onClick={() => setOnlyActive(v => !v)} title="Show only ambulances currently on a case">
-          ⚡ On a case only
-        </button>
-        <button className="ops-toggle" data-on={showRoutes} onClick={() => setShowRoutes(v => !v)} title="Line from each busy unit to its receiving hospital">
-          ↗ Routes
-        </button>
-      </div>
-
-      {error && (
-        <div style={{ background: '#fff4f2', border: '1px solid #de350b', color: '#bf2600', borderRadius: '8px', padding: '12px 14px', marginBottom: '12px', fontSize: '13px' }}>
-          {error}
+      <div className="ui-card ops-panel">
+        <div className="ops-toolbar" role="toolbar" aria-label="Map layers">
+          <button type="button" className="ops-toggle" aria-pressed={showAmbulances} onClick={() => setShowAmbulances(v => !v)}>
+            <Icon name="ambulance" size={15} />
+            Ambulances <span className="ui-count">{visibleAmbulances.length}</span>
+          </button>
+          <button type="button" className="ops-toggle" aria-pressed={showHospitals} onClick={() => setShowHospitals(v => !v)}>
+            <Icon name="hospital" size={15} />
+            Hospitals <span className="ui-count">{visibleHospitals.length}</span>
+          </button>
+          <button type="button" className="ops-toggle" aria-pressed={onlyActive} onClick={() => setOnlyActive(v => !v)} title="Show only ambulances currently on a case">
+            <Icon name="zap" size={15} />
+            On a case only
+          </button>
+          <button type="button" className="ops-toggle" aria-pressed={showRoutes} onClick={() => setShowRoutes(v => !v)} title="Line from each busy unit to its receiving hospital">
+            <Icon name="route" size={15} />
+            Routes
+          </button>
         </div>
-      )}
 
-      <div style={{ position: 'relative' }}>
-        <div ref={containerRef} style={{ width: '100%', height: '560px', borderRadius: '12px', overflow: 'hidden', border: '1px solid #dfe1e6', background: '#eef2f6' }} />
-        {loading && (
-          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(255,255,255,.7)', borderRadius: '12px', color: '#6b778c', fontWeight: 600 }}>
-            Loading operations map…
+        {error && (
+          <div className="ui-alert tone-danger" role="alert" style={{ margin: '0 16px 12px' }}>
+            <Icon name="alertTriangle" size={17} />
+            <div>{error}</div>
           </div>
         )}
-      </div>
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap', marginTop: '12px' }}>
-        <div className="ops-legend">
-          {Object.entries(AMBULANCE_STATUS).filter(([k]) => ['AVAILABLE', 'BUSY', 'MAINTENANCE', 'OFFLINE'].includes(k)).map(([k, v]) => (
-            <span key={k}><span className="dot" style={{ background: v.color }} />{v.label}</span>
-          ))}
-          <span style={{ color: '#c1c7d0' }}>|</span>
-          {Object.entries(HOSPITAL_STATUS).map(([k, v]) => (
-            <span key={k}><span className="sq" style={{ background: v.color }} />{v.label}</span>
-          ))}
-        </div>
-        <div style={{ fontSize: '12px', color: '#6b778c', textAlign: 'right' }}>
-          {(hiddenAmb > 0 || hiddenHosp > 0) && (
-            <div style={{ color: '#b06000', fontWeight: 600 }}>
-              Not shown (no coordinates on record): {hiddenAmb > 0 ? `${hiddenAmb} ambulance${hiddenAmb === 1 ? '' : 's'}` : ''}
-              {hiddenAmb > 0 && hiddenHosp > 0 ? ', ' : ''}
-              {hiddenHosp > 0 ? `${hiddenHosp} hospital${hiddenHosp === 1 ? '' : 's'}` : ''}
+        <div className="ops-map-wrap">
+          <div ref={containerRef} className="ui-map ops-map" role="region" aria-label="Operations map" />
+          {loading && (
+            <div className="ops-loading" role="status">
+              <span className="ui-spinner" aria-hidden="true" />
+              Loading operations map…
             </div>
           )}
-          {lastEventAt
-            ? <div>Last live update {formatTimeAgo(lastEventAt)}</div>
-            : <div>No live updates yet this session</div>}
-          {data?.generatedAt && <div title={formatIstFull(data.generatedAt)}>Snapshot {formatTimeAgo(data.generatedAt)}</div>}
+        </div>
+
+        <div className="ops-footer">
+          <div className="ops-legend" aria-label="Legend">
+            {Object.entries(AMBULANCE_STATUS).filter(([k]) => ['AVAILABLE', 'BUSY', 'MAINTENANCE', 'OFFLINE'].includes(k)).map(([k, v]) => (
+              <span key={k}><span className="ops-legend__dot" style={{ background: v.color }} />{v.label}</span>
+            ))}
+            <span className="ops-legend__sep" aria-hidden="true" />
+            {Object.entries(HOSPITAL_STATUS).map(([k, v]) => (
+              <span key={k}><span className="ops-legend__sq" style={{ background: v.color }} />{v.label}</span>
+            ))}
+          </div>
+          <div className="ops-meta">
+            {(hiddenAmb > 0 || hiddenHosp > 0) && (
+              <Badge tone="warning" icon="alertTriangle">
+                Not shown (no coordinates): {hiddenAmb > 0 ? `${hiddenAmb} ambulance${hiddenAmb === 1 ? '' : 's'}` : ''}
+                {hiddenAmb > 0 && hiddenHosp > 0 ? ', ' : ''}
+                {hiddenHosp > 0 ? `${hiddenHosp} hospital${hiddenHosp === 1 ? '' : 's'}` : ''}
+              </Badge>
+            )}
+            <span>{lastEventAt ? `Last live update ${formatTimeAgo(lastEventAt)}` : 'No live updates yet this session'}</span>
+            {data?.generatedAt && <span title={formatIstFull(data.generatedAt)}>Snapshot {formatTimeAgo(data.generatedAt)}</span>}
+          </div>
         </div>
       </div>
-    </div>
+    </section>
   );
 };
 

@@ -40,7 +40,7 @@ export function assertProductionConfig(): void {
   if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) {
     warnings.push(
       'SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are not set, so chat image attachments are disabled. ' +
-        'Set them (and create the storage bucket) to turn them on. Everything else runs normally.',
+        'Set them to turn them on — the storage bucket is created automatically. Everything else runs normally.',
     );
   }
 
@@ -66,8 +66,20 @@ export function assertProductionConfig(): void {
     );
   }
 
-  if ((process.env.SMS_PROVIDER || 'log') === 'log') {
-    warnings.push('SMS_PROVIDER=log — emergency contacts will NOT receive real messages; alerts only reach the log.');
+  // Same resolution as config/sms.config.ts: an explicit provider wins,
+  // otherwise Twilio as soon as its account is configured.
+  const smsProvider = process.env.SMS_PROVIDER || (process.env.TWILIO_ACCOUNT_SID ? 'twilio' : 'log');
+  if (smsProvider === 'log') {
+    warnings.push(
+      'No SMS gateway — emergency contacts will NOT receive real messages; alerts only reach the log. ' +
+        'Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER (and leave SMS_PROVIDER unset).',
+    );
+  }
+
+  if (process.env.BOOTSTRAP_ADMIN_PASSWORD) {
+    warnings.push(
+      'BOOTSTRAP_ADMIN_PASSWORD is set. It is only used while no admin exists — remove it once the first admin has signed in.',
+    );
   }
 
   if (process.env.SEED_DEMO_DATA === 'true') {

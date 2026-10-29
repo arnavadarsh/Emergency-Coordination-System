@@ -1,9 +1,15 @@
 import { randomUUID } from 'crypto';
 import { mkdir, writeFile } from 'fs/promises';
 import { extname, join } from 'path';
-import { Injectable, InternalServerErrorException, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  InternalServerErrorException,
+  Logger,
+  OnApplicationBootstrap,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { CHAT_UPLOAD_DIR } from './uploads.constants';
+import { ALLOWED_IMAGE_MIME, CHAT_UPLOAD_DIR, MAX_CHAT_IMAGE_BYTES } from './uploads.constants';
 
 export interface StoredImage {
   /** Address the dashboards put in an <img src>. */
@@ -30,10 +36,61 @@ export interface StoredImage {
  * guess one.
  */
 @Injectable()
-export class ChatImageStorageService {
+export class ChatImageStorageService implements OnApplicationBootstrap {
   private readonly logger = new Logger(ChatImageStorageService.name);
 
   constructor(private readonly configService: ConfigService) {}
+
+  /**
+   * Make sure the bucket exists, so setting SUPABASE_URL and
+   * SUPABASE_SERVICE_ROLE_KEY is the whole setup. Creates it public (the URL
+   * is the capability — see above) and limited to the image types and size
+   * the upload endpoint accepts. Never blocks startup.
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    if (!this.usesSupabase) return;
+    const bucket = this.configService.get<string>('supabase.storage.bucket', 'chat-attachments');
+
+    try {
+      const existing = await fetch(`${this.supabaseUrl}/storage/v1/bucket/${bucket}`, {
+        headers: this.authHeaders(),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (existing.ok) {
+        this.logger.log(`Chat attachments: Supabase Storage bucket "${bucket}" is ready`);
+        return;
+      }
+
+      const created = await fetch(`${this.supabaseUrl}/storage/v1/bucket`, {
+        method: 'POST',
+        headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: bucket,
+          name: bucket,
+          public: true,
+          file_size_limit: MAX_CHAT_IMAGE_BYTES,
+          allowed_mime_types: ALLOWED_IMAGE_MIME,
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+      if (created.ok) {
+        this.logger.log(`Chat attachments: created Supabase Storage bucket "${bucket}"`);
+      } else {
+        const detail = await created.text().catch(() => '');
+        this.logger.error(
+          `Chat attachments: bucket "${bucket}" is missing and could not be created (HTTP ${created.status}): ${detail.slice(0, 200)}. ` +
+            'Create it as a public bucket in the Supabase dashboard.',
+        );
+      }
+    } catch (error: any) {
+      this.logger.error(`Chat attachments: could not reach Supabase Storage: ${error?.message ?? error}`);
+    }
+  }
+
+  /** Both headers: older keys are JWTs read from Authorization, newer `sb_secret_` keys from `apikey`. */
+  private authHeaders(): Record<string, string> {
+    return { Authorization: `Bearer ${this.serviceRoleKey}`, apikey: this.serviceRoleKey };
+  }
 
   get usesSupabase(): boolean {
     return Boolean(this.supabaseUrl && this.serviceRoleKey);
@@ -89,7 +146,7 @@ export class ChatImageStorageService {
       response = await fetch(`${this.supabaseUrl}/storage/v1/object/${bucket}/${objectPath}`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${this.serviceRoleKey}`,
+          ...this.authHeaders(),
           'Content-Type': contentType,
           'Cache-Control': 'public, max-age=31536000, immutable',
         },

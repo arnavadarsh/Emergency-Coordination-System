@@ -9,6 +9,9 @@ import { UsersModule } from '../users/users.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { Hospital } from '../hospitals/entities/hospital.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
+import { User } from '../users/entities/user.entity';
+import { AuditModule } from '../audit/audit.module';
+import { AdminBootstrapService } from './admin-bootstrap.service';
 
 /**
  * Authentication Module
@@ -28,12 +31,13 @@ import { Ambulance } from '../ambulances/entities/ambulance.entity';
       inject: [ConfigService],
     }),
     UsersModule,
-    // Registration links a hospital account to its facility and a driver to
-    // their ambulance, so both repositories are needed here.
-    TypeOrmModule.forFeature([Hospital, Ambulance]),
+    AuditModule,
+    // Admin-created accounts link a hospital login to its facility and a driver
+    // to their ambulance, so both repositories are needed here.
+    TypeOrmModule.forFeature([Hospital, Ambulance, User]),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, AdminBootstrapService],
   exports: [AuthService],
 })
 export class AuthModule {}

@@ -1,38 +1,20 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import toast from 'react-hot-toast';
 import { tokenStorage } from '../utils/tokenStorage';
-import { DriverRouteMap } from '../components/DriverRouteMap';
 import ActiveCaseCard from '../components/ActiveCaseCard';
-import ChecklistModal from '../components/ChecklistModal';
 import CaseChat from '../components/CaseChat';
 import { useCaseChats } from '../hooks/useCaseChats';
-import { formatIstDateTime, formatIstFull } from '../utils/datetime';
-import { normalizeMedicalProfile, type MedicalProfile } from '../types/medicalProfile';
+import { formatIstDateTime, formatIstFull } from '@shared/utils/datetime';
+import { normalizeMedicalProfile, type MedicalProfile } from '@shared/types/medicalProfile';
 import { API_BASE_URL, SOCKET_URL } from '../config/api';
+import { Icon, type IconName } from '@shared/components/ui/Icon';
+import { SeverityBadge, StatusBadge } from '@shared/components/ui/Status';
+import { BrandMark, EmptyState, PageError, PageLoading, initialsOf } from '@shared/components/ui/primitives';
+import '../styles/Dashboard.css';
 
-
-// ── Palette (matches user dashboard) ─────────────────────────
-const C = {
-  pageBg:       '#f5f7fa',
-  sidebar:      '#ffffff',
-  sidebarBorder:'#e0e0e0',
-  card:         '#ffffff',
-  cardBorder:   '#e0e0e0',
-  input:        '#f5f7fa',
-  textPrimary:  '#172b4d',
-  textSecondary:'#6b778c',
-  textMuted:    '#97a0af',
-  accent:       '#00a3bf',
-  accentSoft:   '#e6f7f9',
-  accentHover:  '#008a9e',
-  red:          '#de350b',
-  redSoft:      '#fff4f2',
-  green:        '#00875a',
-  greenSoft:    '#e3fcef',
-};
 
 // ── Interfaces ────────────────────────────────────────────────
 interface Booking {
@@ -84,62 +66,16 @@ interface DriverProfile {
 }
 
 type TabType = 'active' | 'history' | 'profile';
+// Loaded when first shown: the map pulls in Leaflet, and neither is needed
+// until there is a trip to run.
+const DriverRouteMap = lazy(() => import('../components/DriverRouteMap').then(m => ({ default: m.DriverRouteMap })));
+const ChecklistModal = lazy(() => import('../components/ChecklistModal'));
+
 const ACTIVE_STATUSES = ['ASSIGNED','DISPATCHED','EN_ROUTE','EN_ROUTE_PICKUP','AT_PICKUP','EN_ROUTE_HOSPITAL','AT_HOSPITAL'];
 
-function sevColor(s?: string) {
-  return s === 'CRITICAL' ? '#de350b' : s === 'HIGH' ? '#ff8b00' : s === 'MEDIUM' ? '#ffab00' : '#00875a';
-}
-function statusLabel(s: string) { return s.replace(/_/g, ' '); }
-
-// ── Sidebar NavButton ─────────────────────────────────────────
-function NavItem({ icon, label, active, onClick, badge = 0 }: { icon: string; label: string; active: boolean; onClick: () => void; badge?: number }) {
-  return (
-    <button onClick={onClick} style={{
-      display: 'flex', alignItems: 'center', gap: '12px',
-      padding: '12px 16px', borderRadius: '8px', border: 'none',
-      cursor: 'pointer', textAlign: 'left', width: '100%',
-      background: active ? C.accentSoft : 'transparent',
-      color: active ? C.accent : C.textSecondary,
-      fontWeight: active ? 600 : 500, fontSize: '14px',
-      transition: 'all 0.2s',
-    }}>
-      <span style={{ fontSize: '18px' }}>{icon}</span>
-      <span style={{ flex: 1 }}>{label}</span>
-      {badge > 0 && (
-        <span style={{
-          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-          minWidth: '20px', height: '20px', padding: '0 6px', borderRadius: '9999px',
-          background: C.red, color: 'white', fontSize: '11px', fontWeight: 700,
-        }}>
-          {badge}
-        </span>
-      )}
-    </button>
-  );
-}
-
-// ── Card ──────────────────────────────────────────────────────
-function Card({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }) {
-  return (
-    <div style={{
-      background: C.card, borderRadius: '12px',
-      border: `1px solid ${C.cardBorder}`,
-      boxShadow: '0 2px 8px rgba(0,0,0,0.04)',
-      ...style,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-// ── Field label ───────────────────────────────────────────────
-function FieldLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{ fontSize: '11px', color: C.textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '4px' }}>
-      {children}
-    </div>
-  );
-}
+// New trips and status changes arrive over the socket. This slow poll only
+// catches anything missed while the connection was down.
+const FALLBACK_REFRESH_MS = 5 * 60_000;
 
 // ── Main ──────────────────────────────────────────────────────
 function Dashboard() {
@@ -156,7 +92,6 @@ function Dashboard() {
   const [editingProfile, setEditingProfile] = useState(false);
   const [profileForm, setProfileForm] = useState({ firstName: '', lastName: '', phoneNumber: '', address: '', profilePhotoUrl: '' });
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   // Chat lives at dashboard level so it keeps receiving while the driver is on another tab.
   const chatRooms = useMemo(
@@ -228,14 +163,17 @@ function Dashboard() {
     } catch (err: any) { setError(err.response?.data?.message||'Failed to load data'); setLoading(false); }
   };
 
-  useEffect(() => { fetchData(); const t = setInterval(fetchData, 30000); return () => clearInterval(t); }, []);
+  useEffect(() => { fetchData(); const t = setInterval(fetchData, FALLBACK_REFRESH_MS); return () => clearInterval(t); }, []);
   useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 768);
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-  useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ['websocket'] });
+    // Signed-in sockets only; the server places this driver in their
+    // ambulance's room, which is where their trips are announced.
+    const socket = io(SOCKET_URL, { transports: ['websocket'], auth: cb => cb({ token: tokenStorage.getToken() }) });
+    let connectedBefore = false;
+    const onConnect = () => {
+      // Catch up on anything that happened while the connection was down.
+      if (connectedBefore) fetchData();
+      connectedBefore = true;
+    };
     const onRerouteSearchStarted = (p: any) => {
       toast.error(p?.message || 'Assigned hospital is currently unable to accept the patient. Searching for the next best hospital.', { duration: 7000 });
       fetchData();
@@ -250,12 +188,21 @@ function Dashboard() {
       toast.error('No suitable hospital is available. Continue care and wait for admin instructions.', { duration: 10000 });
       fetchData();
     };
+    // A message from the operations team, shown however long it takes to read.
+    const onAnnouncement = (p: { message: string; tone?: string }) => {
+      const show = p?.tone === 'danger' ? toast.error : p?.tone === 'success' ? toast.success : toast;
+      show(`Announcement: ${p.message}`, { duration: 12000 });
+    };
+    socket.on('system_announcement', onAnnouncement);
+    socket.on('connect', onConnect);
     socket.on('dispatch_assigned', fetchData);
     socket.on('dispatch_status_updated', fetchData);
     socket.on('hospital_reroute_search_started', onRerouteSearchStarted);
     socket.on('dispatch_diverted', onDispatchDiverted);
     socket.on('hospital_reroute_escalated', onRerouteEscalated);
     return () => {
+      socket.off('connect', onConnect);
+      socket.off('system_announcement', onAnnouncement);
       socket.off('dispatch_assigned', fetchData);
       socket.off('dispatch_status_updated', fetchData);
       socket.off('hospital_reroute_search_started', onRerouteSearchStarted);
@@ -284,27 +231,10 @@ function Dashboard() {
 
   const handleLogout = () => { tokenStorage.clearToken(); navigate('/'); };
 
-  if (loading) return (
-    <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background: C.pageBg, flexDirection:'column', gap:'16px' }}>
-      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
-      <div style={{ width:'44px', height:'44px', borderRadius:'50%', border:`3px solid ${C.accentSoft}`, borderTopColor: C.accent, animation:'spin 0.8s linear infinite' }} />
-      <div style={{ fontSize:'15px', color: C.textSecondary, fontWeight:500 }}>Loading dashboard…</div>
-      {/* Skeleton cards */}
-      <div style={{ display:'flex', flexDirection:'column', gap:'12px', width:'min(400px,90vw)', marginTop:'8px' }}>
-        {[1,2,3].map(i => (
-          <div key={i} style={{ height:'64px', borderRadius:'10px', background: C.cardBorder, animation:'pulse 1.6s ease-in-out infinite', animationDelay:`${i*0.15}s` }} />
-        ))}
-      </div>
-    </div>
-  );
 
-  if (error) return (
-    <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background: C.pageBg, flexDirection:'column', gap:'12px', padding:'24px' }}>
-      <div style={{ fontSize:'40px' }}>⚠️</div>
-      <div style={{ fontSize:'16px', color: C.red, fontWeight:600, textAlign:'center' }}>{error}</div>
-      <button onClick={fetchData} style={{ padding:'10px 24px', background: C.accent, color:'white', border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600 }}>Retry</button>
-    </div>
-  );
+  if (loading) return <PageLoading label="Loading your dispatch…" />;
+
+  if (error) return <PageError message={error} onRetry={fetchData} />;
 
   const historyDispatches = dispatches
     .filter(d => !ACTIVE_STATUSES.includes(d.status))
@@ -315,125 +245,117 @@ function Dashboard() {
       d.booking.id.includes(historySearch));
 
   const isAvailable = !activeDispatch;
-  const NAV: { id: TabType; icon: string; label: string }[] = [
-    { id:'active',  icon:'🚑', label:'Active Dispatch' },
-    { id:'history', icon:'📋', label:'Booking History' },
-    { id:'profile', icon:'👤', label:'Profile' },
+  const NAV: { id: TabType; icon: IconName; label: string }[] = [
+    { id:'active',  icon:'siren', label:'Active Dispatch' },
+    { id:'history', icon:'history', label:'Booking History' },
+    { id:'profile', icon:'user', label:'Profile' },
   ];
+  const TITLES: Record<TabType, { title: string; subtitle: string }> = {
+    active: {
+      title: 'Active Dispatch',
+      subtitle: activeDispatch ? 'Respond quickly — a patient is waiting.' : 'No active dispatch. Waiting for assignment.',
+    },
+    history: { title: 'Booking History', subtitle: 'All your past dispatches.' },
+    profile: { title: 'My Profile', subtitle: 'How patients and hospitals see you' },
+  };
+  const availability = (
+    <span className={`ui-badge ui-badge--lg ${isAvailable ? 'tone-success' : 'tone-danger'}`}>
+      <span className={`ui-live${isAvailable ? '' : ' ui-live--static'}`} aria-hidden="true" />
+      {isAvailable ? 'Available' : 'On dispatch'}
+    </span>
+  );
+  const goToCase = activeDispatch && ['AT_PICKUP','EN_ROUTE_HOSPITAL','AT_HOSPITAL'].includes(activeDispatch.status);
 
   return (
-    <div style={{ display:'flex', minHeight:'100vh', background: C.pageBg, fontFamily:'-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif', color: C.textPrimary }}>
-      <style>{`*{box-sizing:border-box} ::-webkit-scrollbar{width:6px} ::-webkit-scrollbar-track{background:${C.pageBg}} ::-webkit-scrollbar-thumb{background:${C.cardBorder};border-radius:9999px}`}</style>
+    <div className="ui-app">
+      <a href="#main" className="ui-skip-link">Skip to content</a>
 
       {showChecklist && driverProfile?.ambulanceId && activeDispatch && (
-        <ChecklistModal
+        <Suspense fallback={null}><ChecklistModal
           ambulanceId={driverProfile.ambulanceId}
           severity={activeDispatch.booking.severity}
           requiredEquipment={(activeDispatch.booking as any).triageData?.ambulance?.equipment}
           onConfirm={() => { setShowChecklist(false); updateStatus(activeDispatch.id, 'EN_ROUTE_PICKUP'); }}
           onClose={() => setShowChecklist(false)}
-        />
+        /></Suspense>
       )}
 
-      {/* Mobile overlay backdrop */}
-      {isMobile && sidebarOpen && (
-        <div onClick={() => setSidebarOpen(false)} style={{
-          position:'fixed', inset:0, background:'rgba(0,0,0,0.45)', zIndex:998,
-        }} />
-      )}
+      <div className={`ui-scrim${sidebarOpen ? ' is-visible' : ''}`} onClick={() => setSidebarOpen(false)} aria-hidden="true" />
 
       {/* ── Sidebar ─────────────────────────────── */}
-      <aside style={{ width:'260px', flexShrink:0, background: C.sidebar, borderRight:`1px solid ${C.sidebarBorder}`,
-        display:'flex', flexDirection:'column',
-        position: isMobile ? 'fixed' : 'sticky',
-        top:0, height:'100vh', zIndex: isMobile ? 999 : 'auto',
-        transform: isMobile ? (sidebarOpen ? 'translateX(0)' : 'translateX(-100%)') : 'none',
-        transition:'transform 0.3s ease',
-        boxShadow:'2px 0 8px rgba(0,0,0,0.05)' }}>
-
-        {/* Logo */}
-        <div style={{ padding:'24px', borderBottom:`1px solid ${C.sidebarBorder}` }}>
-          <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'12px' }}>
-            <span style={{ fontSize:'28px' }}>🚑</span>
-            <span style={{ fontSize:'20px', fontWeight:700, color: C.textPrimary, flex:1 }}>ECS Driver</span>
-            {isMobile && (
-              <button onClick={() => setSidebarOpen(false)} style={{
-                background:'none', border:'none', cursor:'pointer', fontSize:'20px',
-                color: C.textSecondary, padding:'4px', lineHeight:1,
-              }}>✕</button>
-            )}
+      <aside className={`ui-sidebar${sidebarOpen ? ' is-open' : ''}`} aria-label="Driver navigation">
+        <div className="ui-sidebar__brand">
+          <BrandMark />
+          <div className="ui-sidebar__brand-text">
+            <div className="ui-sidebar__product">ECS Driver</div>
+            <div className="ui-sidebar__portal">Ambulance crew</div>
           </div>
-          <div style={{ display:'inline-flex', alignItems:'center', gap:'6px',
-            padding:'5px 12px', borderRadius:'12px', fontSize:'12px', fontWeight:600,
-            background: isAvailable ? C.greenSoft : C.redSoft,
-            color: isAvailable ? C.green : C.red }}>
-            <div style={{ width:'7px', height:'7px', borderRadius:'50%', background: isAvailable ? C.green : C.red }} />
-            {isAvailable ? 'AVAILABLE' : 'ON DISPATCH'}
-          </div>
+          <button type="button" className="ui-btn ui-btn--ghost ui-btn--icon ui-btn--sm ui-sidebar__close" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
+            <Icon name="x" />
+          </button>
         </div>
 
-        {/* Vehicle */}
-        {driverProfile?.ambulance && (
-          <div style={{ padding:'14px 24px', borderBottom:`1px solid ${C.sidebarBorder}` }}>
-            <div style={{ fontSize:'13px', color: C.textPrimary, fontWeight:600 }}>{driverProfile.ambulance.vehicleNumber}</div>
-            <div style={{ fontSize:'12px', color: C.textSecondary }}>{driverProfile.ambulance.type}</div>
-          </div>
-        )}
+        <div className="ui-sidebar__context">
+          <div className="ui-row">{availability}</div>
+          {driverProfile?.ambulance && (
+            <div className="drv-vehicle">
+              <span className="ui-plate"><Icon name="ambulance" size={14} />{driverProfile.ambulance.vehicleNumber}</span>
+              <span className="ui-sidebar__context-meta">{driverProfile.ambulance.type}</span>
+            </div>
+          )}
+        </div>
 
-        {/* Nav */}
-        <nav style={{ flex:1, padding:'16px', display:'flex', flexDirection:'column', gap:'4px' }}>
-          {NAV.map(n => <NavItem key={n.id} icon={n.icon} label={n.label} active={activeTab===n.id} badge={n.id==='active' ? chat.totalUnread : 0} onClick={() => { setActiveTab(n.id); if (isMobile) setSidebarOpen(false); }} />)}
+        <nav className="ui-nav" aria-label="Sections">
+          {NAV.map(n => (
+            <button
+              key={n.id}
+              type="button"
+              className={`ui-nav__item${activeTab===n.id ? ' is-active' : ''}`}
+              aria-current={activeTab===n.id ? 'page' : undefined}
+              onClick={() => { setActiveTab(n.id); setSidebarOpen(false); }}
+            >
+              <Icon name={n.icon} />
+              {n.label}
+              {n.id==='active' && chat.totalUnread > 0 && (
+                <span className="ui-nav__badge" aria-label={`${chat.totalUnread} unread messages`}>{chat.totalUnread}</span>
+              )}
+            </button>
+          ))}
         </nav>
 
-        {/* Driver info + logout */}
-        <div style={{ padding:'16px 24px', borderTop:`1px solid ${C.sidebarBorder}` }}>
-          <div style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary, marginBottom:'2px' }}>{driverProfile?.name}</div>
-          <div style={{ fontSize:'12px', color: C.textSecondary, marginBottom:'12px' }}>Lic: {driverProfile?.licenseNumber}</div>
-          <button onClick={handleLogout} style={{ width:'100%', padding:'10px 12px',
-            background:'white', color: C.textSecondary, border:`1px solid ${C.cardBorder}`,
-            borderRadius:'8px', cursor:'pointer', fontSize:'13px', fontWeight:500,
-            display:'flex', alignItems:'center', justifyContent:'center', gap:'8px', transition:'all 0.2s' }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = C.red; e.currentTarget.style.color = C.red; }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = C.cardBorder; e.currentTarget.style.color = C.textSecondary; }}>
-            Sign Out →
+        <div className="ui-sidebar__footer">
+          <div className="ui-user">
+            <span className="ui-avatar">{initialsOf(driverProfile?.name)}</span>
+            <div style={{ minWidth: 0 }}>
+              <div className="ui-user__name ui-truncate">{driverProfile?.name}</div>
+              <div className="ui-user__meta ui-truncate">Lic: {driverProfile?.licenseNumber}</div>
+            </div>
+          </div>
+          <button type="button" onClick={handleLogout} className="ui-btn ui-btn--ghost ui-btn--block drv-signout">
+            <Icon name="logOut" />
+            Sign out
           </button>
         </div>
       </aside>
 
       {/* ── Main ────────────────────────────────── */}
-      <main style={{ flex:1, overflowY:'auto', padding: isMobile ? '16px' : '32px', minWidth:0 }}>
-
-        {/* Mobile top bar */}
-        {isMobile && (
-          <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'20px',
-            padding:'12px 16px', background: C.sidebar, borderRadius:'12px', border:`1px solid ${C.cardBorder}`,
-            boxShadow:'0 2px 8px rgba(0,0,0,0.04)' }}>
-            <button onClick={() => setSidebarOpen(true)} style={{
-              background:'none', border:'none', cursor:'pointer', fontSize:'22px',
-              color: C.textPrimary, padding:'4px', lineHeight:1, flexShrink:0,
-            }}>☰</button>
-            <span style={{ fontSize:'18px' }}>🚑</span>
-            <span style={{ fontWeight:700, fontSize:'16px', color: C.textPrimary, flex:1 }}>ECS Driver</span>
-            <div style={{ display:'inline-flex', alignItems:'center', gap:'6px',
-              padding:'4px 10px', borderRadius:'12px', fontSize:'11px', fontWeight:600,
-              background: !activeDispatch ? C.greenSoft : C.redSoft,
-              color: !activeDispatch ? C.green : C.red }}>
-              <div style={{ width:'6px', height:'6px', borderRadius:'50%', background: !activeDispatch ? C.green : C.red }} />
-              {!activeDispatch ? 'AVAILABLE' : 'ON DISPATCH'}
-            </div>
+      <div className="ui-main">
+        <header className="ui-topbar">
+          <button type="button" className="ui-btn ui-btn--secondary ui-btn--icon ui-menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+            <Icon name="menu" />
+          </button>
+          <div className="ui-topbar__titles">
+            <h1 className="ui-topbar__title">{TITLES[activeTab].title}</h1>
+            <div className="ui-topbar__subtitle">{TITLES[activeTab].subtitle}</div>
           </div>
-        )}
+          <div className="ui-topbar__actions">{availability}</div>
+        </header>
 
-        {/* Active Dispatch */}
-        {activeTab==='active' && (
-          <div style={{ maxWidth:'700px', margin:'0 auto' }}>
-            <h1 style={{ fontSize:'28px', fontWeight:700, color: C.textPrimary, margin:'0 0 4px' }}>Active Dispatch</h1>
-            <p style={{ fontSize:'15px', color: C.textSecondary, margin:'0 0 24px' }}>
-              {activeDispatch ? 'Respond quickly — a patient is waiting.' : 'No active dispatch. Waiting for assignment.'}
-            </p>
-
-            {activeDispatch ? (
-              <>
+        <main id="main" className="ui-content ui-content--narrow" key={activeTab}>
+          {/* Active Dispatch */}
+          {activeTab==='active' && (
+            activeDispatch ? (
+              <div className="ui-stack">
                 <ActiveCaseCard
                   dispatch={activeDispatch}
                   onStartJourney={() => setShowChecklist(true)}
@@ -444,29 +366,23 @@ function Dashboard() {
                 />
 
                 {['ASSIGNED','DISPATCHED','EN_ROUTE_PICKUP','EN_ROUTE'].includes(activeDispatch.status) && (
-                  <Card style={{ overflow:'hidden', marginTop:'20px' }}>
-                    <div style={{ padding:'14px 20px', borderBottom:`1px solid ${C.cardBorder}` }}>
-                      <span style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary }}>🗺 Route to Patient</span>
-                    </div>
-                    <DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
+                  <section className="ui-card ui-enter" style={{ ['--i' as string]: 1 }}>
+                    <Suspense fallback={null}><DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
                       targetLat={activeDispatch.booking.pickupLatitude} targetLng={activeDispatch.booking.pickupLongitude}
-                      targetLabel={activeDispatch.booking.pickupLocation} title="Route To Patient" ctaLabel="Open in Maps" />
-                  </Card>
+                      targetLabel={activeDispatch.booking.pickupLocation} title="Route to patient" ctaLabel="Open in Maps" /></Suspense>
+                  </section>
                 )}
 
-                {['AT_PICKUP','EN_ROUTE_HOSPITAL','AT_HOSPITAL'].includes(activeDispatch.status) && (
-                  <Card style={{ overflow:'hidden', marginTop:'20px' }}>
-                    <div style={{ padding:'14px 20px', borderBottom:`1px solid ${C.cardBorder}` }}>
-                      <span style={{ fontSize:'14px', fontWeight:600, color: C.textPrimary }}>🏥 Route to Hospital</span>
-                    </div>
-                    <DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
+                {goToCase && (
+                  <section className="ui-card ui-enter" style={{ ['--i' as string]: 1 }}>
+                    <Suspense fallback={null}><DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
                       targetLat={activeDispatch.booking.destinationLatitude} targetLng={activeDispatch.booking.destinationLongitude}
                       targetLabel={activeDispatch.booking.selectedHospitalName||activeDispatch.booking.dropoffLocation}
-                      title="Route To Hospital" ctaLabel="Open in Maps" />
-                  </Card>
+                      title="Route to hospital" ctaLabel="Open in Maps" /></Suspense>
+                  </section>
                 )}
 
-                <div style={{ marginTop:'20px' }}>
+                <div className="ui-enter" style={{ ['--i' as string]: 2 }}>
                   <CaseChat
                     bookingId={activeDispatch.booking.id}
                     currentRole="driver"
@@ -479,176 +395,181 @@ function Dashboard() {
                     onRetry={clientId => chat.retry(activeDispatch.booking.id, clientId)}
                     apiBaseUrl={API_BASE_URL}
                     onVisibilityChange={visible => chat.setRoomVisible(activeDispatch.booking.id, visible)}
-                    theme={{ border: C.cardBorder, surface: C.pageBg, muted: C.textSecondary, accent: C.accent, disabled: '#D9DEE7', shadow: '0 2px 8px rgba(0,0,0,0.04)' }}
                   />
                 </div>
-              </>
+              </div>
             ) : (
-              <Card style={{ padding:'60px 24px', textAlign:'center' }}>
-                <div style={{ fontSize:'56px', marginBottom:'16px' }}>🟢</div>
-                <h2 style={{ margin:'0 0 8px', fontSize:'20px', fontWeight:600, color: C.textPrimary }}>You're Available</h2>
-                <p style={{ margin:0, fontSize:'14px', color: C.textSecondary, lineHeight:1.6 }}>
-                  Waiting for dispatch. A new case will appear here automatically.
-                </p>
-              </Card>
-            )}
-          </div>
-        )}
+              <div className="ui-card ui-enter drv-standby">
+                <div className="drv-standby__radar" aria-hidden="true">
+                  <span /><span />
+                  <Icon name="radio" size={28} />
+                </div>
+                <h2 className="drv-standby__title">You're available</h2>
+                <p className="drv-standby__text">Waiting for dispatch. A new case will appear here automatically.</p>
+                {driverProfile?.ambulance && (
+                  <div className="ui-row" style={{ justifyContent: 'center', marginTop: 4 }}>
+                    <span className="ui-plate"><Icon name="ambulance" size={14} />{driverProfile.ambulance.vehicleNumber}</span>
+                    <span className="ui-help">{driverProfile.ambulance.type}</span>
+                  </div>
+                )}
+              </div>
+            )
+          )}
 
-        {/* Booking History */}
-        {activeTab==='history' && (
-          <div style={{ maxWidth:'700px', margin:'0 auto' }}>
-            <h1 style={{ fontSize:'28px', fontWeight:700, color: C.textPrimary, margin:'0 0 4px' }}>Booking History</h1>
-            <p style={{ fontSize:'15px', color: C.textSecondary, margin:'0 0 24px' }}>All your past dispatches.</p>
+          {/* Booking History */}
+          {activeTab==='history' && (
+            <>
+              <div className="ui-toolbar">
+                <div className="ui-input-wrap ui-toolbar__search">
+                  <Icon name="search" size={16} />
+                  <input
+                    className="ui-input"
+                    value={historySearch}
+                    onChange={e => setHistorySearch(e.target.value)}
+                    placeholder="Search location or ID…"
+                    aria-label="Search history"
+                  />
+                </div>
+                <div className="ui-segmented" role="tablist" aria-label="Filter by outcome">
+                  {(['ALL','COMPLETED','CANCELLED'] as const).map(f => (
+                    <button
+                      key={f}
+                      type="button"
+                      role="tab"
+                      aria-selected={historyFilter===f}
+                      className={`ui-segmented__item${historyFilter===f ? ' is-active' : ''}`}
+                      onClick={() => setHistoryFilter(f)}
+                    >
+                      {f === 'ALL' ? 'All' : f === 'COMPLETED' ? 'Completed' : 'Cancelled'}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
-            <div style={{ display:'flex', gap:'10px', marginBottom:'20px', flexWrap:'wrap' }}>
-              <input value={historySearch} onChange={e => setHistorySearch(e.target.value)}
-                placeholder="Search location or ID…"
-                style={{ flex:1, minWidth:'200px', padding:'10px 14px', border:`1px solid ${C.cardBorder}`,
-                  borderRadius:'8px', fontSize:'14px', outline:'none', background:'white', color: C.textPrimary,
-                  transition:'all 0.2s', fontFamily:'inherit' }}
-                onFocus={e => { e.target.style.borderColor = C.accent; e.target.style.boxShadow = `0 0 0 3px rgba(0,163,191,0.1)`; }}
-                onBlur={e => { e.target.style.borderColor = C.cardBorder; e.target.style.boxShadow = 'none'; }} />
-              {(['ALL','COMPLETED','CANCELLED'] as const).map(f => (
-                <button key={f} onClick={() => setHistoryFilter(f)} style={{
-                  padding:'10px 14px', borderRadius:'8px', border:'1px solid',
-                  borderColor: historyFilter===f ? C.accent : C.cardBorder,
-                  background: historyFilter===f ? C.accentSoft : 'white',
-                  color: historyFilter===f ? C.accent : C.textSecondary,
-                  fontWeight: historyFilter===f ? 600 : 500, fontSize:'13px', cursor:'pointer', transition:'all 0.2s',
-                }}>
-                  {f}
-                </button>
-              ))}
-            </div>
-
-            <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
-              {historyDispatches.length > 0 ? historyDispatches.map(d => (
-                <Card key={d.id} style={{ padding:'18px 20px' }}>
-                  <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:'12px' }}>
-                    <div>
-                      <div style={{ fontFamily:'monospace', fontSize:'12px', color: C.textMuted, marginBottom:'2px' }}>
-                        #{d.booking.id.slice(0,12).toUpperCase()}
+              {historyDispatches.length > 0 ? (
+                <div className="ui-stack drv-history">
+                  {historyDispatches.map((d, i) => (
+                    <article key={d.id} className="ui-card drv-history__item ui-enter" style={{ ['--i' as string]: Math.min(i, 8) }}>
+                      <div className="drv-history__head">
+                        <div style={{ minWidth: 0 }}>
+                          <div className="drv-history__ref ui-mono">#{d.booking.id.slice(0,12).toUpperCase()}</div>
+                          <div className="drv-history__patient">{d.booking.patientName||'Patient'}</div>
+                        </div>
+                        <div className="ui-row" style={{ justifyContent: 'flex-end' }}>
+                          {d.booking.severity && <SeverityBadge severity={d.booking.severity} emphasizeCritical={false} />}
+                          <StatusBadge status={d.status} />
+                        </div>
                       </div>
-                      <div style={{ fontSize:'15px', fontWeight:600, color: C.textPrimary }}>{d.booking.patientName||'Patient'}</div>
-                    </div>
-                    <div style={{ display:'flex', gap:'6px', flexWrap:'wrap', justifyContent:'flex-end' }}>
-                      {d.booking.severity && (
-                        <span style={{ padding:'3px 10px', borderRadius:'10px', fontSize:'11px', fontWeight:600,
-                          color:'white', background: sevColor(d.booking.severity), textTransform:'uppercase', letterSpacing:'0.5px' }}>
-                          {d.booking.severity}
-                        </span>
-                      )}
-                      <span style={{ padding:'3px 10px', borderRadius:'10px', fontSize:'11px', fontWeight:600, color:'white',
-                        background: d.status==='COMPLETED' ? C.green : C.red, textTransform:'uppercase', letterSpacing:'0.5px' }}>
-                        {statusLabel(d.status)}
-                      </span>
-                    </div>
-                  </div>
-                  <div style={{ display:'flex', gap:'8px', alignItems:'center', fontSize:'13px', color: C.textSecondary, marginBottom:'10px',
-                    padding:'10px 12px', background: C.pageBg, borderRadius:'8px' }}>
-                    <span>📍</span>
-                    <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{d.booking.pickupLocation}</span>
-                    <span>→</span>
-                    <span>🏥</span>
-                    <span style={{ flex:1, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{d.booking.selectedHospitalName||d.booking.dropoffLocation}</span>
-                  </div>
-                  <div style={{ fontSize:'12px', color: C.textMuted }} title={formatIstFull(d.assignedAt)}>{formatIstDateTime(d.assignedAt)}</div>
-                </Card>
-              )) : (
-                <Card style={{ padding:'48px 24px', textAlign:'center' }}>
-                  <div style={{ fontSize:'40px', marginBottom:'12px' }}>📋</div>
-                  <div style={{ fontSize:'16px', fontWeight:600, color: C.textSecondary, marginBottom:'6px' }}>No History Found</div>
-                  <div style={{ fontSize:'13px', color: C.textMuted }}>Completed dispatches will appear here.</div>
-                </Card>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Profile */}
-        {activeTab==='profile' && (
-          <div style={{ maxWidth:'560px', margin:'0 auto' }}>
-            <h1 style={{ fontSize:'28px', fontWeight:700, color: C.textPrimary, margin:'0 0 24px' }}>My Profile</h1>
-
-            {/* How patients and the receiving hospital see you on their tracking / pre-arrival screens. */}
-            <Card style={{ padding:'20px', marginBottom:'16px', display:'flex', alignItems:'center', gap:'16px' }}>
-              {driverProfile?.photoUrl ? (
-                <img src={driverProfile.photoUrl} alt={driverProfile.name}
-                  onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
-                  style={{ width:'64px', height:'64px', borderRadius:'50%', objectFit:'cover',
-                    border:`2px solid ${C.accent}`, flexShrink:0, background: C.input }} />
+                      <div className="drv-history__route">
+                        <span className="drv-history__stop"><Icon name="mapPin" size={15} /><span className="ui-truncate">{d.booking.pickupLocation}</span></span>
+                        <Icon name="arrowRight" size={15} className="drv-history__arrow" />
+                        <span className="drv-history__stop"><Icon name="hospital" size={15} /><span className="ui-truncate">{d.booking.selectedHospitalName||d.booking.dropoffLocation}</span></span>
+                      </div>
+                      <div className="drv-history__time" title={formatIstFull(d.assignedAt)}>
+                        <Icon name="clock" size={13} />
+                        {formatIstDateTime(d.assignedAt)}
+                      </div>
+                    </article>
+                  ))}
+                </div>
               ) : (
-                <div style={{ width:'64px', height:'64px', borderRadius:'50%', flexShrink:0,
-                  background: C.accentSoft, color: C.accent, border:`2px solid ${C.accent}`,
-                  display:'flex', alignItems:'center', justifyContent:'center', fontSize:'20px', fontWeight:700 }}>
-                  {(driverProfile?.name || '?').split(/\s+/).filter(Boolean).slice(0,2).map(w => w[0]?.toUpperCase()).join('')}
+                <div className="ui-card">
+                  <EmptyState icon="clipboardList" title="No history found">
+                    {historySearch || historyFilter !== 'ALL' ? 'Try a different search or filter.' : 'Completed dispatches will appear here.'}
+                  </EmptyState>
                 </div>
               )}
-              <div style={{ minWidth:0 }}>
-                <FieldLabel>Identity shown to patients &amp; hospitals</FieldLabel>
-                <div style={{ fontSize:'18px', fontWeight:700, color: C.textPrimary }}>{driverProfile?.name}</div>
-                <div style={{ fontSize:'13px', color: C.textSecondary, marginTop:'2px' }}>
-                  {driverProfile?.ambulance?.vehicleNumber || 'No vehicle assigned'}
-                  {!driverProfile?.photoUrl && ' · Add a Photo URL below to show your photo'}
-                </div>
-              </div>
-            </Card>
+            </>
+          )}
 
-            {driverProfile?.ambulance && (
-              <Card style={{ padding:'20px', marginBottom:'16px', background: C.accentSoft, borderColor: C.accent }}>
-                <FieldLabel>Assigned Vehicle</FieldLabel>
-                <div style={{ fontSize:'20px', fontWeight:700, color: C.textPrimary, marginBottom:'2px' }}>{driverProfile.ambulance.vehicleNumber}</div>
-                <div style={{ fontSize:'13px', color: C.textSecondary }}>{driverProfile.ambulance.type} · Status: {driverProfile.ambulance.status}</div>
-              </Card>
-            )}
-
-            <Card>
-              <div style={{ padding:'16px 20px', borderBottom:`1px solid ${C.cardBorder}`, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
-                <span style={{ fontSize:'16px', fontWeight:600, color: C.textPrimary }}>Personal Information</span>
-                {!editingProfile ? (
-                  <button onClick={() => setEditingProfile(true)} style={{ padding:'7px 16px', background: C.accentSoft, color: C.accent,
-                    border:`1px solid ${C.accent}`, borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
-                    Edit Profile
-                  </button>
-                ) : (
-                  <div style={{ display:'flex', gap:'8px' }}>
-                    <button onClick={() => setEditingProfile(false)} style={{ padding:'7px 14px', background:'white', color: C.textSecondary,
-                      border:`1px solid ${C.cardBorder}`, borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>Cancel</button>
-                    <button onClick={handleUpdateProfile} style={{ padding:'7px 14px', background: C.green, color:'white',
-                      border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>Save Changes</button>
+          {/* Profile */}
+          {activeTab==='profile' && (
+            <div className="ui-stack">
+              {/* How patients and the receiving hospital see you on their tracking / pre-arrival screens. */}
+              <section className="ui-card ui-enter drv-identity">
+                <span className="ui-avatar ui-avatar--lg drv-identity__avatar">
+                  {driverProfile?.photoUrl ? (
+                    <img src={driverProfile.photoUrl} alt={driverProfile.name}
+                      onError={e => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
+                  ) : initialsOf(driverProfile?.name)}
+                </span>
+                <div style={{ minWidth: 0 }}>
+                  <div className="ui-eyebrow">Identity shown to patients &amp; hospitals</div>
+                  <div className="drv-identity__name">{driverProfile?.name}</div>
+                  <div className="ui-help">
+                    {driverProfile?.ambulance?.vehicleNumber || 'No vehicle assigned'}
+                    {!driverProfile?.photoUrl && ' · Add a Photo URL below to show your photo'}
                   </div>
-                )}
-              </div>
+                </div>
+              </section>
 
-              <div style={{ padding:'20px', display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))', gap:'16px' }}>
-                {!editingProfile ? (
-                  [['Name', driverProfile?.name],['Email', driverProfile?.email],
-                   ['Phone', driverProfile?.phoneNumber],['License', driverProfile?.licenseNumber],
-                   ['Address', driverProfile?.address||'Not set']].map(([label, val]) => (
-                    <div key={label as string} style={{ padding:'14px', background: C.pageBg, borderRadius:'8px' }}>
-                      <FieldLabel>{label}</FieldLabel>
-                      <div style={{ fontSize:'15px', color: C.textPrimary, fontWeight:500 }}>{val}</div>
-                    </div>
-                  ))
-                ) : (
-                  [['First Name','firstName'],['Last Name','lastName'],['Phone','phoneNumber'],['Address','address'],['Photo URL','profilePhotoUrl']].map(([label, key]) => (
-                    <div key={key}>
-                      <label style={{ display:'block', fontSize:'13px', fontWeight:600, color: C.textPrimary, marginBottom:'6px' }}>{label}</label>
-                      <input value={(profileForm as any)[key]} onChange={e => setProfileForm(p => ({...p,[key]:e.target.value}))}
-                        style={{ width:'100%', padding:'11px 12px', border:`1px solid ${C.cardBorder}`, borderRadius:'8px',
-                          fontSize:'14px', outline:'none', fontFamily:'inherit', color: C.textPrimary, background:'white', transition:'all 0.2s' }}
-                        onFocus={e => { e.target.style.borderColor = C.accent; e.target.style.boxShadow = `0 0 0 3px rgba(0,163,191,0.1)`; }}
-                        onBlur={e => { e.target.style.borderColor = C.cardBorder; e.target.style.boxShadow='none'; }} />
-                    </div>
-                  ))
-                )}
-              </div>
-            </Card>
-          </div>
-        )}
+              {driverProfile?.ambulance && (
+                <section className="ui-card ui-enter drv-assigned" style={{ ['--i' as string]: 1 }}>
+                  <span className="ui-icon-tile"><Icon name="ambulance" size={22} /></span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="ui-eyebrow">Assigned vehicle</div>
+                    <div className="drv-assigned__plate ui-mono">{driverProfile.ambulance.vehicleNumber}</div>
+                  </div>
+                  <div className="ui-row">
+                    <span className="ui-badge tone-neutral">{driverProfile.ambulance.type}</span>
+                    <StatusBadge status={driverProfile.ambulance.status} />
+                  </div>
+                </section>
+              )}
 
-      </main>
+              <section className="ui-card ui-enter" style={{ ['--i' as string]: 2 }} aria-labelledby="personal-title">
+                <div className="ui-card__header">
+                  <h2 id="personal-title" className="ui-card__title"><Icon name="idCard" size={17} />Personal information</h2>
+                  {!editingProfile ? (
+                    <button type="button" onClick={() => setEditingProfile(true)} className="ui-btn ui-btn--secondary ui-btn--sm">
+                      <Icon name="pencil" size={14} />
+                      Edit profile
+                    </button>
+                  ) : (
+                    <div className="ui-row">
+                      <button type="button" onClick={() => setEditingProfile(false)} className="ui-btn ui-btn--ghost ui-btn--sm">Cancel</button>
+                      <button type="button" onClick={handleUpdateProfile} className="ui-btn ui-btn--success ui-btn--sm">
+                        <Icon name="save" size={14} />
+                        Save changes
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="ui-card__body">
+                  {!editingProfile ? (
+                    <dl className="ui-dl">
+                      {([['Name', driverProfile?.name],['Email', driverProfile?.email],
+                         ['Phone', driverProfile?.phoneNumber],['License', driverProfile?.licenseNumber],
+                         ['Address', driverProfile?.address||'Not set']] as [string, string | undefined][]).map(([label, val]) => (
+                        <div key={label} className={`ui-dl__item${label === 'Address' ? ' ui-dl__item--wide' : ''}`}>
+                          <dt>{label}</dt>
+                          <dd className={!val || val === 'Not set' || val === 'N/A' ? 'is-empty' : undefined}>{val || '—'}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    <div className="ui-form-grid">
+                      {[['First Name','firstName'],['Last Name','lastName'],['Phone','phoneNumber'],['Address','address'],['Photo URL','profilePhotoUrl']].map(([label, key]) => (
+                        <div key={key} className={`ui-field${key === 'address' || key === 'profilePhotoUrl' ? ' is-wide' : ''}`}>
+                          <label className="ui-label" htmlFor={`profile-${key}`}>{label}</label>
+                          <input
+                            id={`profile-${key}`}
+                            className="ui-input"
+                            value={(profileForm as any)[key]}
+                            onChange={e => setProfileForm(p => ({...p,[key]:e.target.value}))}
+                            type={key === 'phoneNumber' ? 'tel' : key === 'profilePhotoUrl' ? 'url' : 'text'}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
 }

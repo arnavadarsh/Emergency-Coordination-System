@@ -1,8 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import MedicalProfilePanel from './MedicalProfilePanel';
-import { normalizeMedicalProfile } from '../types/medicalProfile';
-import { formatIstFull } from '../utils/datetime';
+import MedicalProfilePanel from '@shared/components/MedicalProfilePanel';
+import { normalizeMedicalProfile } from '@shared/types/medicalProfile';
+import { formatIstFull } from '@shared/utils/datetime';
+import { Icon, type IconName } from '@shared/components/ui/Icon';
+import { Modal } from '@shared/components/ui/Modal';
+import { SeverityBadge, StatusBadge } from '@shared/components/ui/Status';
 
 /**
  * ECS case report for a single booking.
@@ -20,16 +23,6 @@ interface CaseReportModalProps {
   onClose: () => void;
 }
 
-const C = {
-  text: '#172b4d',
-  sub: '#6b778c',
-  muted: '#97a0af',
-  border: '#e0e0e0',
-  accent: '#0066cc',
-  surface: '#ffffff',
-  rowBg: '#f8f9fa',
-};
-
 const NOT_RECORDED = 'Not recorded';
 
 const fmtDate = (value?: string | null) => (value ? formatIstFull(value) : NOT_RECORDED);
@@ -38,52 +31,22 @@ const fmtText = (value?: string | number | null) =>
 const fmtBool = (value?: boolean | null) =>
   value === null || value === undefined ? NOT_RECORDED : value ? 'Yes' : 'No';
 
-const Section: React.FC<{ title: string; children: React.ReactNode }> = ({ title, children }) => (
-  <section style={{ marginBottom: '22px' }}>
-    <h4
-      style={{
-        margin: '0 0 12px',
-        fontSize: '13px',
-        fontWeight: 800,
-        color: C.text,
-        textTransform: 'uppercase',
-        letterSpacing: '0.7px',
-        paddingBottom: '8px',
-        borderBottom: `2px solid ${C.border}`,
-      }}
-    >
+const Section: React.FC<{ title: string; icon: IconName; children: React.ReactNode }> = ({ title, icon, children }) => (
+  <section className="ui-report__section">
+    <h3 className="ui-report__heading">
+      <Icon name={icon} size={16} />
       {title}
-    </h4>
+    </h3>
     {children}
   </section>
 );
 
 const Rows: React.FC<{ items: [string, string][] }> = ({ items }) => (
-  <dl
-    style={{
-      display: 'grid',
-      gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-      gap: '10px',
-      margin: 0,
-    }}
-  >
+  <dl className="ui-dl">
     {items.map(([label, value]) => (
-      <div key={label} style={{ background: C.rowBg, border: `1px solid ${C.border}`, borderRadius: '8px', padding: '10px 12px' }}>
-        <dt style={{ fontSize: '10.5px', fontWeight: 700, color: C.sub, textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px' }}>
-          {label}
-        </dt>
-        <dd
-          style={{
-            margin: 0,
-            fontSize: '14px',
-            color: value === NOT_RECORDED ? C.muted : C.text,
-            fontStyle: value === NOT_RECORDED ? 'italic' : 'normal',
-            fontWeight: value === NOT_RECORDED ? 500 : 600,
-            wordBreak: 'break-word',
-          }}
-        >
-          {value}
-        </dd>
+      <div key={label} className="ui-dl__item">
+        <dt>{label}</dt>
+        <dd className={value === NOT_RECORDED ? 'is-empty' : undefined}>{value}</dd>
       </div>
     ))}
   </dl>
@@ -108,64 +71,42 @@ const CaseReportModal: React.FC<CaseReportModalProps> = ({ bookingId, apiBaseUrl
     return () => { cancelled = true; };
   }, [apiBaseUrl, bookingId, token]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
-
   return (
-    <div
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="ECS case report"
-      style={{
-        position: 'fixed',
-        inset: 0,
-        background: 'rgba(9, 30, 66, 0.55)',
-        display: 'flex',
-        alignItems: 'flex-start',
-        justifyContent: 'center',
-        padding: '32px 16px',
-        overflowY: 'auto',
-        zIndex: 1000,
-      }}
-    >
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{
-          background: C.surface,
-          borderRadius: '12px',
-          width: '100%',
-          maxWidth: '860px',
-          padding: '28px',
-          boxShadow: '0 12px 40px rgba(9, 30, 66, 0.3)',
-        }}
-      >
-        <header style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px', marginBottom: '24px' }}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: '20px', color: C.text }}>ECS Case Report</h2>
-            <p style={{ margin: '4px 0 0', fontSize: '13px', color: C.sub }}>
-              {report ? `${report.reportId} · generated ${formatIstFull(report.generatedAt)}` : `Booking ${bookingId.slice(0, 8).toUpperCase()}`}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            aria-label="Close report"
-            style={{ background: 'none', border: 'none', fontSize: '22px', cursor: 'pointer', color: C.sub, lineHeight: 1 }}
-          >
-            ✕
-          </button>
-        </header>
+    <Modal onClose={onClose} labelledBy="case-report-title" size="lg" align="top" className="ui-modal--auto-height ui-report">
+      <div className="ui-modal__header">
+        <span className="ui-icon-tile"><Icon name="fileText" size={22} /></span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h2 id="case-report-title" className="ui-modal__title">ECS Case Report</h2>
+          <p className="ui-modal__subtitle">
+            {report ? `${report.reportId} · generated ${formatIstFull(report.generatedAt)}` : `Booking ${bookingId.slice(0, 8).toUpperCase()}`}
+          </p>
+          {report?.emergency && (
+            <div className="ui-row" style={{ marginTop: 8 }}>
+              {report.emergency.severity && <SeverityBadge severity={report.emergency.severity} />}
+              {report.emergency.status && <StatusBadge status={report.emergency.status} />}
+              {report.emergency.bookingType && <StatusBadge status={report.emergency.bookingType} />}
+            </div>
+          )}
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close report" className="ui-btn ui-btn--ghost ui-btn--icon ui-modal__close">
+          <Icon name="x" />
+        </button>
+      </div>
 
+      <div className="ui-modal__body">
         {error ? (
-          <div style={{ padding: '24px', textAlign: 'center', color: '#c62828' }}>{error}</div>
+          <div className="ui-alert tone-danger" role="alert">
+            <Icon name="alertTriangle" size={17} />
+            <div>{error}</div>
+          </div>
         ) : !report ? (
-          <div style={{ padding: '40px', textAlign: 'center', color: C.sub }}>Loading case report…</div>
+          <div className="ui-report__loading" role="status">
+            {[0, 1, 2].map(i => <span key={i} className="ui-skeleton" style={{ height: 70 }} />)}
+            <span className="ui-sr-only">Loading case report…</span>
+          </div>
         ) : (
           <>
-            <Section title="Patient">
+            <Section title="Patient" icon="user">
               <Rows
                 items={[
                   ['Name', fmtText(report.patient?.name)],
@@ -179,7 +120,7 @@ const CaseReportModal: React.FC<CaseReportModalProps> = ({ bookingId, apiBaseUrl
             </Section>
 
             {/* Supporting patient information, alongside the triage record. */}
-            <Section title="Medical Profile">
+            <Section title="Medical Profile" icon="stethoscope">
               <MedicalProfilePanel
                 profile={normalizeMedicalProfile(report.medicalProfile)}
                 title={null}
@@ -188,7 +129,7 @@ const CaseReportModal: React.FC<CaseReportModalProps> = ({ bookingId, apiBaseUrl
               />
             </Section>
 
-            <Section title="Emergency">
+            <Section title="Emergency" icon="siren">
               <Rows
                 items={[
                   ['Booking ID', fmtText(report.emergency?.bookingId)],
@@ -204,7 +145,7 @@ const CaseReportModal: React.FC<CaseReportModalProps> = ({ bookingId, apiBaseUrl
               />
             </Section>
 
-            <Section title="Triage Information">
+            <Section title="Triage Information" icon="activity">
               {report.triage ? (
                 <Rows
                   items={[
@@ -218,13 +159,11 @@ const CaseReportModal: React.FC<CaseReportModalProps> = ({ bookingId, apiBaseUrl
                   ]}
                 />
               ) : (
-                <p style={{ margin: 0, fontSize: '14px', color: C.muted, fontStyle: 'italic' }}>
-                  No triage assessment was recorded for this case.
-                </p>
+                <p className="ui-report__none">No triage assessment was recorded for this case.</p>
               )}
             </Section>
 
-            <Section title="Dispatch &amp; Treatment">
+            <Section title="Dispatch & Treatment" icon="ambulance">
               {report.treatment ? (
                 <Rows
                   items={[
@@ -242,48 +181,23 @@ const CaseReportModal: React.FC<CaseReportModalProps> = ({ bookingId, apiBaseUrl
                   ]}
                 />
               ) : (
-                <p style={{ margin: 0, fontSize: '14px', color: C.muted, fontStyle: 'italic' }}>
-                  No ambulance has been dispatched for this case.
-                </p>
+                <p className="ui-report__none">No ambulance has been dispatched for this case.</p>
               )}
             </Section>
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', paddingTop: '16px', borderTop: `2px solid ${C.border}` }}>
-              <button
-                onClick={() => window.print()}
-                style={{
-                  padding: '10px 20px',
-                  background: C.accent,
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                }}
-              >
-                🖨 Print / Save as PDF
-              </button>
-              <button
-                onClick={onClose}
-                style={{
-                  padding: '10px 20px',
-                  background: '#f4f5f7',
-                  color: C.text,
-                  border: `2px solid ${C.border}`,
-                  borderRadius: '8px',
-                  cursor: 'pointer',
-                  fontSize: '14px',
-                  fontWeight: 600,
-                }}
-              >
-                Close
-              </button>
-            </div>
           </>
         )}
       </div>
-    </div>
+
+      {report && (
+        <div className="ui-modal__footer">
+          <button type="button" onClick={onClose} className="ui-btn ui-btn--secondary">Close</button>
+          <button type="button" onClick={() => window.print()} className="ui-btn ui-btn--primary">
+            <Icon name="printer" size={16} />
+            Print / Save as PDF
+          </button>
+        </div>
+      )}
+    </Modal>
   );
 };
 

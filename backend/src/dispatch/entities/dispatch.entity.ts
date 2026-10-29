@@ -23,6 +23,7 @@ import { nowDefault, timestampColumnType } from '../../common/column-types';
 @Index(['ambulanceId'])
 @Index(['hospitalId'])
 @Index(['status'])
+@Index('IDX_dispatches_driver_id', ['driverId'])
 export class Dispatch {
   @PrimaryGeneratedColumn('uuid')
   id: string;

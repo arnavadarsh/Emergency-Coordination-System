@@ -20,7 +20,10 @@
   "scripts": {
     "dev": "vite --port 3004",
     "build": "tsc && vite build",
-    "preview": "vite preview",
-    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "preview": "vite preview"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

@@ -41,6 +41,8 @@ RUN cd driver-dashboard && npm ci
 COPY hospital-dashboard/package*.json ./hospital-dashboard/
 RUN cd hospital-dashboard && npm ci
 
+# Code and styles every dashboard imports as @shared/... (see web/shared).
+COPY shared ./shared
 COPY user-dashboard ./user-dashboard
 COPY admin-dashboard ./admin-dashboard
 COPY driver-dashboard ./driver-dashboard

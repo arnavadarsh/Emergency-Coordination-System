@@ -1,4 +1,12 @@
-import { Injectable, Logger, UnauthorizedException, ConflictException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  UnauthorizedException,
+  ConflictException,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { UsersService } from '../users/users.service';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -6,7 +14,9 @@ import { Repository } from 'typeorm';
 import { Hospital } from '../hospitals/entities/hospital.entity';
 import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { UserRole, AmbulanceStatus } from '../common/enums';
-import { LoginDto, RegisterDto } from './dto';
+import { AuditService } from '../audit/audit.service';
+import { SystemSettingsService } from '../settings/system-settings.service';
+import { LoginDto, RegisterDto, CreateAccountDto } from './dto';
 import * as bcrypt from 'bcrypt';
 
 /**
@@ -37,6 +47,8 @@ export class AuthService {
     private readonly hospitalRepository: Repository<Hospital>,
     @InjectRepository(Ambulance)
     private readonly ambulanceRepository: Repository<Ambulance>,
+    private readonly auditService: AuditService,
+    private readonly settings: SystemSettingsService,
   ) {}
 
   /** Hash a plain password for storage. */
@@ -90,10 +102,16 @@ export class AuthService {
   }
 
   /**
-   * Registers a new user
+   * Public sign-up. Always creates a patient (USER) account, whatever the
+   * request says — the DTO already refuses other roles, and this does not pass
+   * one through, so no future DTO change can reopen it.
    * Basic implementation - no email verification or OAuth
    */
   async register(registerDto: RegisterDto) {
+    if (!this.settings.get('patientSignupEnabled')) {
+      throw new ForbiddenException('Sign-up is closed right now. Please contact the service administrator.');
+    }
+
     // Check if user already exists
     const existingUser = await this.usersService.findByEmail(registerDto.email);
     if (existingUser) {
@@ -103,7 +121,7 @@ export class AuthService {
     const user = await this.usersService.create({
       email: registerDto.email,
       password: await AuthService.hashPassword(registerDto.password),
-      role: registerDto.role,
+      role: UserRole.USER,
       profile: {
         firstName: registerDto.firstName,
         lastName: registerDto.lastName,
@@ -116,10 +134,6 @@ export class AuthService {
         medicalProfile: registerDto.medicalProfile,
       },
     });
-
-    // A hospital or driver account is not usable until it points at the
-    // facility or vehicle it belongs to.
-    await this.linkRoleRecords(user.id, registerDto);
 
     // Generate JWT token
     const payload = { sub: user.id, email: user.email, role: user.role };
@@ -136,50 +150,86 @@ export class AuthService {
   }
 
   /**
-   * Give a hospital or driver account the records it needs.
+   * Create an account with any role. Admin-only — the controller enforces it,
+   * and this is the one path that can mint HOSPITAL, DRIVER or ADMIN logins.
    *
-   * Failures here are logged and swallowed: the account itself was created
-   * successfully, and refusing the whole registration because a vehicle number
-   * was already taken would be worse than an account an admin can finish
-   * linking later.
+   * The hospital or ambulance is resolved before the user is written, so a bad
+   * hospital id fails the whole request instead of leaving an unusable login.
    */
-  private async linkRoleRecords(userId: string, dto: RegisterDto): Promise<void> {
-    try {
-      if (dto.role === UserRole.HOSPITAL) {
-        const hospitalId = await this.resolveHospital(dto);
-        if (hospitalId) await this.usersService.linkRoleRecords(userId, { hospitalId });
-        return;
-      }
-
-      if (dto.role === UserRole.DRIVER) {
-        const ambulanceId = await this.resolveAmbulance(dto);
-        await this.usersService.linkRoleRecords(userId, {
-          ambulanceId,
-          licenseNumber: dto.licenseNumber,
-        });
-      }
-    } catch (error: any) {
-      this.logger.error(
-        `Registered ${dto.email} but could not link its ${dto.role} records: ${error?.message ?? error}`,
-      );
+  async createAccount(dto: CreateAccountDto, actorId?: string) {
+    const existingUser = await this.usersService.findByEmail(dto.email);
+    if (existingUser) {
+      throw new ConflictException('User with this email already exists');
     }
+
+    let hospitalId: string | undefined;
+    let ambulanceId: string | undefined;
+    if (dto.role === UserRole.HOSPITAL) {
+      hospitalId = await this.resolveHospital(dto);
+    } else if (dto.role === UserRole.DRIVER) {
+      ambulanceId = await this.resolveAmbulance(dto);
+    }
+
+    const user = await this.usersService.create({
+      email: dto.email,
+      password: await AuthService.hashPassword(dto.password),
+      role: dto.role,
+      profile: {
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        phoneNumber: dto.phoneNumber,
+        address: dto.role === UserRole.HOSPITAL ? undefined : dto.address,
+      },
+    });
+    await this.usersService.linkRoleRecords(user.id, {
+      hospitalId,
+      ambulanceId,
+      licenseNumber: dto.role === UserRole.DRIVER ? dto.licenseNumber : undefined,
+    });
+
+    await this.auditService
+      .log({
+        entityType: 'User',
+        entityId: user.id,
+        action: 'ACCOUNT_CREATED',
+        userId: actorId,
+        afterState: { email: user.email, role: user.role, hospitalId: hospitalId ?? null, ambulanceId: ambulanceId ?? null },
+      })
+      .catch(error => this.logger.warn(`Could not audit account creation for ${user.email}: ${error?.message ?? error}`));
+
+    this.logger.log(`Admin ${actorId ?? 'bootstrap'} created ${user.role} account ${user.email}`);
+    return {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      hospitalId: hospitalId ?? null,
+      ambulanceId: ambulanceId ?? null,
+    };
   }
 
   /**
-   * The hospital this login administers: an existing one matched by name or by
-   * the account's own email, otherwise a new record from what the form supplied.
+   * The hospital a new hospital login administers: the one picked by id, an
+   * existing one with the same name, or a new record from the details given.
    */
-  private async resolveHospital(dto: RegisterDto): Promise<string | null> {
+  private async resolveHospital(dto: CreateAccountDto): Promise<string> {
+    if (dto.hospitalId) {
+      const hospital = await this.hospitalRepository.findOne({ where: { id: dto.hospitalId } });
+      if (!hospital) throw new NotFoundException('That hospital does not exist');
+      return hospital.id;
+    }
+
     const name = dto.hospitalName?.trim();
+    if (!name) {
+      throw new BadRequestException('A hospital account needs a hospitalId or a hospitalName');
+    }
 
     const existing = await this.hospitalRepository
       .createQueryBuilder('hospital')
-      .where('LOWER(hospital.name) = LOWER(:name)', { name: name ?? '' })
-      .orWhere('LOWER(hospital.email) = LOWER(:email)', { email: dto.email })
+      .where('LOWER(hospital.name) = LOWER(:name)', { name })
       .getOne();
-
     if (existing) return existing.id;
-    if (!name) return null;
 
     const created = await this.hospitalRepository.save(
       this.hospitalRepository.create({
@@ -203,7 +253,7 @@ export class AuthService {
    * state the ambulance registration endpoint uses — an admin verifies it
    * before it can be dispatched.
    */
-  private async resolveAmbulance(dto: RegisterDto): Promise<string | undefined> {
+  private async resolveAmbulance(dto: CreateAccountDto): Promise<string | undefined> {
     const vehicleNumber = dto.vehicleNumber?.trim();
     if (!vehicleNumber) return undefined;
 

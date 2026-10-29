@@ -2,6 +2,10 @@ import { useState, useEffect } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import { API_BASE_URL } from '../config/api';
+import { Icon, type IconName } from '@shared/components/ui/Icon';
+import { Badge } from '@shared/components/ui/Status';
+import { EmptyState } from '@shared/components/ui/primitives';
+import { Modal } from '@shared/components/ui/Modal';
 
 
 interface SavedLocation {
@@ -90,10 +94,10 @@ export function SavedLocationsTab({ token }: SavedLocationsTabProps) {
             console.error('Error deleting location:', error);
             toast.error('Failed to delete location');
           }
-        }} style={{ padding:'4px 10px', background:'#de350b', color:'white', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+        }} className="ui-btn ui-btn--danger ui-btn--sm">
           Delete
         </button>
-        <button onClick={() => toast.dismiss(t.id)} style={{ padding:'4px 10px', background:'#f4f5f7', color:'#172b4d', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+        <button onClick={() => toast.dismiss(t.id)} className="ui-btn ui-btn--secondary ui-btn--sm">
           Keep
         </button>
       </span>
@@ -134,211 +138,194 @@ export function SavedLocationsTab({ token }: SavedLocationsTabProps) {
     setEditingLocation(location);
   };
 
-  const getLocationIcon = (label: string) => {
+  const getLocationIcon = (label: string): IconName => {
     const lower = label.toLowerCase();
-    if (lower.includes('home')) return '🏠';
-    if (lower.includes('work') || lower.includes('office')) return '🏢';
-    if (lower.includes('hospital')) return '🏥';
-    if (lower.includes('school')) return '🏫';
-    return '📍';
+    if (lower.includes('home')) return 'home';
+    if (lower.includes('work') || lower.includes('office')) return 'briefcase';
+    if (lower.includes('hospital')) return 'hospital';
+    if (lower.includes('school')) return 'building';
+    return 'mapPin';
+  };
+
+  const closeForm = () => {
+    if (editingLocation) {
+      setEditingLocation(null);
+    } else {
+      setShowAddModal(false);
+    }
+    resetForm();
   };
 
   if (loading) {
     return (
-      <div className="flex justify-center items-center py-12">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-red-600"></div>
+      <div className="usr-locations__grid" aria-busy="true" aria-label="Loading saved locations">
+        {[0, 1, 2].map(i => <span key={i} className="ui-skeleton" style={{ height: 168, borderRadius: 14 }} />)}
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="ui-stack usr-locations">
       {/* Header */}
-      <div className="flex justify-between items-center">
+      <div className="ui-page-header" style={{ marginBottom: 0 }}>
         <div>
-          <h2 className="text-2xl font-bold text-gray-900">Saved Locations</h2>
-          <p className="text-gray-600 mt-1">Manage your frequently used locations for quick booking</p>
+          <h2 className="ui-page-header__title">Saved Locations</h2>
+          <p className="ui-page-header__text">Manage your frequently used locations for quick booking</p>
         </div>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="bg-gradient-to-r from-red-600 to-red-700 text-white px-6 py-3 rounded-lg hover:from-red-700 hover:to-red-800 transition-all shadow-lg hover:shadow-xl"
-        >
-          + Add Location
+        <button type="button" onClick={() => setShowAddModal(true)} className="ui-btn ui-btn--primary">
+          <Icon name="plus" size={16} />
+          Add Location
         </button>
       </div>
 
       {/* Locations Grid */}
       {locations.length === 0 ? (
-        <div className="text-center py-16 bg-gray-50 rounded-lg">
-          <div className="text-6xl mb-4">📍</div>
-          <h3 className="text-xl font-semibold text-gray-700 mb-2">No Saved Locations</h3>
-          <p className="text-gray-500 mb-6">Add your frequently used locations for faster emergency booking</p>
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="bg-red-600 text-white px-6 py-2 rounded-lg hover:bg-red-700"
-          >
-            Add Your First Location
-          </button>
-        </div>
+        <EmptyState
+          icon="mapPin"
+          title="No Saved Locations"
+          dashed
+          actions={
+            <button type="button" onClick={() => setShowAddModal(true)} className="ui-btn ui-btn--primary">
+              <Icon name="plus" size={16} />
+              Add Your First Location
+            </button>
+          }
+        >
+          Add your frequently used locations for faster emergency booking
+        </EmptyState>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {locations.map((location) => (
-            <div
-              key={location.id}
-              className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-lg transition-shadow"
-            >
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center space-x-3">
-                  <span className="text-3xl">{getLocationIcon(location.label)}</span>
-                  <div>
-                    <h3 className="font-semibold text-lg text-gray-900">{location.label}</h3>
-                    {location.isDefault && (
-                      <span className="inline-block bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full">
-                        ⭐ Default
-                      </span>
-                    )}
-                  </div>
-                </div>
+        <div className="usr-locations__grid">
+          {locations.map((location, i) => (
+            <article key={location.id} className={`ui-card usr-location-card ui-enter${location.isDefault ? ' is-default' : ''}`} style={{ ['--i' as string]: i }}>
+              <div className="usr-location-card__head">
+                <span className="ui-icon-tile ui-icon-tile--sm"><Icon name={getLocationIcon(location.label)} size={18} /></span>
+                <h3 className="usr-location-card__label">{location.label}</h3>
+                {location.isDefault && <Badge tone="success" icon="star">Default</Badge>}
               </div>
 
-              <p className="text-gray-600 text-sm mb-3 line-clamp-2">{location.address}</p>
+              <p className="usr-location-card__address">{location.address}</p>
 
-              <div className="text-xs text-gray-400 mb-4">
-                📍 {location.latitude.toFixed(4)}, {location.longitude.toFixed(4)}
+              <div className="usr-location-card__coords ui-mono">
+                <Icon name="locate" size={13} />
+                {location.latitude.toFixed(4)}, {location.longitude.toFixed(4)}
               </div>
 
-              <div className="flex space-x-2">
+              <div className="usr-location-card__actions">
                 {!location.isDefault && (
-                  <button
-                    onClick={() => handleSetDefault(location.id)}
-                    className="flex-1 bg-green-50 text-green-700 px-3 py-2 rounded text-sm hover:bg-green-100 transition"
-                  >
+                  <button type="button" onClick={() => handleSetDefault(location.id)} className="ui-btn ui-btn--ghost ui-btn--sm">
+                    <Icon name="star" size={14} />
                     Set Default
                   </button>
                 )}
-                <button
-                  onClick={() => openEditModal(location)}
-                  className="flex-1 bg-blue-50 text-blue-700 px-3 py-2 rounded text-sm hover:bg-blue-100 transition"
-                >
+                <button type="button" onClick={() => openEditModal(location)} className="ui-btn ui-btn--secondary ui-btn--sm">
+                  <Icon name="pencil" size={14} />
                   Edit
-                  </button>
-                <button
-                  onClick={() => handleDeleteLocation(location.id)}
-                  className="flex-1 bg-red-50 text-red-700 px-3 py-2 rounded text-sm hover:bg-red-100 transition"
-                >
+                </button>
+                <button type="button" onClick={() => handleDeleteLocation(location.id)} className="ui-btn ui-btn--danger-soft ui-btn--sm" aria-label={`Delete ${location.label}`}>
+                  <Icon name="trash" size={14} />
                   Delete
                 </button>
               </div>
-            </div>
+            </article>
           ))}
         </div>
       )}
 
       {/* Add/Edit Modal */}
       {(showAddModal || editingLocation) && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-lg max-w-md w-full p-6">
-            <h3 className="text-xl font-bold mb-4">
-              {editingLocation ? 'Edit Location' : 'Add New Location'}
-            </h3>
+        <Modal onClose={closeForm} closeOnBackdrop={false} labelledBy="location-form-title">
+          <div className="ui-modal__header">
+            <span className="ui-icon-tile"><Icon name={editingLocation ? 'pencil' : 'mapPin'} size={20} /></span>
+            <div style={{ flex: 1 }}>
+              <h2 id="location-form-title" className="ui-modal__title">
+                {editingLocation ? 'Edit Location' : 'Add New Location'}
+              </h2>
+              <p className="ui-modal__subtitle">Saved places can be picked as a pickup point when you book.</p>
+            </div>
+          </div>
 
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Label *
-                </label>
+          <div className="ui-modal__body">
+            <div className="ui-form-grid">
+              <div className="ui-field is-wide">
+                <label className="ui-label" htmlFor="loc-label">Label <span className="ui-label__required" aria-hidden="true">*</span></label>
                 <input
+                  id="loc-label"
+                  className="ui-input"
                   type="text"
                   value={formData.label}
                   onChange={(e) => setFormData({ ...formData, label: e.target.value })}
                   placeholder="e.g., Home, Work, Mom's House"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-500 focus:border-transparent"
+                  data-autofocus
                 />
               </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Address *
-                </label>
+              <div className="ui-field is-wide">
+                <label className="ui-label" htmlFor="loc-address">Address <span className="ui-label__required" aria-hidden="true">*</span></label>
                 <textarea
+                  id="loc-address"
+                  className="ui-textarea"
                   value={formData.address}
                   onChange={(e) => setFormData({ ...formData, address: e.target.value })}
                   placeholder="Enter full address"
                   rows={3}
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-500 focus:border-transparent"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Latitude *
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={formData.latitude}
-                    onChange={(e) => setFormData({ ...formData, latitude: parseFloat(e.target.value) })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Longitude *
-                  </label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={formData.longitude}
-                    onChange={(e) => setFormData({ ...formData, longitude: parseFloat(e.target.value) })}
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                  />
-                </div>
+              <div className="ui-field">
+                <label className="ui-label" htmlFor="loc-lat">Latitude <span className="ui-label__required" aria-hidden="true">*</span></label>
+                <input
+                  id="loc-lat"
+                  className="ui-input ui-num"
+                  type="number"
+                  step="any"
+                  value={formData.latitude}
+                  onChange={(e) => setFormData({ ...formData, latitude: parseFloat(e.target.value) })}
+                />
+              </div>
+              <div className="ui-field">
+                <label className="ui-label" htmlFor="loc-lng">Longitude <span className="ui-label__required" aria-hidden="true">*</span></label>
+                <input
+                  id="loc-lng"
+                  className="ui-input ui-num"
+                  type="number"
+                  step="any"
+                  value={formData.longitude}
+                  onChange={(e) => setFormData({ ...formData, longitude: parseFloat(e.target.value) })}
+                />
               </div>
 
-              <div className="flex items-center space-x-2">
+              <label className="ui-check is-wide" htmlFor="isDefault">
                 <input
                   type="checkbox"
                   id="isDefault"
                   checked={formData.isDefault}
                   onChange={(e) => setFormData({ ...formData, isDefault: e.target.checked })}
-                  className="w-4 h-4 text-red-600 rounded focus:ring-red-500"
                 />
-                <label htmlFor="isDefault" className="text-sm text-gray-700">
-                  Set as default location
-                </label>
-              </div>
-            </div>
-
-            <div className="flex space-x-3 mt-6">
-              <button
-                onClick={() => {
-                  if (editingLocation) {
-                    setEditingLocation(null);
-                  } else {
-                    setShowAddModal(false);
-                  }
-                  resetForm();
-                }}
-                className="flex-1 bg-gray-100 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-200 transition"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  if (editingLocation) {
-                    handleUpdateLocation(editingLocation.id);
-                  } else {
-                    handleAddLocation();
-                  }
-                }}
-                className="flex-1 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition"
-              >
-                {editingLocation ? 'Update' : 'Add'} Location
-              </button>
+                Set as default location
+              </label>
             </div>
           </div>
-        </div>
+
+          <div className="ui-modal__footer">
+            <button type="button" onClick={closeForm} className="ui-btn ui-btn--secondary">
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (editingLocation) {
+                  handleUpdateLocation(editingLocation.id);
+                } else {
+                  handleAddLocation();
+                }
+              }}
+              className="ui-btn ui-btn--primary"
+            >
+              <Icon name="save" size={16} />
+              {editingLocation ? 'Update' : 'Add'} Location
+            </button>
+          </div>
+        </Modal>
       )}
     </div>
   );

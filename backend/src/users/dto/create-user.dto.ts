@@ -1,4 +1,4 @@
-import { IsEmail, IsString, IsOptional, MinLength, IsEnum, IsPhoneNumber, IsDateString } from 'class-validator';
+import { IsEmail, IsString, IsOptional, MinLength, IsEnum } from 'class-validator';
 import { UserRole } from '../../common/enums';
 
 /**

@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Hospital, HospitalCapability } from './entities';
 import { UpdateCapabilityDto } from './dto';
-import { BookingStatus, HospitalCapability as CapabilityType, HospitalStatus, SeverityLevel } from '../common/enums';
+import { HospitalCapability as CapabilityType, SeverityLevel, UserRole } from '../common/enums';
 import { Dispatch } from '../dispatch/entities/dispatch.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
@@ -200,13 +200,21 @@ export class HospitalsService implements OnModuleInit {
     };
   }
 
+  /**
+   * Reroute news goes to the people on that case — the patient, the ambulance,
+   * the hospital it is leaving and the one it is heading to — plus admins.
+   */
   private emitRerouteEvent(
     event: string,
     payload: any,
-    _oldHospitalId?: string,
-    _newHospitalId?: string,
+    oldHospitalId?: string,
+    newHospitalId?: string,
   ): void {
-    this.realtimeGateway.server.emit(event, payload);
+    this.realtimeGateway.emitToCase(
+      { patientId: payload?.userId, ambulanceId: payload?.ambulanceId, hospitalIds: [oldHospitalId, newHospitalId] },
+      event,
+      payload,
+    );
   }
 
   private async logReroute(data: {
@@ -334,15 +342,24 @@ export class HospitalsService implements OnModuleInit {
       this.emitRerouteEvent('dispatch_diverted', payload, closedHospital.id, reroute.hospital.id);
       this.emitRerouteEvent('hospital_reroute_completed', payload, closedHospital.id, reroute.hospital.id);
 
-      this.realtimeGateway.server.emit('dispatch_status_updated', {
-        dispatchId: dispatch.id,
-        bookingId: booking.id,
-        ambulanceId: dispatch.ambulanceId,
-        hospitalId: reroute.hospital.id,
-        hospitalName: reroute.hospital.name,
-        status: dispatch.status,
-        estimatedHospitalTime: dispatch.estimatedHospitalTime,
-      });
+      this.realtimeGateway.emitToCase(
+        {
+          patientId: booking.userId,
+          ambulanceId: dispatch.ambulanceId,
+          driverId: dispatch.driverId,
+          hospitalIds: [closedHospital.id, reroute.hospital.id],
+        },
+        'dispatch_status_updated',
+        {
+          dispatchId: dispatch.id,
+          bookingId: booking.id,
+          ambulanceId: dispatch.ambulanceId,
+          hospitalId: reroute.hospital.id,
+          hospitalName: reroute.hospital.name,
+          status: dispatch.status,
+          estimatedHospitalTime: dispatch.estimatedHospitalTime,
+        },
+      );
 
       // The newly assigned hospital gets the same driver identity as the original alert.
       const driver = await this.driverIdentityService.resolveOne({
@@ -468,7 +485,14 @@ export class HospitalsService implements OnModuleInit {
       booking.destinationLongitude = Number(alternative.longitude);
       await this.bookingRepository.save(booking);
 
-      this.realtimeGateway.server.emit('dispatch_diverted', {
+      const parties = {
+        patientId: booking.userId,
+        ambulanceId: dispatch.ambulanceId,
+        driverId: dispatch.driverId,
+        hospitalIds: [closedHospital.id, alternative.id],
+      };
+
+      this.realtimeGateway.emitToCase(parties, 'dispatch_diverted', {
         dispatchId: dispatch.id,
         bookingId: booking.id,
         userId: booking.userId,
@@ -487,7 +511,7 @@ export class HospitalsService implements OnModuleInit {
         message: `Destination changed from ${closedHospital.name} to ${alternative.name}`,
       });
 
-      this.realtimeGateway.server.emit('dispatch_status_updated', {
+      this.realtimeGateway.emitToCase(parties, 'dispatch_status_updated', {
         dispatchId: dispatch.id,
         bookingId: booking.id,
         ambulanceId: dispatch.ambulanceId,
@@ -612,7 +636,8 @@ export class HospitalsService implements OnModuleInit {
   }
 
   /**
-   * Broadcast a hospital's current diversion state and bed position.
+   * Send a hospital's current diversion state and bed position to admins and
+   * to the hospital's own dashboard.
    *
    * Feeds the admin Live Operations Map, which recolours the hospital and
    * updates its bed readout without waiting for the next poll.
@@ -623,7 +648,7 @@ export class HospitalsService implements OnModuleInit {
     const totalBeds = hospital.totalBeds ?? 0;
     const availableBeds = hospital.availableBeds ?? 0;
 
-    this.realtimeGateway.server.emit('hospital_status_updated', {
+    this.realtimeGateway.emitToCase({ hospitalIds: [hospital.id] }, 'hospital_status_updated', {
       id: hospital.id,
       name: hospital.name,
       status: hospital.status,
@@ -737,7 +762,8 @@ export class HospitalsService implements OnModuleInit {
     if (dispatch.hospitalId !== hospitalId) {
       throw new ForbiddenException('This dispatch is not assigned to this hospital');
     }
-    if (user?.hospitalId && user.hospitalId !== hospitalId) {
+    // A hospital account with no hospital linked used to slip past this check.
+    if (user?.role !== UserRole.ADMIN && user?.hospitalId !== hospitalId) {
       throw new ForbiddenException('You can only reject dispatches assigned to your hospital');
     }
 

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User, SavedLocation } from './entities';
@@ -257,6 +257,20 @@ export class UsersService {
   }
 
   /**
+   * Refuse a change that would leave the system with no active admin — nobody
+   * could then create staff accounts, change settings or undo the change.
+   */
+  async assertAdminRemains(user: User, next: { role?: UserRole | string; isActive?: boolean }): Promise<void> {
+    const staysAdmin = (next.role ?? user.role) === UserRole.ADMIN && (next.isActive ?? user.isActive);
+    if (user.role !== UserRole.ADMIN || !user.isActive || staysAdmin) return;
+
+    const activeAdmins = await this.userRepository.count({ where: { role: UserRole.ADMIN, isActive: true } });
+    if (activeAdmins <= 1) {
+      throw new ConflictException('This is the last active admin account. Make another admin first.');
+    }
+  }
+
+  /**
    * Update user active status
    */
   async updateActiveStatus(userId: string, isActive: boolean): Promise<User> {
@@ -264,6 +278,7 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('User not found');
     }
+    await this.assertAdminRemains(user, { isActive });
 
     await this.userRepository.update(userId, { isActive });
     const updatedUser = await this.findById(userId);
@@ -281,6 +296,7 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('User not found');
     }
+    await this.assertAdminRemains(user, { role });
 
     await this.userRepository.update(userId, { role });
     const updatedUser = await this.findById(userId);

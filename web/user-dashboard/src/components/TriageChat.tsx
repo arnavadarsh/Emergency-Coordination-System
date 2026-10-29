@@ -15,12 +15,12 @@ import {
   type Clarifier,
 } from '../services/nlpTriage';
 import { converse, type ConverseMessage } from '../services/triageApi';
-import MedicalProfilePanel from './MedicalProfilePanel';
+import MedicalProfilePanel from '@shared/components/MedicalProfilePanel';
 import {
   medicalProfileAlerts,
   normalizeMedicalProfile,
   type MedicalProfile,
-} from '../types/medicalProfile';
+} from '@shared/types/medicalProfile';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

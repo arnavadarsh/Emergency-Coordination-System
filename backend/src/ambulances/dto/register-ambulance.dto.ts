@@ -1,5 +1,5 @@
 import { IsString, IsEnum, IsOptional, IsNumber, IsObject } from 'class-validator';
-import { AmbulanceStatus } from '../../common/enums';
+import { AmbulanceType } from '../../common/enums';
 
 /**
  * DTO for registering a new ambulance
@@ -8,8 +8,8 @@ export class RegisterAmbulanceDto {
   @IsString()
   vehicleNumber: string;
 
-  @IsString()
-  vehicleType: string;
+  @IsEnum(AmbulanceType)
+  vehicleType: AmbulanceType;
 
   @IsOptional()
   @IsString()

@@ -1,10 +1,13 @@
 import { Injectable, Logger, NotFoundException, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Not } from 'typeorm';
+import { In, Repository } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Ambulance } from './entities';
 import { AmbulanceStatus } from '../common/enums';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { shouldSeedDemoData } from '../config/env';
+import { Dispatch } from '../dispatch/entities/dispatch.entity';
+import { ACTIVE_DISPATCH_STATUSES } from '../dispatch/dispatch-status';
 
 /**
  * Ambulances Service
@@ -17,31 +20,49 @@ export class AmbulancesService implements OnModuleInit {
   constructor(
     @InjectRepository(Ambulance)
     private ambulanceRepository: Repository<Ambulance>,
+    @InjectRepository(Dispatch)
+    private dispatchRepository: Repository<Dispatch>,
     private readonly realtimeGateway: RealtimeGateway,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /**
-   * Broadcast an ambulance's current position and state.
-   *
-   * The admin Live Operations Map listens for these so a unit moves on screen
-   * as its location is reported, instead of only on the next poll. Coordinates
-   * are cast to Number because the decimal columns come back from pg as
-   * strings, which would otherwise reach the client as "28.5463260".
+   * Send an ambulance's current position and state to whoever is watching it:
+   * admins (the Live Operations Map), and — while it is on a case — that case's
+   * patient and receiving hospital, so their maps move without polling. Nobody
+   * else learns where a unit is. Coordinates are cast to Number because the
+   * decimal columns come back from pg as strings, which would otherwise reach
+   * the client as "28.5463260".
    */
-  private emitAmbulanceUpdate(event: 'ambulance_location_updated' | 'ambulance_status_updated', ambulance: Ambulance): void {
+  private async emitAmbulanceUpdate(event: 'ambulance_location_updated' | 'ambulance_status_updated', ambulance: Ambulance): Promise<void> {
     const latitude = Number(ambulance.currentLatitude);
     const longitude = Number(ambulance.currentLongitude);
 
-    this.realtimeGateway.server.emit(event, {
-      id: ambulance.id,
-      vehicleNumber: ambulance.vehicleNumber,
-      vehicleType: ambulance.vehicleType,
-      status: ambulance.status,
-      latitude: Number.isFinite(latitude) ? latitude : null,
-      longitude: Number.isFinite(longitude) ? longitude : null,
-      lastLocationUpdate: ambulance.lastLocationUpdate?.toISOString() ?? null,
-      at: new Date().toISOString(),
+    const activeDispatch = await this.dispatchRepository.findOne({
+      where: { ambulanceId: ambulance.id, status: In(ACTIVE_DISPATCH_STATUSES) },
+      relations: ['booking'],
+      order: { createdAt: 'DESC' },
     });
+
+    this.realtimeGateway.emitToCase(
+      {
+        ambulanceId: ambulance.id,
+        patientId: activeDispatch?.booking?.userId,
+        hospitalIds: [activeDispatch?.hospitalId],
+      },
+      event,
+      {
+        id: ambulance.id,
+        bookingId: activeDispatch?.bookingId ?? null,
+        vehicleNumber: ambulance.vehicleNumber,
+        vehicleType: ambulance.vehicleType,
+        status: ambulance.status,
+        latitude: Number.isFinite(latitude) ? latitude : null,
+        longitude: Number.isFinite(longitude) ? longitude : null,
+        lastLocationUpdate: ambulance.lastLocationUpdate?.toISOString() ?? null,
+        at: new Date().toISOString(),
+      },
+    );
   }
 
   async onModuleInit(): Promise<void> {
@@ -130,7 +151,6 @@ export class AmbulancesService implements OnModuleInit {
 
   /**
    * Find all ambulances
-   * DB enum does not include PENDING in this deployment schema.
    */
   async findAll(): Promise<Ambulance[]> {
     return this.ambulanceRepository.find();
@@ -144,11 +164,15 @@ export class AmbulancesService implements OnModuleInit {
   }
 
   /**
-   * Find pending ambulances (for admin verification)
-   * PENDING is not present in current DB enum, so return empty list.
+   * Ambulances waiting for admin verification. This used to return an empty
+   * list unconditionally (the database enum lacked PENDING until migration
+   * 1780026000000), so the admin's Pending tab could never show anything.
    */
   async findPending(): Promise<Ambulance[]> {
-    return [];
+    return this.ambulanceRepository.find({
+      where: { status: AmbulanceStatus.PENDING },
+      order: { createdAt: 'ASC' },
+    });
   }
 
   /**
@@ -170,8 +194,8 @@ export class AmbulancesService implements OnModuleInit {
   }
 
   /**
-   * Create new ambulance.
-   * Use OFFLINE as initial state for compatibility with current DB enum.
+   * Register a new ambulance. It waits as PENDING until an admin verifies it,
+   * and is never dispatched before then.
    */
   async create(data: {
     vehicleNumber: string;
@@ -186,7 +210,7 @@ export class AmbulancesService implements OnModuleInit {
     const ambulance = this.ambulanceRepository.create({
       vehicleNumber: data.vehicleNumber,
       vehicleType: data.vehicleType,
-      status: AmbulanceStatus.OFFLINE,
+      status: AmbulanceStatus.PENDING,
       currentLatitude: data.currentLatitude,
       currentLongitude: data.currentLongitude,
       equipmentList: {
@@ -208,7 +232,9 @@ export class AmbulancesService implements OnModuleInit {
       throw new NotFoundException('Ambulance not found');
     }
     ambulance.status = AmbulanceStatus.AVAILABLE;
-    return this.ambulanceRepository.save(ambulance);
+    const saved = await this.ambulanceRepository.save(ambulance);
+    this.eventEmitter.emit('ambulance.available', saved.id);
+    return saved;
   }
 
   /**
@@ -233,7 +259,11 @@ export class AmbulancesService implements OnModuleInit {
 
     ambulance.status = status;
     const saved = await this.ambulanceRepository.save(ambulance);
-    this.emitAmbulanceUpdate('ambulance_status_updated', saved);
+    await this.emitAmbulanceUpdate('ambulance_status_updated', saved);
+    if (saved.status === AmbulanceStatus.AVAILABLE) {
+      // Lets the dispatch retry worker send this unit to a waiting booking now.
+      this.eventEmitter.emit('ambulance.available', saved.id);
+    }
     return saved;
   }
 
@@ -250,7 +280,7 @@ export class AmbulancesService implements OnModuleInit {
     ambulance.currentLongitude = longitude;
     ambulance.lastLocationUpdate = new Date();
     const saved = await this.ambulanceRepository.save(ambulance);
-    this.emitAmbulanceUpdate('ambulance_location_updated', saved);
+    await this.emitAmbulanceUpdate('ambulance_location_updated', saved);
     return saved;
   }
 

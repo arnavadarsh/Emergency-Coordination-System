@@ -1,7 +1,8 @@
-import { ClipboardEvent, FormEvent, useEffect, useRef, useState } from 'react';
+import { ClipboardEvent, CSSProperties, FormEvent, useEffect, useRef, useState } from 'react';
+import { Icon } from '@shared/components/ui/Icon';
 import type { ChatMessage, ChatThread, SenderRole, SendStatus } from '../hooks/useCaseChats';
 import { ACCEPTED_IMAGE_TYPES, resolveAttachmentUrl } from '../utils/chatImages';
-import { formatIstDayLabel, formatIstFull, formatIstTime, sameIstDay } from '../utils/datetime';
+import { formatIstDayLabel, formatIstFull, formatIstTime, sameIstDay } from '@shared/utils/datetime';
 
 interface CaseChatTheme {
   border: string;
@@ -31,22 +32,12 @@ interface CaseChatProps {
   theme?: Partial<CaseChatTheme>;
 }
 
-const DEFAULT_THEME: CaseChatTheme = {
-  border: '#E2E8F0',
-  surface: '#F8FAFC',
-  bubbleIn: '#FFFFFF',
-  muted: '#64748B',
-  accent: '#00A3BF',
-  disabled: '#CBD5E1',
-  shadow: '0 2px 8px rgba(15, 23, 42, 0.06)',
-};
-
 /** Sent / delivered ticks shown under our own bubbles. */
-function StatusTicks({ status, muted }: { status: SendStatus; muted: string }) {
-  if (status === 'sending') return <span style={{ color: muted }} title="Sending">◌</span>;
-  if (status === 'failed') return <span style={{ color: '#DE350B' }} title="Not sent">!</span>;
-  if (status === 'delivered') return <span title="Delivered">✓✓</span>;
-  return <span title="Sent">✓</span>;
+function StatusTicks({ status }: { status: SendStatus }) {
+  if (status === 'sending') return <span className="ui-chat__tick" title="Sending"><Icon name="clock" size={12} label="Sending" /></span>;
+  if (status === 'failed') return <span className="ui-chat__tick is-failed" title="Not sent"><Icon name="alertCircle" size={12} label="Not sent" /></span>;
+  if (status === 'delivered') return <span className="ui-chat__tick is-delivered" title="Delivered"><Icon name="checkCheck" size={13} label="Delivered" /></span>;
+  return <span className="ui-chat__tick" title="Sent"><Icon name="check" size={12} label="Sent" /></span>;
 }
 
 export default function CaseChat({
@@ -63,7 +54,8 @@ export default function CaseChat({
   active = true,
   theme: themeOverrides,
 }: CaseChatProps) {
-  const T = { ...DEFAULT_THEME, ...themeOverrides };
+  // Only the accent is themeable now; everything else follows the design system.
+  const accentStyle = (themeOverrides?.accent ? { '--chat-accent': themeOverrides.accent } : undefined) as CSSProperties | undefined;
   const messages: ChatMessage[] = thread?.messages ?? [];
   const unread = thread?.unread ?? 0;
   const peerOnline = thread?.peerOnline ?? false;
@@ -153,47 +145,29 @@ export default function CaseChat({
 
   const failedCount = messages.filter(m => m.status === 'failed').length;
 
+
   return (
-    <section style={{
-      background: 'white',
-      border: `1px solid ${T.border}`,
-      borderRadius: '12px',
-      overflow: 'hidden',
-      boxShadow: T.shadow,
-    }}>
-      <div style={{ padding: '12px 14px', borderBottom: `1px solid ${T.border}`, display: 'flex', justifyContent: 'space-between', gap: '12px' }}>
-        <div>
-          <div style={{ fontSize: '14px', fontWeight: 700, color: '#172B4D', display: 'flex', alignItems: 'center', gap: '8px' }}>
+    <section className="ui-card ui-chat" style={accentStyle} aria-label={title}>
+      <header className="ui-chat__header">
+        <div className="ui-chat__heading">
+          <div className="ui-chat__title">
+            <Icon name="messageCircle" size={17} />
             {title}
-            {unread > 0 && (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                minWidth: '18px', height: '18px', padding: '0 5px', borderRadius: '9999px',
-                background: '#DE350B', color: 'white', fontSize: '11px', fontWeight: 700,
-              }}>
-                {unread}
-              </span>
-            )}
+            {unread > 0 && <span className="ui-count ui-count--danger" aria-label={`${unread} unread`}>{unread}</span>}
           </div>
-          <div style={{ fontSize: '12px', color: connected ? '#00875A' : T.muted, marginTop: '2px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{
-              width: '7px', height: '7px', borderRadius: '50%',
-              background: connected ? (peerOnline ? '#00875A' : '#FFAB00') : '#97A0AF',
-            }} />
+          <div className={`ui-chat__presence${!connected ? ' is-offline' : peerOnline ? ' is-online' : ' is-away'}`}>
+            <span className="ui-chat__presence-dot" aria-hidden="true" />
             {!connected ? 'Reconnecting…' : peerOnline ? `${peerLabel} is online` : `${peerLabel} is offline`}
           </div>
         </div>
-        <div style={{ fontSize: '11px', color: T.muted, fontFamily: 'monospace' }}>#{bookingId.slice(0, 8)}</div>
-      </div>
+        <div className="ui-chat__ref ui-mono">#{bookingId.slice(0, 8)}</div>
+      </header>
 
-      <div style={{ position: 'relative' }}>
-        <div
-          ref={scrollRef}
-          onScroll={handleScroll}
-          style={{ height: '200px', overflowY: 'auto', padding: '12px', background: T.surface, display: 'flex', flexDirection: 'column', gap: '10px' }}
-        >
+      <div className="ui-chat__viewport">
+        <div ref={scrollRef} onScroll={handleScroll} className="ui-chat__messages" aria-live="polite">
           {messages.length === 0 ? (
-            <div style={{ margin: 'auto', textAlign: 'center', color: T.muted, fontSize: '13px', lineHeight: 1.5 }}>
+            <div className="ui-chat__empty">
+              <Icon name="message" size={22} />
               No messages yet. Send a quick update to start the conversation.
             </div>
           ) : messages.map((item, index) => {
@@ -201,40 +175,22 @@ export default function CaseChat({
             const showDay = index === 0 || !sameIstDay(messages[index - 1].createdAt, item.createdAt);
             return (
               <div key={item.clientId || item.id} style={{ display: 'contents' }}>
-                {showDay && (
-                  <div style={{ alignSelf: 'center', fontSize: '11px', color: T.muted, background: T.bubbleIn, border: `1px solid ${T.border}`, borderRadius: '9999px', padding: '2px 10px' }}>
-                    {formatIstDayLabel(item.createdAt)}
-                  </div>
-                )}
-                <div style={{ alignSelf: mine ? 'flex-end' : 'flex-start', maxWidth: '82%' }}>
-                  <div style={{ fontSize: '11px', color: T.muted, margin: mine ? '0 4px 4px 0' : '0 0 4px 4px', textAlign: mine ? 'right' : 'left' }}>
-                    {mine ? 'You' : item.senderName || item.senderRole}
-                  </div>
-                  <div style={{
-                    padding: item.attachment ? '4px' : '9px 11px',
-                    borderRadius: '12px',
-                    borderBottomRightRadius: mine ? '4px' : '12px',
-                    borderBottomLeftRadius: mine ? '12px' : '4px',
-                    background: mine ? T.accent : T.bubbleIn,
-                    color: mine ? 'white' : '#172B4D',
-                    border: mine ? 'none' : `1px solid ${T.border}`,
-                    opacity: item.status === 'sending' && !item.attachment ? 0.75 : 1,
-                    fontSize: '13px',
-                    lineHeight: 1.4,
-                    wordBreak: 'break-word',
-                  }}>
+                {showDay && <div className="ui-chat__day">{formatIstDayLabel(item.createdAt)}</div>}
+                <div className={`ui-chat__msg${mine ? ' is-mine' : ''}`}>
+                  <div className="ui-chat__sender">{mine ? 'You' : item.senderName || item.senderRole}</div>
+                  <div
+                    className={`ui-chat__bubble${item.attachment ? ' has-attachment' : ''}${item.status === 'sending' && !item.attachment ? ' is-sending' : ''}`}
+                  >
                     {item.attachment && (
                       <button
                         type="button"
+                        className="ui-chat__image"
                         onClick={() => setLightbox({
                           url: resolveAttachmentUrl(apiBaseUrl, item.attachment!.url),
                           name: item.attachment!.name,
                         })}
                         title="Open full size"
                         style={{
-                          display: 'block', position: 'relative', padding: 0, border: 'none',
-                          background: 'transparent', cursor: 'zoom-in', borderRadius: '9px',
-                          overflow: 'hidden', width: '220px', maxWidth: '100%',
                           // Reserve the right box up front so the bubble does not jump on load.
                           aspectRatio: item.attachment.width && item.attachment.height
                             ? `${item.attachment.width} / ${item.attachment.height}`
@@ -244,39 +200,18 @@ export default function CaseChat({
                         <img
                           src={resolveAttachmentUrl(apiBaseUrl, item.attachment.url)}
                           alt={item.attachment.name || 'Shared image'}
-                          style={{
-                            width: '100%', height: '100%', objectFit: 'cover', display: 'block',
-                            opacity: item.uploading ? 0.55 : 1,
-                          }}
+                          style={{ opacity: item.uploading ? 0.55 : 1 }}
                         />
-                        {item.uploading && (
-                          <span style={{
-                            position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
-                            justifyContent: 'center', background: 'rgba(15,23,42,0.35)',
-                            color: 'white', fontSize: '12px', fontWeight: 700,
-                          }}>
-                            Uploading…
-                          </span>
-                        )}
+                        {item.uploading && <span className="ui-chat__uploading">Uploading…</span>}
                       </button>
                     )}
-                    {item.message && (
-                      <div style={{ padding: item.attachment ? '6px 7px 3px' : 0 }}>{item.message}</div>
-                    )}
+                    {item.message && <div className="ui-chat__text">{item.message}</div>}
                   </div>
-                  <div style={{
-                    display: 'flex', alignItems: 'center', gap: '5px',
-                    justifyContent: mine ? 'flex-end' : 'flex-start',
-                    fontSize: '10px', color: T.muted, margin: mine ? '3px 4px 0 0' : '3px 0 0 4px',
-                  }}>
+                  <div className="ui-chat__meta">
                     <span title={formatIstFull(item.createdAt)}>{formatIstTime(item.createdAt)}</span>
-                    {mine && item.status && <StatusTicks status={item.status} muted={T.muted} />}
+                    {mine && item.status && <StatusTicks status={item.status} />}
                     {mine && item.status === 'failed' && item.clientId && (
-                      <button
-                        type="button"
-                        onClick={() => onRetry(item.clientId!)}
-                        style={{ border: 'none', background: 'none', padding: 0, cursor: 'pointer', color: '#DE350B', fontSize: '10px', fontWeight: 700, textDecoration: 'underline' }}
-                      >
+                      <button type="button" className="ui-chat__retry" onClick={() => onRetry(item.clientId!)}>
                         Retry
                       </button>
                     )}
@@ -291,28 +226,25 @@ export default function CaseChat({
         {!atBottom && unread > 0 && (
           <button
             type="button"
+            className="ui-chat__jump"
             onClick={() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); setAtBottom(true); }}
-            style={{
-              position: 'absolute', left: '50%', bottom: '10px', transform: 'translateX(-50%)',
-              border: 'none', borderRadius: '9999px', padding: '6px 14px', cursor: 'pointer',
-              background: T.accent, color: 'white', fontSize: '12px', fontWeight: 700,
-              boxShadow: '0 2px 8px rgba(15,23,42,0.2)',
-            }}
           >
-            {unread} new message{unread > 1 ? 's' : ''} ↓
+            {unread} new message{unread > 1 ? 's' : ''}
+            <Icon name="chevronDown" size={14} />
           </button>
         )}
       </div>
 
       {(!connected || failedCount > 0) && (
-        <div style={{ padding: '7px 12px', background: '#FFF4E5', borderTop: `1px solid ${T.border}`, color: '#B45309', fontSize: '12px' }}>
+        <div className="ui-chat__warning" role="status">
+          <Icon name={!connected ? 'wifiOff' : 'alertCircle'} size={15} />
           {!connected
             ? 'Offline — messages you send will go out as soon as the connection returns.'
             : `${failedCount} message${failedCount > 1 ? 's' : ''} did not send. Tap Retry to try again.`}
         </div>
       )}
 
-      <form onSubmit={submit} style={{ display: 'flex', gap: '8px', padding: '10px', borderTop: `1px solid ${T.border}` }}>
+      <form onSubmit={submit} className="ui-chat__composer">
         <input
           ref={fileInputRef}
           type="file"
@@ -323,59 +255,32 @@ export default function CaseChat({
         />
         <button
           type="button"
+          className="ui-btn ui-btn--secondary ui-btn--icon"
           onClick={() => fileInputRef.current?.click()}
           title="Send a photo"
           aria-label="Send a photo"
-          style={{
-            border: `1px solid ${T.disabled}`, borderRadius: '8px', background: 'white',
-            color: T.muted, padding: '0 12px', fontSize: '16px', cursor: 'pointer', lineHeight: 1,
-          }}
         >
-          📷
+          <Icon name="camera" size={17} />
         </button>
         <input
+          className="ui-input"
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onPaste={handlePaste}
-          placeholder="Type a message or paste a photo..."
+          placeholder="Type a message or paste a photo…"
+          aria-label="Message"
           maxLength={500}
-          style={{ flex: 1, minWidth: 0, border: `1px solid ${T.disabled}`, borderRadius: '8px', padding: '10px 12px', fontSize: '13px', outline: 'none' }}
         />
-        <button
-          type="submit"
-          disabled={!draft.trim()}
-          style={{ border: 'none', borderRadius: '8px', background: draft.trim() ? T.accent : T.disabled, color: 'white', padding: '0 14px', fontWeight: 700, cursor: draft.trim() ? 'pointer' : 'not-allowed' }}
-        >
-          Send
+        <button type="submit" className="ui-btn ui-btn--primary ui-chat__send" disabled={!draft.trim()}>
+          <Icon name="send" size={16} />
+          <span className="ui-chat__send-label">Send</span>
         </button>
       </form>
       {lightbox && (
-        <div
-          onClick={() => setLightbox(null)}
-          role="dialog"
-          aria-label={lightbox.name}
-          style={{
-            position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(15,23,42,0.88)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px', cursor: 'zoom-out',
-          }}
-        >
-          <img
-            src={lightbox.url}
-            alt={lightbox.name || 'Shared image'}
-            onClick={event => event.stopPropagation()}
-            style={{ maxWidth: '100%', maxHeight: '100%', objectFit: 'contain', borderRadius: '8px', cursor: 'default' }}
-          />
-          <button
-            type="button"
-            onClick={() => setLightbox(null)}
-            aria-label="Close image"
-            style={{
-              position: 'absolute', top: '18px', right: '22px', width: '40px', height: '40px',
-              borderRadius: '50%', border: 'none', cursor: 'pointer', fontSize: '22px',
-              background: 'rgba(255,255,255,0.16)', color: 'white',
-            }}
-          >
-            ×
+        <div onClick={() => setLightbox(null)} role="dialog" aria-label={lightbox.name} className="ui-lightbox">
+          <img src={lightbox.url} alt={lightbox.name || 'Shared image'} onClick={event => event.stopPropagation()} />
+          <button type="button" className="ui-lightbox__close" onClick={() => setLightbox(null)} aria-label="Close image">
+            <Icon name="x" size={20} />
           </button>
         </div>
       )}

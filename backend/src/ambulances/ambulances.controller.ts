@@ -1,8 +1,8 @@
-import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards, Query } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Delete, Param, Body, UseGuards, Query, ForbiddenException } from '@nestjs/common';
 import { AmbulancesService } from './ambulances.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
-import { Roles } from '../common/decorators';
+import { Roles, CurrentUser } from '../common/decorators';
 import { UserRole } from '../common/enums';
 import { RegisterAmbulanceDto, UpdateStatusDto, UpdateLocationDto, UpdateEquipmentDto } from './dto';
 
@@ -13,6 +13,17 @@ import { RegisterAmbulanceDto, UpdateStatusDto, UpdateLocationDto, UpdateEquipme
 @Controller('ambulances')
 export class AmbulancesController {
   constructor(private readonly ambulancesService: AmbulancesService) {}
+
+  /**
+   * A driver may only act on the ambulance linked to their own account. Without
+   * this any driver could mark any unit available, move it on the map, or edit
+   * its equipment — and dispatch trusts all three.
+   */
+  private assertOwnAmbulance(user: any, ambulanceId: string): void {
+    if (user?.role === UserRole.DRIVER && user.ambulanceId !== ambulanceId) {
+      throw new ForbiddenException('You can only update the ambulance assigned to you');
+    }
+  }
 
   /**
    * Register new ambulance (public - pending verification)
@@ -78,17 +89,21 @@ export class AmbulancesController {
   async updateStatus(
     @Param('id') id: string,
     @Body() updateStatusDto: UpdateStatusDto,
+    @CurrentUser() user: any,
   ) {
+    this.assertOwnAmbulance(user, id);
     return this.ambulancesService.updateStatus(id, updateStatusDto.status);
   }
 
   @Patch(':id/location')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.DRIVER)
+  @Roles(UserRole.DRIVER, UserRole.ADMIN)
   async updateLocation(
     @Param('id') id: string,
     @Body() updateLocationDto: UpdateLocationDto,
+    @CurrentUser() user: any,
   ) {
+    this.assertOwnAmbulance(user, id);
     return this.ambulancesService.updateLocation(id, updateLocationDto.latitude, updateLocationDto.longitude);
   }
 
@@ -98,11 +113,18 @@ export class AmbulancesController {
   async updateEquipment(
     @Param('id') id: string,
     @Body() updateEquipmentDto: UpdateEquipmentDto,
+    @CurrentUser() user: any,
   ) {
+    this.assertOwnAmbulance(user, id);
     return this.ambulancesService.updateEquipment(id, updateEquipmentDto.equipmentList);
   }
 
+  /**
+   * Signed-in callers only: the rows carry the driver details captured at
+   * ambulance registration (name, phone, licence).
+   */
   @Get('nearby')
+  @UseGuards(JwtAuthGuard)
   async findNearby(
     @Query('latitude') latitude: string,
     @Query('longitude') longitude: string,

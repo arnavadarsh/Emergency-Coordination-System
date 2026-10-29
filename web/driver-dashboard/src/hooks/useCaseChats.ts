@@ -118,6 +118,8 @@ export function useCaseChats({
   const [threads, setThreads] = useState<Record<string, ChatThread>>({});
 
   const socketRef = useRef<Socket | null>(null);
+  const getTokenRef = useRef(getToken);
+  getTokenRef.current = getToken;
   /** Latest identity, read at emit time so a late-loading profile never resets the socket. */
   const identityRef = useRef({ role, senderName });
   const roomsRef = useRef<CaseChatRoom[]>(rooms);
@@ -210,7 +212,10 @@ export function useCaseChats({
 
   // ── one socket, created once and kept alive across tab switches ──
   useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ['websocket'] });
+    // The server refuses unauthenticated sockets, and decides from the token
+    // — not from anything sent here — whether this account is the case's
+    // patient or its driver.
+    const socket = io(SOCKET_URL, { transports: ['websocket'], auth: cb => cb({ token: getTokenRef.current() }) });
     socketRef.current = socket;
 
     socket.on('connect', () => {

@@ -1,24 +1,12 @@
 import React from 'react';
-import MedicalProfilePanel from './MedicalProfilePanel';
+import MedicalProfilePanel from '@shared/components/MedicalProfilePanel';
 import {
   medicalProfileAlerts,
   normalizeMedicalProfile,
   type MedicalProfile,
-} from '../types/medicalProfile';
-
-// User dashboard palette
-const C = {
-  card:         '#ffffff',
-  cardBg:       '#f5f7fa',
-  cardBorder:   '#e0e0e0',
-  textPrimary:  '#172b4d',
-  textSecondary:'#6b778c',
-  textMuted:    '#97a0af',
-  accent:       '#00a3bf',
-  accentSoft:   '#e6f7f9',
-  red:          '#de350b',
-  green:        '#00875a',
-};
+} from '@shared/types/medicalProfile';
+import { Icon, type IconName } from '@shared/components/ui/Icon';
+import { SeverityBadge, StatusBadge, severityMeta, toneClass } from '@shared/components/ui/Status';
 
 interface Booking {
   id: string;
@@ -46,30 +34,32 @@ interface ActiveCaseCardProps {
   onComplete: () => void;
 }
 
-const SEV: Record<string, { color: string; bg: string }> = {
-  CRITICAL: { color: '#de350b', bg: '#fff4f2' },
-  HIGH:     { color: '#ff8b00', bg: '#fff8f0' },
-  MEDIUM:   { color: '#ffab00', bg: '#fffbe6' },
-  LOW:      { color: '#00875a', bg: '#e3fcef' },
+type CtaStyle = 'emergency' | 'primary' | 'success';
+
+const STEPS: Record<string, { label: string; next: string | null; btn: string | null; icon: IconName; style: CtaStyle }> = {
+  ASSIGNED:          { label: 'Assigned',            next: 'start',    btn: 'Start emergency route', icon: 'siren',       style: 'emergency' },
+  DISPATCHED:        { label: 'Dispatched',          next: 'start',    btn: 'Start emergency route', icon: 'siren',       style: 'emergency' },
+  EN_ROUTE_PICKUP:   { label: 'En Route to Patient', next: 'pickup',   btn: 'Arrived at patient',    icon: 'mapPin',      style: 'primary' },
+  EN_ROUTE:          { label: 'En Route',            next: 'pickup',   btn: 'Arrived at patient',    icon: 'mapPin',      style: 'primary' },
+  AT_PICKUP:         { label: 'With Patient',        next: 'hospital', btn: 'En route to hospital',  icon: 'navigation',  style: 'primary' },
+  EN_ROUTE_HOSPITAL: { label: 'En Route to Hospital', next: 'arrive',  btn: 'Arrived at hospital',   icon: 'hospital',    style: 'primary' },
+  AT_HOSPITAL:       { label: 'At Hospital',         next: 'complete', btn: 'Complete dispatch',     icon: 'checkCircle', style: 'success' },
 };
 
-const STEPS: Record<string, { label: string; next: string | null; btn: string | null; btnColor: string }> = {
-  ASSIGNED:          { label: 'Assigned',            next: 'start',    btn: '🚑 Start Emergency Route',  btnColor: '#de350b' },
-  DISPATCHED:        { label: 'Dispatched',           next: 'start',    btn: '🚑 Start Emergency Route',  btnColor: '#de350b' },
-  EN_ROUTE_PICKUP:   { label: 'En Route to Patient',  next: 'pickup',   btn: '📍 Arrived at Patient',     btnColor: '#ff8b00' },
-  EN_ROUTE:          { label: 'En Route',             next: 'pickup',   btn: '📍 Arrived at Patient',     btnColor: '#ff8b00' },
-  AT_PICKUP:         { label: 'With Patient',          next: 'hospital', btn: '🏥 En Route to Hospital',   btnColor: '#0066cc' },
-  EN_ROUTE_HOSPITAL: { label: 'En Route to Hospital', next: 'arrive',   btn: '🏥 Arrived at Hospital',    btnColor: '#0066cc' },
-  AT_HOSPITAL:       { label: 'At Hospital',           next: 'complete', btn: '✅ Complete Dispatch',      btnColor: '#00875a' },
+/** Where each status sits on the five-stage progress rail. */
+const STAGE_INDEX: Record<string, number> = {
+  ASSIGNED: 0, DISPATCHED: 0, EN_ROUTE_PICKUP: 1, EN_ROUTE: 1, AT_PICKUP: 2, EN_ROUTE_HOSPITAL: 3, AT_HOSPITAL: 4,
 };
+const STAGES = ['Assigned', 'To patient', 'With patient', 'To hospital', 'At hospital'];
 
 const ActiveCaseCard: React.FC<ActiveCaseCardProps> = ({
   dispatch, onStartJourney, onArrivedPickup, onEnRouteHospital, onArrivedHospital, onComplete
 }) => {
   const { booking, status } = dispatch;
   const sev = booking.severity || 'MEDIUM';
-  const sc = SEV[sev] ?? SEV.MEDIUM;
+  const sevMeta = severityMeta(sev);
   const step = STEPS[status];
+  const stage = STAGE_INDEX[status] ?? -1;
   const medical = normalizeMedicalProfile(booking.medicalProfile);
   const alerts = medicalProfileAlerts(medical);
 
@@ -83,78 +73,68 @@ const ActiveCaseCard: React.FC<ActiveCaseCardProps> = ({
   };
 
   return (
-    <div style={{ background: C.card, borderRadius: '12px', border: `1px solid ${C.cardBorder}`, overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}>
-      {/* Severity bar */}
-      <div style={{ height: '4px', background: sc.color }} />
+    <article className={`ui-card drv-case ${toneClass(sevMeta.tone)}${sev === 'CRITICAL' ? ' is-critical' : ''} ui-enter`} aria-label="Active case">
+      {/* Severity banner — the first thing read */}
+      <header className="drv-case__banner">
+        <div className="ui-row">
+          <SeverityBadge severity={sev} large />
+          <StatusBadge status={booking.bookingType} large />
+        </div>
+        <span className="drv-case__ref ui-mono">#{booking.id.slice(0, 8).toUpperCase()}</span>
+      </header>
 
-      {/* Header row */}
-      <div style={{ padding: '14px 20px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ fontFamily: 'monospace', fontSize: '13px', color: C.textMuted, fontWeight: 600 }}>
-          #{booking.id.slice(0, 8).toUpperCase()}
-        </span>
-        <span style={{ padding: '4px 10px', borderRadius: '10px', fontSize: '11px', fontWeight: 600,
-          background: sc.bg, color: sc.color, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-          {sev}
-        </span>
+      {/* Lifecycle */}
+      <div className="drv-case__progress">
+        <ol className="ui-stepper" aria-label={`Progress: ${step?.label || status.replace(/_/g, ' ')}`}>
+          {STAGES.map((label, i) => (
+            <li
+              key={label}
+              className={`ui-stepper__step${i < stage ? ' is-done' : ''}${i === stage ? ' is-current' : ''}`}
+              aria-current={i === stage ? 'step' : undefined}
+            >
+              <span className="ui-stepper__dot">{i < stage ? <Icon name="check" size={14} strokeWidth={3} /> : i + 1}</span>
+              <span className="ui-stepper__label">{label}</span>
+            </li>
+          ))}
+        </ol>
       </div>
 
-      {/* Patient info */}
-      <div style={{ padding: '14px 20px', borderBottom: `1px solid ${C.cardBorder}` }}>
-        <div style={{ fontSize: '11px', color: C.textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '10px' }}>
-          Patient Information
+      {/* Patient */}
+      <section className="drv-case__section drv-case__patient">
+        <div className="drv-case__patient-text">
+          <div className="ui-eyebrow">Patient</div>
+          <div className="drv-case__name">{booking.patientName || 'Patient'}</div>
+          <p className="drv-case__complaint">
+            {booking.description || (booking.bookingType === 'EMERGENCY' ? 'Emergency medical assistance required' : 'Scheduled medical transport')}
+          </p>
         </div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: '20px', fontWeight: 700, color: C.textPrimary, marginBottom: '4px' }}>
-              {booking.patientName || 'Patient'}
-            </div>
-            <div style={{ fontSize: '14px', color: C.textSecondary, lineHeight: 1.5 }}>
-              {booking.description || (booking.bookingType === 'EMERGENCY' ? 'Emergency medical assistance required' : 'Scheduled medical transport')}
-            </div>
-          </div>
-          {booking.patientPhone && (
-            <a href={`tel:${booking.patientPhone}`} style={{
-              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
-              background: C.accentSoft, color: C.accent,
-              padding: '10px 14px', borderRadius: '10px', textDecoration: 'none',
-              border: `1px solid ${C.accent}`, minWidth: '58px', flexShrink: 0, fontWeight: 600,
-            }}>
-              <span style={{ fontSize: '20px' }}>📞</span>
-              <span style={{ fontSize: '10px', fontWeight: 700 }}>CALL</span>
-            </a>
-          )}
-        </div>
-      </div>
+        {booking.patientPhone && (
+          <a href={`tel:${booking.patientPhone}`} className="ui-btn ui-btn--secondary ui-btn--lg drv-case__call" aria-label={`Call patient ${booking.patientPhone}`}>
+            <Icon name="phone" size={18} />
+            Call
+          </a>
+        )}
+      </section>
 
       {/* Medical Profile — the patient's standing clinical background, shown
           on the case card itself so the responder can spot allergies, existing
           conditions and current medication while triaging, without navigating
           away. Supporting information: it does not change the triage priority. */}
-      <div style={{ padding: '14px 20px', borderBottom: `1px solid ${C.cardBorder}` }}>
+      <section className="drv-case__section drv-case__medical">
         {alerts.length > 0 && (
-          <div style={{
-            background: '#fff8f0', border: '1px solid #ffab00', borderRadius: '8px',
-            padding: '10px 12px', marginBottom: '12px',
-          }}>
-            <div style={{
-              fontSize: '10px', fontWeight: 800, color: '#b06000',
-              textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '6px',
-            }}>
-              ⚠️ Note before treating
+          <div className="ui-alert tone-warning">
+            <Icon name="alertTriangle" size={18} />
+            <div>
+              <div className="ui-alert__title">Note before treating</div>
+              <ul>
+                {alerts.map(alert => <li key={alert}>{alert}</li>)}
+              </ul>
             </div>
-            <ul style={{ margin: 0, paddingLeft: '16px' }}>
-              {alerts.map(alert => (
-                <li key={alert} style={{ fontSize: '12.5px', color: C.textPrimary, lineHeight: 1.5 }}>
-                  {alert}
-                </li>
-              ))}
-            </ul>
           </div>
         )}
         <MedicalProfilePanel
           profile={medical}
           compact
-          accentColor={sc.color}
           footnote={
             medical.hasData
               ? 'Latest details from the patient profile.'
@@ -162,55 +142,42 @@ const ActiveCaseCard: React.FC<ActiveCaseCardProps> = ({
           }
           style={{ border: 'none', padding: 0 }}
         />
-      </div>
+      </section>
 
       {/* Route */}
-      <div style={{ padding: '14px 20px', borderBottom: `1px solid ${C.cardBorder}` }}>
-        <div style={{ fontSize: '11px', color: C.textMuted, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: '12px' }}>
-          Route
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', padding: '10px 12px', background: C.cardBg, borderRadius: '8px' }}>
-            <span style={{ fontSize: '16px' }}>📍</span>
+      <section className="drv-case__section">
+        <ol className="ui-route" aria-label="Route">
+          <li className={`ui-route__stop ${stage <= 1 ? 'tone-danger' : 'tone-neutral'}`}>
+            <span className="ui-route__marker"><Icon name="mapPin" size={12} strokeWidth={2.5} /></span>
             <div>
-              <div style={{ fontSize: '11px', color: C.textMuted, fontWeight: 600, marginBottom: '2px' }}>PICKUP</div>
-              <div style={{ fontSize: '14px', color: C.textPrimary, fontWeight: 600 }}>{booking.pickupLocation}</div>
+              <div className="ui-route__label">Pickup</div>
+              <div className="ui-route__value">{booking.pickupLocation}</div>
             </div>
-          </div>
-          <div style={{ display: 'flex', gap: '12px', alignItems: 'flex-start', padding: '10px 12px', background: C.cardBg, borderRadius: '8px' }}>
-            <span style={{ fontSize: '16px' }}>🏥</span>
+          </li>
+          <li className={`ui-route__stop ${stage >= 2 ? 'tone-info' : 'tone-neutral'}`}>
+            <span className="ui-route__marker"><Icon name="hospital" size={12} strokeWidth={2.5} /></span>
             <div>
-              <div style={{ fontSize: '11px', color: C.textMuted, fontWeight: 600, marginBottom: '2px' }}>HOSPITAL</div>
-              <div style={{ fontSize: '14px', color: C.textPrimary, fontWeight: 600 }}>{booking.selectedHospitalName || booking.dropoffLocation}</div>
+              <div className="ui-route__label">Hospital</div>
+              <div className="ui-route__value">{booking.selectedHospitalName || booking.dropoffLocation}</div>
             </div>
-          </div>
-        </div>
-      </div>
+          </li>
+        </ol>
+      </section>
 
-      {/* Status */}
-      <div style={{ padding: '10px 20px', background: C.accentSoft, borderBottom: `1px solid ${C.cardBorder}` }}>
-        <span style={{ fontSize: '13px', color: C.textSecondary }}>Status: </span>
-        <span style={{ fontSize: '13px', fontWeight: 600, color: C.accent }}>{step?.label || status.replace(/_/g, ' ')}</span>
-      </div>
-
-      {/* CTA */}
+      {/* Next action — one large, unmistakable control */}
       {step?.btn && (
-        <div style={{ padding: '16px 20px' }}>
-          <button onClick={handleCTA} style={{
-            width: '100%', padding: '14px', background: step.btnColor,
-            color: 'white', border: 'none', borderRadius: '10px',
-            fontSize: '16px', fontWeight: 700, cursor: 'pointer',
-            boxShadow: `0 4px 12px ${step.btnColor}4D`,
-            transition: 'transform 0.2s,box-shadow 0.2s',
-          }}
-            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = `0 6px 16px ${step.btnColor}66`; }}
-            onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = `0 4px 12px ${step.btnColor}4D`; }}
-          >
+        <footer className="drv-case__action">
+          <div className="drv-case__status">
+            <span className="ui-live" aria-hidden="true" />
+            Now: <strong>{step.label}</strong>
+          </div>
+          <button type="button" onClick={handleCTA} className={`ui-btn ui-btn--xl ui-btn--block ui-btn--${step.style}`}>
+            <Icon name={step.icon} size={20} />
             {step.btn}
           </button>
-        </div>
+        </footer>
       )}
-    </div>
+    </article>
   );
 };
 

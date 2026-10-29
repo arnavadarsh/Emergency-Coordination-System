@@ -1,10 +1,10 @@
-import { Controller, Get, Patch, Param, Body, UseGuards, Query } from '@nestjs/common';
+import { Controller, Get, Patch, Param, Body, UseGuards, Query, ForbiddenException } from '@nestjs/common';
 import { HospitalsService } from './hospitals.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles, CurrentUser } from '../common/decorators';
 import { UserRole } from '../common/enums';
-import { UpdateHospitalDto, UpdateBedsDto, UpdateStatusDto, UpdateCapabilityDto } from './dto';
+import { UpdateHospitalDto, UpdateBedsDto, UpdateCapabilityDto } from './dto';
 
 /**
  * Hospitals Controller
@@ -14,6 +14,17 @@ import { UpdateHospitalDto, UpdateBedsDto, UpdateStatusDto, UpdateCapabilityDto 
 @UseGuards(JwtAuthGuard)
 export class HospitalsController {
   constructor(private readonly hospitalsService: HospitalsService) {}
+
+  /**
+   * A hospital account manages its own hospital only. Without this, any
+   * hospital login could close another hospital, zero its beds, or reject its
+   * incoming patients — each of which reroutes live ambulances.
+   */
+  private assertOwnHospital(user: any, hospitalId: string): void {
+    if (user?.role === UserRole.HOSPITAL && user.hospitalId !== hospitalId) {
+      throw new ForbiddenException('You can only manage your own hospital');
+    }
+  }
 
   @Get()
   async findAll() {
@@ -43,7 +54,9 @@ export class HospitalsController {
   async update(
     @Param('id') id: string,
     @Body() updateHospitalDto: UpdateHospitalDto,
+    @CurrentUser() user: any,
   ) {
+    this.assertOwnHospital(user, id);
     return this.hospitalsService.update(id, updateHospitalDto);
   }
 
@@ -53,7 +66,9 @@ export class HospitalsController {
   async updateStatus(
     @Param('id') id: string,
     @Body() body: { status: string },
+    @CurrentUser() user: any,
   ) {
+    this.assertOwnHospital(user, id);
     return this.hospitalsService.updateStatus(id, body.status);
   }
 
@@ -63,7 +78,9 @@ export class HospitalsController {
   async updateBeds(
     @Param('id') id: string,
     @Body() updateBedsDto: UpdateBedsDto,
+    @CurrentUser() user: any,
   ) {
+    this.assertOwnHospital(user, id);
     return this.hospitalsService.updateBeds(id, updateBedsDto.availableBeds);
   }
 
@@ -73,7 +90,9 @@ export class HospitalsController {
   async updateCapability(
     @Param('id') id: string,
     @Body() updateCapabilityDto: UpdateCapabilityDto,
+    @CurrentUser() user: any,
   ) {
+    this.assertOwnHospital(user, id);
     return this.hospitalsService.updateCapability(id, updateCapabilityDto);
   }
 
@@ -85,13 +104,15 @@ export class HospitalsController {
     @Param('dispatchId') dispatchId: string,
     @CurrentUser() user: any,
   ) {
+    this.assertOwnHospital(user, id);
     return this.hospitalsService.rejectIncomingDispatch(id, dispatchId, user);
   }
 
   @Get(':id/stats')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.HOSPITAL, UserRole.ADMIN)
-  async getStats(@Param('id') id: string) {
+  async getStats(@Param('id') id: string, @CurrentUser() user: any) {
+    this.assertOwnHospital(user, id);
     return this.hospitalsService.getHospitalStats(id);
   }
 }

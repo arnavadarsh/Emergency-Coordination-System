@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThanOrEqual, In } from 'typeorm';
+import { Repository, In, IsNull } from 'typeorm';
 import { Hospital } from '../hospitals/entities/hospital.entity';
 import { HospitalCapability } from '../hospitals/entities/hospital-capability.entity';
 import { Booking } from '../bookings/entities/booking.entity';
@@ -11,6 +11,7 @@ import { AuditLog } from '../audit/entities/audit-log.entity';
 import { DriverIdentityService } from '../users/driver-identity.service';
 import { MedicalProfileService } from '../users/medical-profile.service';
 import { BookingStatus, UserRole } from '../common/enums';
+import { isSqlite } from '../config/env';
 
 const EARTH_RADIUS_KM = 6371;
 
@@ -126,20 +127,26 @@ export class DashboardService {
   }
 
   /**
-   * Get hospital dashboard stats
+   * Get hospital dashboard stats.
+   *
+   * Everything is filtered to this hospital in the database: it used to load
+   * every hospital, every booking and every dispatch in the system and filter
+   * them in memory, so the page slowed down with every case anyone ever raised.
    */
   async getHospitalStats(hospitalId?: string, userEmail?: string) {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const hospitals = await this.hospitalRepository.find({
-      relations: ['capabilities'],
-    });
-
     const normalizedEmail = userEmail?.trim().toLowerCase();
     const hospital = hospitalId
-      ? hospitals.find(h => h.id === hospitalId)
-      : hospitals.find(h => h.email?.trim().toLowerCase() === normalizedEmail);
+      ? await this.hospitalRepository.findOne({ where: { id: hospitalId }, relations: ['capabilities'] })
+      : normalizedEmail
+        ? await this.hospitalRepository
+            .createQueryBuilder('hospital')
+            .leftJoinAndSelect('hospital.capabilities', 'capability')
+            .where('LOWER(hospital.email) = :email', { email: normalizedEmail })
+            .getOne()
+        : null;
 
     if (!hospital) {
       throw new NotFoundException(
@@ -147,52 +154,51 @@ export class DashboardService {
       );
     }
 
-    const allBookings = await this.bookingRepository.find({
-      order: { createdAt: 'DESC' },
-    });
+    const liveStatuses = [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS];
+    const openStatuses = [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS];
 
-    const allDispatches = await this.dispatchRepository.find({
-      relations: ['booking', 'ambulance'],
-    });
+    const [alertDispatches, recentDispatches, counts] = await Promise.all([
+      this.dispatchRepository
+        .createQueryBuilder('dispatch')
+        .innerJoinAndSelect('dispatch.booking', 'booking')
+        .leftJoinAndSelect('dispatch.ambulance', 'ambulance')
+        .where('dispatch.hospitalId = :hospitalId', { hospitalId: hospital.id })
+        .andWhere('booking.status IN (:...liveStatuses)', { liveStatuses })
+        .orderBy('dispatch.createdAt', 'DESC')
+        .getMany(),
+      this.dispatchRepository
+        .createQueryBuilder('dispatch')
+        .innerJoinAndSelect('dispatch.booking', 'booking')
+        .where('dispatch.hospitalId = :hospitalId', { hospitalId: hospital.id })
+        .orderBy('booking.createdAt', 'DESC')
+        .limit(10)
+        .getMany(),
+      this.dispatchRepository
+        .createQueryBuilder('dispatch')
+        .innerJoin('dispatch.booking', 'booking')
+        .select('SUM(CASE WHEN booking.status IN (:...openStatuses) THEN 1 ELSE 0 END)', 'active')
+        .addSelect(
+          'SUM(CASE WHEN booking.status = :completed AND booking.completedAt >= :today THEN 1 ELSE 0 END)',
+          'completedToday',
+        )
+        .where('dispatch.hospitalId = :hospitalId', { hospitalId: hospital.id })
+        .setParameters({ openStatuses, completed: BookingStatus.COMPLETED, today })
+        .getRawOne(),
+    ]);
 
-    const hospitalDispatches = allDispatches.filter(d => d.hospitalId === hospital.id);
-    const hospitalBookingIds = new Set(hospitalDispatches.map(d => d.bookingId));
-    const hospitalBookings = allBookings.filter(b => hospitalBookingIds.has(b.id));
-
-    const activeBookings = hospitalBookings.filter(b =>
-      [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(b.status),
-    );
-
-    const completedToday = hospitalBookings.filter(b =>
-      b.status === BookingStatus.COMPLETED &&
-      b.completedAt &&
-      new Date(b.completedAt) >= today,
-    ).length;
-
-    const incomingAmbulances = hospitalDispatches.filter(d =>
-      d.booking &&
-      [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status),
-    ).length;
-
-    const alertDispatches = hospitalDispatches.filter(d =>
-      d.booking &&
-      [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
-    );
-
-    // Resolve every alert's driver in one batch so the pre-arrival report can show who is driving.
-    const alertDrivers = await this.driverIdentityService.resolveMany(
-      alertDispatches.map(d => ({
-        driverId: d.driverId,
-        ambulanceId: d.ambulanceId,
-        vehicleNumber: d.ambulance?.vehicleNumber ?? null,
-      })),
-    );
-
-    // Batch-resolve each incoming patient's Medical Profile straight from their
-    // profile, so the pre-alert always carries the latest saved information.
-    const alertMedicalProfiles = await this.medicalProfileService.resolveMany(
-      alertDispatches.map(d => d.booking?.userId),
-    );
+    // Resolve every alert's driver, and each incoming patient's Medical Profile,
+    // in one batch each — straight from their profiles, so the pre-alert always
+    // carries the latest saved information.
+    const [alertDrivers, alertMedicalProfiles] = await Promise.all([
+      this.driverIdentityService.resolveMany(
+        alertDispatches.map(d => ({
+          driverId: d.driverId,
+          ambulanceId: d.ambulanceId,
+          vehicleNumber: d.ambulance?.vehicleNumber ?? null,
+        })),
+      ),
+      this.medicalProfileService.resolveMany(alertDispatches.map(d => d.booking?.userId)),
+    ]);
 
     const preArrivalAlerts = alertDispatches
       .map(d => ({
@@ -229,11 +235,11 @@ export class DashboardService {
         totalBeds: hospital.totalBeds || 0,
         availableBeds: hospital.availableBeds || 0,
         occupiedBeds: (hospital.totalBeds || 0) - (hospital.availableBeds || 0),
-        incomingAmbulances,
-        activeEmergencies: activeBookings.length,
-        completedToday,
+        incomingAmbulances: alertDispatches.length,
+        activeEmergencies: Number(counts?.active ?? 0),
+        completedToday: Number(counts?.completedToday ?? 0),
       },
-      recentBookings: hospitalBookings.slice(0, 10).map(b => ({
+      recentBookings: recentDispatches.map(({ booking: b }) => ({
         id: b.id,
         status: b.status,
         severity: b.severity,
@@ -259,16 +265,18 @@ export class DashboardService {
    * rather than silently dropping them.
    */
   async getOperationsMap() {
-    const [ambulances, hospitals, dispatches] = await Promise.all([
+    // Only dispatches still in flight matter to an operations view, so only
+    // those are read — not every dispatch ever made.
+    const [ambulances, hospitals, liveDispatches] = await Promise.all([
       this.ambulanceRepository.find({ order: { vehicleNumber: 'ASC' } }),
       this.hospitalRepository.find({ relations: ['capabilities'], order: { name: 'ASC' } }),
-      this.dispatchRepository.find({ relations: ['booking', 'hospital'] }),
+      this.dispatchRepository
+        .createQueryBuilder('dispatch')
+        .innerJoinAndSelect('dispatch.booking', 'booking')
+        .leftJoinAndSelect('dispatch.hospital', 'hospital')
+        .where('booking.status IN (:...live)', { live: [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS] })
+        .getMany(),
     ]);
-
-    // Only dispatches still in flight matter to an operations view.
-    const liveDispatches = dispatches.filter(d =>
-      d.booking && [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status),
-    );
 
     const drivers = await this.driverIdentityService.resolveMany(
       liveDispatches.map(d => ({
@@ -395,106 +403,104 @@ export class DashboardService {
   }
 
   /**
-   * Get admin dashboard stats
+   * Get admin dashboard stats.
+   *
+   * Six queries, run together: user counts grouped by role, one aggregate over
+   * bookings, and the lists the console renders. It used to be fourteen
+   * sequential round trips plus a full read of every booking — and each round
+   * trip to the database costs the full network latency between the server and
+   * the database region.
    */
   async getAdminStats() {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Count entities
-    const totalUsers = await this.userRepository.count();
-    const totalHospitals = await this.hospitalRepository.count();
-    const totalAmbulances = await this.ambulanceRepository.count();
+    const responseSeconds = isSqlite()
+      ? '(julianday(booking.completedAt) - julianday(booking.createdAt)) * 86400'
+      : 'EXTRACT(EPOCH FROM (booking.completedAt - booking.createdAt))';
 
-    // Get users by role
-    const adminUsers = await this.userRepository.count({ where: { role: UserRole.ADMIN } });
-    const hospitalUsers = await this.userRepository.count({ where: { role: UserRole.HOSPITAL } });
-    const driverUsers = await this.userRepository.count({ where: { role: UserRole.DRIVER } });
-    const regularUsers = await this.userRepository.count({ where: { role: UserRole.USER } });
-    const activeUsers = await this.userRepository.count({ where: { isActive: true } });
+    const [roleRows, bookingTotals, ambulances, hospitals, auditLogs, users] = await Promise.all([
+      this.userRepository
+        .createQueryBuilder('u')
+        .select('u.role', 'role')
+        .addSelect('COUNT(*)', 'total')
+        .addSelect('SUM(CASE WHEN u.isActive = :active THEN 1 ELSE 0 END)', 'active')
+        .setParameter('active', true)
+        .groupBy('u.role')
+        .getRawMany(),
+      this.bookingRepository
+        .createQueryBuilder('booking')
+        .select('COUNT(*)', 'total')
+        .addSelect('SUM(CASE WHEN booking.status IN (:...open) THEN 1 ELSE 0 END)', 'active')
+        .addSelect('SUM(CASE WHEN booking.status = :completed THEN 1 ELSE 0 END)', 'completed')
+        .addSelect('SUM(CASE WHEN booking.status = :cancelled THEN 1 ELSE 0 END)', 'cancelled')
+        .addSelect(
+          'SUM(CASE WHEN booking.status = :completed AND booking.completedAt >= :today THEN 1 ELSE 0 END)',
+          'completedToday',
+        )
+        .addSelect('SUM(CASE WHEN booking.severity IN (:...urgent) THEN 1 ELSE 0 END)', 'emergencies')
+        .addSelect(
+          `AVG(CASE WHEN booking.status = :completed AND booking.completedAt IS NOT NULL THEN ${responseSeconds} END)`,
+          'avgResponseSeconds',
+        )
+        .setParameters({
+          open: [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS],
+          completed: BookingStatus.COMPLETED,
+          cancelled: BookingStatus.CANCELLED,
+          urgent: ['HIGH', 'CRITICAL'],
+          today,
+        })
+        .getRawOne(),
+      this.ambulanceRepository.find(),
+      this.hospitalRepository.find({ relations: ['capabilities'] }),
+      this.auditRepository.find({ order: { createdAt: 'DESC' }, take: 20 }),
+      this.userRepository.find({ order: { createdAt: 'DESC' } }),
+    ]);
 
-    // Get bookings
-    const allBookings = await this.bookingRepository.find();
-    const activeBookings = allBookings.filter(b => 
-      [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(b.status)
-    ).length;
+    const byRole = (role: UserRole) => Number(roleRows.find(row => row.role === role)?.total ?? 0);
+    const totalUsers = roleRows.reduce((sum, row) => sum + Number(row.total), 0);
+    const activeUsers = roleRows.reduce((sum, row) => sum + Number(row.active ?? 0), 0);
 
-    const completedToday = allBookings.filter(b => 
-      b.status === BookingStatus.COMPLETED && 
-      b.completedAt && 
-      new Date(b.completedAt) >= today
-    ).length;
+    const totalBookings = Number(bookingTotals?.total ?? 0);
+    const activeBookings = Number(bookingTotals?.active ?? 0);
+    const completedTotal = Number(bookingTotals?.completed ?? 0);
+    const cancelledTotal = Number(bookingTotals?.cancelled ?? 0);
+    const avgResponseTime = Math.round(Number(bookingTotals?.avgResponseSeconds ?? 0)) || 0; // seconds
 
-    const completedTotal = allBookings.filter(b => b.status === BookingStatus.COMPLETED).length;
-    const cancelledTotal = allBookings.filter(b => b.status === BookingStatus.CANCELLED).length;
-
-    const emergenciesHandled = allBookings.filter(b => 
-      b.severity === 'HIGH' || b.severity === 'CRITICAL'
-    ).length;
-
-    // Calculate average response time (seconds)
-    const completedBookings = allBookings.filter(b => b.status === BookingStatus.COMPLETED);
-    let avgResponseTime = 0;
-    if (completedBookings.length > 0) {
-      const totalTime = completedBookings.reduce((sum, b) => {
-        if (b.completedAt && b.createdAt) {
-          return sum + (new Date(b.completedAt).getTime() - new Date(b.createdAt).getTime());
-        }
-        return sum;
-      }, 0);
-      avgResponseTime = Math.round((totalTime / completedBookings.length) / 1000); // Convert to seconds
-    }
-
-    // Get ambulance stats
-    const ambulances = await this.ambulanceRepository.find();
+    const totalAmbulances = ambulances.length;
     const availableAmbulances = ambulances.filter(a => a.status === 'AVAILABLE').length;
     const busyAmbulances = ambulances.filter(a => a.status === 'BUSY').length;
     const maintenanceAmbulances = ambulances.filter(a => a.status === 'MAINTENANCE').length;
     const verifiedAmbulances = ambulances.filter(a => a.status !== 'PENDING').length;
 
-    // Get hospital capacity overview
-    const hospitals = await this.hospitalRepository.find({
-      relations: ['capabilities'],
-    });
     const totalBeds = hospitals.reduce((sum, h) => sum + (h.totalBeds || 0), 0);
     const availableBeds = hospitals.reduce((sum, h) => sum + (h.availableBeds || 0), 0);
     const occupiedBeds = totalBeds - availableBeds;
     const capacityUtilization = totalBeds > 0 ? ((occupiedBeds / totalBeds) * 100).toFixed(1) : '0';
 
-    // Get recent audit logs
-    const auditLogs = await this.auditRepository.find({
-      order: { createdAt: 'DESC' },
-      take: 20,
-    });
-
-    // Get all users for management
-    const users = await this.userRepository.find({
-      order: { createdAt: 'DESC' },
-    });
-
     return {
       stats: {
         totalUsers,
-        totalHospitals,
+        totalHospitals: hospitals.length,
         totalAmbulances,
         activeBookings,
-        completedToday,
-        emergenciesHandled,
+        completedToday: Number(bookingTotals?.completedToday ?? 0),
+        emergenciesHandled: Number(bookingTotals?.emergencies ?? 0),
         avgResponseTime, // in seconds
         usersByRole: {
-          admin: adminUsers,
-          hospital: hospitalUsers,
-          driver: driverUsers,
-          user: regularUsers,
+          admin: byRole(UserRole.ADMIN),
+          hospital: byRole(UserRole.HOSPITAL),
+          driver: byRole(UserRole.DRIVER),
+          user: byRole(UserRole.USER),
         },
         activeUsers,
         bookingStats: {
-          total: allBookings.length,
+          total: totalBookings,
           active: activeBookings,
           completed: completedTotal,
           cancelled: cancelledTotal,
-          completionRate: allBookings.length > 0 
-            ? ((completedTotal / allBookings.length) * 100).toFixed(1) 
+          completionRate: totalBookings > 0
+            ? ((completedTotal / totalBookings) * 100).toFixed(1)
             : '0',
         },
         ambulanceStats: {
@@ -503,8 +509,8 @@ export class DashboardService {
           busy: busyAmbulances,
           maintenance: maintenanceAmbulances,
           verified: verifiedAmbulances,
-          utilization: totalAmbulances > 0 
-            ? ((busyAmbulances / totalAmbulances) * 100).toFixed(1) 
+          utilization: totalAmbulances > 0
+            ? ((busyAmbulances / totalAmbulances) * 100).toFixed(1)
             : '0',
         },
         hospitalCapacity: {
@@ -541,40 +547,48 @@ export class DashboardService {
   }
 
   /**
-   * Get driver dashboard stats
+   * Get driver dashboard stats.
+   *
+   * Strictly this driver's own trips: ones they claimed, and unclaimed ones
+   * given to the ambulance linked to their account. A driver with no ambulance
+   * sees no ambulance and no trips. (It used to fall back to the first
+   * ambulance in the table and, failing a match, to every dispatch in the
+   * system — patient names, phone numbers and Medical Profiles included.)
    */
   async getDriverStats(driverId: string) {
-    // Get driver user info
     const driver = await this.userRepository.findOne({
       where: { id: driverId },
     });
+    const ambulanceId = driver?.ambulanceId ?? null;
 
-    const allDispatches = await this.dispatchRepository.find({
-      relations: ['booking', 'hospital', 'ambulance'],
-      order: { createdAt: 'DESC' },
-    });
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    const ambulances = await this.ambulanceRepository.find();
-    const assignedAmbulance =
-      driver?.ambulanceId
-        ? ambulances.find(ambulance => ambulance.id === driver.ambulanceId)
-        : ambulances[0];
-
-    const scopedDispatches = allDispatches.filter(d => {
-      if (d.driverId && d.driverId === driverId) return true;
-      if (!d.driverId && assignedAmbulance?.id && d.ambulanceId === assignedAmbulance.id) return true;
-      return false;
-    });
-    const dispatches = scopedDispatches.length > 0 ? scopedDispatches : allDispatches;
-
-    const activeDispatch = dispatches.find(d => 
-      d.booking && 
-      [BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(d.booking.status)
-    );
-
-    const completedDispatches = dispatches.filter(d => 
-      d.booking && d.booking.status === BookingStatus.COMPLETED
-    );
+    const [assignedAmbulance, dispatches, counts] = await Promise.all([
+      ambulanceId ? this.ambulanceRepository.findOne({ where: { id: ambulanceId } }) : Promise.resolve(null),
+      this.dispatchRepository.find({
+        where: ambulanceId ? [{ driverId }, { driverId: IsNull(), ambulanceId }] : [{ driverId }],
+        relations: ['booking', 'hospital', 'ambulance'],
+        order: { createdAt: 'DESC' },
+        take: 50,
+      }),
+      this.dispatchRepository
+        .createQueryBuilder('dispatch')
+        .innerJoin('dispatch.booking', 'booking')
+        .select('SUM(CASE WHEN booking.status = :completed THEN 1 ELSE 0 END)', 'totalCompleted')
+        .addSelect(
+          'SUM(CASE WHEN booking.status = :completed AND booking.completedAt >= :today THEN 1 ELSE 0 END)',
+          'completedToday',
+        )
+        .where(
+          ambulanceId
+            ? '(dispatch.driverId = :driverId OR (dispatch.driverId IS NULL AND dispatch.ambulanceId = :ambulanceId))'
+            : 'dispatch.driverId = :driverId',
+          { driverId, ambulanceId },
+        )
+        .setParameters({ completed: BookingStatus.COMPLETED, today })
+        .getRawOne(),
+    ]);
 
     // The responder triages the patient from this screen, so each dispatch carries
     // the patient's identity and Medical Profile — read live from the patient's
@@ -634,12 +648,8 @@ export class DashboardService {
         } : undefined,
       })),
       stats: {
-        completedToday: completedDispatches.filter(d => {
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-          return d.booking?.completedAt && new Date(d.booking.completedAt) >= today;
-        }).length,
-        totalCompleted: completedDispatches.length,
+        completedToday: Number(counts?.completedToday ?? 0),
+        totalCompleted: Number(counts?.totalCompleted ?? 0),
       },
     };
   }
@@ -648,30 +658,27 @@ export class DashboardService {
    * Get user dashboard stats
    */
   async getUserStats(userId: string) {
-    // Get user info
-    const user = await this.userRepository.findOne({
-      where: { id: userId },
-    });
-
-    // Get user's bookings
-    const bookings = await this.bookingRepository.find({
-      where: { userId },
-      order: { createdAt: 'DESC' },
-    });
+    const [user, bookings] = await Promise.all([
+      this.userRepository.findOne({ where: { id: userId } }),
+      this.bookingRepository.find({
+        where: { userId },
+        order: { createdAt: 'DESC' },
+      }),
+    ]);
 
     const activeBooking = bookings.find(b => 
       [BookingStatus.CREATED, BookingStatus.ASSIGNED, BookingStatus.IN_PROGRESS].includes(b.status)
     );
 
-    // Get dispatches for user's bookings
+    // Only this patient's dispatches — it used to read every dispatch in the
+    // system and filter them here.
     const bookingIds = bookings.map(b => b.id);
-    let dispatches: any[] = [];
-    if (bookingIds.length > 0) {
-      dispatches = await this.dispatchRepository.find({
-        relations: ['ambulance', 'hospital', 'booking'],
-      });
-      dispatches = dispatches.filter(d => bookingIds.includes(d.bookingId));
-    }
+    const dispatches = bookingIds.length > 0
+      ? await this.dispatchRepository.find({
+          where: { bookingId: In(bookingIds) },
+          relations: ['ambulance', 'hospital'],
+        })
+      : [];
 
     // Resolve the driver behind each dispatch once, so the tracking view can name the person driving.
     const dispatchDrivers = await this.driverIdentityService.resolveMany(

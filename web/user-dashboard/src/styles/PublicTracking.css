@@ -1,0 +1,321 @@
+/* Public ambulance tracking — opened from an SMS, usually one-handed on a phone. */
+
+.pt {
+  min-height: 100vh;
+  padding: 16px 16px 32px;
+  background:
+    radial-gradient(120% 320px at 50% 0%, var(--brand-50) 0%, transparent 70%),
+    var(--bg);
+}
+
+.pt__inner {
+  max-width: 640px;
+  margin: 0 auto;
+  display: grid;
+  gap: 14px;
+}
+
+.pt-header {
+  padding: 18px 20px;
+  border-radius: var(--r-xl);
+  color: #fff;
+  background:
+    radial-gradient(90% 120% at 100% 0%, rgba(34, 211, 238, 0.3) 0%, transparent 60%),
+    linear-gradient(150deg, var(--brand-800) 0%, var(--brand-950) 100%);
+  box-shadow: var(--shadow-md);
+}
+
+.pt-header__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pt-header__brand .ui-brandmark {
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+
+.pt-header__product {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.pt-header__title {
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: -0.015em;
+}
+
+.pt-header__live {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border-radius: var(--r-full);
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  --tone: #4ade80;
+}
+
+.pt-header__subtitle {
+  margin-top: 12px;
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.pt-card {
+  padding: 18px;
+}
+
+.pt-card--flush {
+  padding: 0;
+  overflow: hidden;
+}
+
+.pt-pad {
+  padding: 18px;
+}
+
+.pt-card .pt-pad {
+  padding: 0;
+}
+
+.pt-muted {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.pt-connecting {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.pt-connecting .ui-spinner {
+  color: var(--brand-600);
+}
+
+.pt-stage__label {
+  font-size: 22px;
+  font-weight: 750;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--text-1);
+}
+
+.pt-stage__desc {
+  margin-top: 4px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.pt-stepper {
+  margin-top: 18px;
+  --tone: var(--success);
+  --tone-soft: var(--success-soft);
+}
+
+.pt-figures {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.pt-figure {
+  padding: 16px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.pt-figure--eta {
+  border-color: var(--brand-200);
+  background: linear-gradient(180deg, var(--brand-50) 0%, var(--surface) 100%);
+}
+
+.pt-figure__label {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+.pt-figure__value {
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  color: var(--brand-800);
+}
+
+.pt-figure__plate {
+  padding: 4px 0;
+}
+
+.pt-figure__sub {
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.pt-hospital {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.pt-hospital__name {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-1);
+  margin-top: 2px;
+}
+
+.pt-hospital__address {
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--text-2);
+}
+
+.pt-hospital__cta {
+  margin-top: 12px;
+}
+
+.pt-timeline {
+  list-style: none;
+  display: grid;
+}
+
+.pt-timeline li {
+  display: grid;
+  grid-template-columns: 22px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--gray-100);
+  font-size: 14px;
+}
+
+.pt-timeline li:last-child {
+  border-bottom: none;
+}
+
+.pt-timeline__dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  border: 2px solid var(--gray-300);
+  color: #fff;
+}
+
+.pt-timeline li.is-done .pt-timeline__dot {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+.pt-timeline__label {
+  color: var(--text-3);
+}
+
+.pt-timeline li.is-done .pt-timeline__label {
+  color: var(--text-1);
+}
+
+.pt-timeline__time {
+  color: var(--text-3);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pt-timeline li.is-done .pt-timeline__time {
+  color: var(--success-text);
+  font-weight: 650;
+}
+
+.pt-ended {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  text-align: center;
+  padding: 10px 6px;
+}
+
+.pt-ended__message {
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+.pt-ended__hospital {
+  font-size: 15px;
+  color: var(--text-1);
+}
+
+.pt-ended__note {
+  max-width: 420px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.pt-optout {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.pt-optout__title {
+  font-size: 14.5px;
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+.pt-optout__text {
+  margin: 4px 0 12px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.pt-footnote {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.8;
+  text-align: center;
+  color: var(--text-3);
+}
+
+.pt-footnote .ui-icon {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 4px;
+}
+
+@media (max-width: 420px) {
+  .pt-figure__value {
+    font-size: 28px;
+  }
+
+  .pt-stage__label {
+    font-size: 19px;
+  }
+}

@@ -1,0 +1,58 @@
+# Checks every push and pull request. Each step is a command that also runs
+# locally — see README "Testing and quality checks".
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      # Boots the whole API on in-memory SQLite; needs no services or secrets.
+      - run: npm run test:e2e
+      - run: npm run build
+
+  web:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [user-dashboard, admin-dashboard, driver-dashboard, hospital-dashboard]
+    defaults:
+      run:
+        working-directory: web/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/${{ matrix.app }}/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      # A production build must name its API; any URL proves the build works.
+      - run: npm run build
+        env:
+          VITE_API_URL: https://api.example.invalid/api
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f backend/Dockerfile backend
+      - run: docker build -f web/Dockerfile web --build-arg VITE_API_URL=https://api.example.invalid/api

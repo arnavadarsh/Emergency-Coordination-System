@@ -1,79 +1,42 @@
-# .gitignore for ECS Project
-
-# Backend (Node.js/NestJS)
-backend/node_modules/
-backend/dist/
-backend/.env
-backend/.env.local
-backend/*.log
-backend/coverage/
-
-# Mobile (Flutter)
-mobile/user_app/.dart_tool/
-mobile/user_app/.flutter-plugins
-mobile/user_app/.flutter-plugins-dependencies
-mobile/user_app/.packages
-mobile/user_app/build/
-mobile/user_app/ios/Pods/
-mobile/user_app/ios/.symlinks/
-mobile/user_app/android/.gradle/
-mobile/user_app/android/app/*.jks
-
-mobile/driver_app/.dart_tool/
-mobile/driver_app/.flutter-plugins
-mobile/driver_app/.flutter-plugins-dependencies
-mobile/driver_app/.packages
-mobile/driver_app/build/
-mobile/driver_app/ios/Pods/
-mobile/driver_app/ios/.symlinks/
-mobile/driver_app/android/.gradle/
-mobile/driver_app/android/app/*.jks
-
-# Web (React)
-web/hospital-dashboard/node_modules/
-web/hospital-dashboard/dist/
-web/hospital-dashboard/.env
-web/hospital-dashboard/.env.local
-
-web/admin-dashboard/node_modules/
-web/admin-dashboard/dist/
-web/admin-dashboard/.env
-web/admin-dashboard/.env.local
-
-web/user-dashboard/node_modules/
-web/user-dashboard/dist/
-web/user-dashboard/.env
-web/user-dashboard/.env.local
-
-web/driver-dashboard/node_modules/
-web/driver-dashboard/dist/
-web/driver-dashboard/.env
-web/driver-dashboard/.env.local
-
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-# Global ignores
+# ── Dependencies and build output ────────────────────────────────────────────
 node_modules/
-.env
+dist/
+coverage/
+# Vite's dependency pre-bundling cache
+.vite/
+*.tsbuildinfo
 
-# Logs
+# ── Environment and secrets ─────────────────────────────────────────────────
+# Real values live in each platform's settings or in these local files only.
+# Every directory keeps a committed .env.example with placeholders.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── Local data ──────────────────────────────────────────────────────────────
+# Development SQLite databases (USE_SQLITE=true) and dev-only chat uploads.
+# backend/ecs_local.db was committed in the past; see README "Security notes".
+*.db
+*.db-journal
+backend/uploads/
+
+# Static site assembled by deploy/build-web.sh
+deploy/public/
+
+# ── Logs ────────────────────────────────────────────────────────────────────
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Deployment secrets
-deploy/.env
-deploy/.env.*
-!deploy/.env.example
-
-# Assembled static site (built by deploy/build-web.sh)
-deploy/public/
+# ── OS and editors ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+__MACOSX/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

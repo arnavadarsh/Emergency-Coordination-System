@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
+import { Icon, iconSvg } from '@shared/components/ui/Icon';
 
 interface DriverRouteMapProps {
   ambulanceLat?: number;
@@ -10,6 +11,26 @@ interface DriverRouteMapProps {
   title?: string;
   ctaLabel?: string;
 }
+
+/** Ambulance: brand disc with a soft live pulse. */
+const ambulanceMarker = () =>
+  L.divIcon({
+    className: 'ui-marker',
+    html: `<span class="ui-marker__unit">${iconSvg('ambulance', 16, 2.2)}</span>`,
+    iconSize: [34, 34],
+    iconAnchor: [17, 17],
+    popupAnchor: [0, -16],
+  });
+
+/** Destination: red pin, tip on the exact point. */
+const targetMarker = () =>
+  L.divIcon({
+    className: 'ui-marker',
+    html: `<span class="ui-marker__pin">${iconSvg('mapPin', 16, 2.4)}</span>`,
+    iconSize: [32, 40],
+    iconAnchor: [16, 38],
+    popupAnchor: [0, -34],
+  });
 
 export function DriverRouteMap({
   ambulanceLat,
@@ -55,40 +76,29 @@ export function DriverRouteMap({
     const targetPoint: L.LatLngTuple = [targetLat as number, targetLng as number];
     const points: L.LatLngTuple[] = [targetPoint];
 
-    L.circleMarker(targetPoint, {
-      radius: 8,
-      color: '#de350b',
-      fillColor: '#de350b',
-      fillOpacity: 0.9,
-      weight: 2,
-    })
-      .bindPopup(targetLabel || 'Destination')
-      .addTo(layer);
-
     if (Number.isFinite(ambulanceLat) && Number.isFinite(ambulanceLng)) {
       const ambulancePoint: L.LatLngTuple = [ambulanceLat as number, ambulanceLng as number];
       points.push(ambulancePoint);
 
-      L.circleMarker(ambulancePoint, {
-        radius: 8,
-        color: '#0066cc',
-        fillColor: '#0066cc',
-        fillOpacity: 0.9,
-        weight: 2,
-      })
+      L.polyline([ambulancePoint, targetPoint], {
+        color: '#0e7490',
+        weight: 4,
+        opacity: 0.85,
+        dashArray: '2,9',
+        lineCap: 'round',
+      }).addTo(layer);
+
+      L.marker(ambulancePoint, { icon: ambulanceMarker(), zIndexOffset: 500, keyboard: false })
         .bindPopup('Your Ambulance')
         .addTo(layer);
-
-      L.polyline([ambulancePoint, targetPoint], {
-        color: '#0066cc',
-        weight: 4,
-        opacity: 0.8,
-        dashArray: '10,8',
-      }).addTo(layer);
     }
 
+    L.marker(targetPoint, { icon: targetMarker(), keyboard: false })
+      .bindPopup(targetLabel || 'Destination')
+      .addTo(layer);
+
     map.fitBounds(L.latLngBounds(points), {
-      padding: [30, 30],
+      padding: [40, 40],
     });
   }, [ambulanceLat, ambulanceLng, targetLat, targetLng, targetLabel, hasTarget]);
 
@@ -104,11 +114,14 @@ export function DriverRouteMap({
 
   if (!hasTarget) {
     return (
-      <div className="card" style={{ padding: '20px' }}>
-        <h2 style={{ marginTop: 0 }}>{title}</h2>
-        <p style={{ color: '#6b778c', marginBottom: 0 }}>
+      <div className="ui-routemap">
+        <div className="ui-routemap__head">
+          <h3 className="ui-routemap__title"><Icon name="route" size={17} />{title}</h3>
+        </div>
+        <div className="ui-routemap__pending">
+          <Icon name="mapPin" size={18} />
           Destination coordinates are not available for this dispatch yet.
-        </p>
+        </div>
       </div>
     );
   }
@@ -125,37 +138,23 @@ export function DriverRouteMap({
   };
 
   return (
-    <div className="card" style={{ padding: '20px' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-        <h2 style={{ margin: 0 }}>{title}</h2>
-        <button
-          onClick={openExternalNavigation}
-          style={{
-            padding: '8px 12px',
-            borderRadius: '8px',
-            border: 'none',
-            background: '#0066cc',
-            color: '#fff',
-            cursor: 'pointer',
-            fontWeight: 600,
-          }}
-        >
+    <div className="ui-routemap">
+      <div className="ui-routemap__head">
+        <div style={{ minWidth: 0 }}>
+          <h3 className="ui-routemap__title"><Icon name="route" size={17} />{title}</h3>
+          <p className="ui-routemap__target">{targetLabel || 'Destination'}</p>
+        </div>
+        <button type="button" onClick={openExternalNavigation} className="ui-btn ui-btn--primary ui-btn--sm">
+          <Icon name="navigation" size={15} />
           {ctaLabel}
         </button>
       </div>
-      <p style={{ marginTop: 0, color: '#6b778c' }}>
-        {targetLabel || 'Destination'}
-      </p>
-      <div
-        ref={containerRef}
-        style={{
-          width: '100%',
-          height: '320px',
-          borderRadius: '12px',
-          overflow: 'hidden',
-          border: '1px solid #e6e8ec',
-        }}
-      />
+      <div ref={containerRef} className="ui-map ui-routemap__map" style={{ height: '320px' }} aria-label={`Map: ${title}`} role="region" />
+      <div className="ui-routemap__legend" aria-hidden="true">
+        <span><span className="ui-routemap__key ui-routemap__key--unit" />Ambulance</span>
+        <span><span className="ui-routemap__key ui-routemap__key--target" />Destination</span>
+        <span><span className="ui-routemap__key ui-routemap__key--route" />Route</span>
+      </div>
     </div>
   );
 }
