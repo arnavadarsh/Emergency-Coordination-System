@@ -66,6 +66,21 @@ export enum AmbulanceStatus {
 }
 
 /**
+ * Ambulance vehicle types — the values of the deployed `ambulance_type` enum.
+ */
+export enum AmbulanceType {
+  BASIC = 'BASIC',
+  ADVANCED = 'ADVANCED',
+  CRITICAL_CARE = 'CRITICAL_CARE',
+}
+
+/**
+ * Status of a hospital capability — stored in the deployed schema with the
+ * same `hospital_service_status` enum as a hospital's own intake status.
+ */
+export const CAPABILITY_STATUSES = ['ACCEPTING', 'LIMITED', 'DIVERT'];
+
+/**
  * Driver registration status
  */
 export enum DriverStatus {

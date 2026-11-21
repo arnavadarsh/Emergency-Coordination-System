@@ -1,5 +1,6 @@
-import { IsNotEmpty, IsString, IsObject, ValidateNested, IsNumber, IsBoolean, IsOptional } from 'class-validator';
+import { IsNotEmpty, IsObject, ValidateNested, IsNumber, IsBoolean, IsOptional, IsEnum } from 'class-validator';
 import { Type } from 'class-transformer';
+import { EmergencyType } from '../../triage/entities/triage.entity';
 
 class LocationDto {
   @IsNumber()
@@ -27,19 +28,16 @@ class TriageAnswersDto {
   pregnancy?: boolean;
 }
 
+/** The patient is the signed-in account; there is no userId field to spoof. */
 export class CreateEmergencyBookingDto {
-  @IsString()
-  @IsNotEmpty()
-  userId: string;
-
   @IsObject()
   @ValidateNested()
   @Type(() => LocationDto)
   location: LocationDto;
 
-  @IsString()
-  @IsNotEmpty()
-  emergencyType: string;
+  /** Must be one of the deployed `triage_reports_emergencytype_enum` values. */
+  @IsEnum(EmergencyType)
+  emergencyType: EmergencyType;
 
   @IsObject()
   @ValidateNested()

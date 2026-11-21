@@ -1,4 +1,4 @@
-import { IsOptional, IsEnum, IsInt, Min, Max } from 'class-validator';
+import { IsOptional, IsEnum, IsInt, Min } from 'class-validator';
 import { HospitalStatus } from '../../common/enums';
 
 /**

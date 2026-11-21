@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Patch, Param, Body, UseGuards } from '@nestjs/common';
+import { Controller, Get, Patch, Param, Body, UseGuards } from '@nestjs/common';
 import { DispatchService } from './dispatch.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -21,20 +21,20 @@ export class DispatchController {
 
   @Get()
   @Roles(UserRole.ADMIN, UserRole.HOSPITAL)
-  async findAll() {
-    return this.dispatchService.findAll();
+  async findAll(@CurrentUser() user: any) {
+    return this.dispatchService.findAll(user);
   }
 
   @Get('driver')
   @Roles(UserRole.DRIVER)
   async findDriverDispatches(@CurrentUser() user: any) {
-    return this.dispatchService.findByDriver(user.id);
+    return this.dispatchService.findByDriver(user);
   }
 
   @Get(':id')
   @Roles(UserRole.ADMIN, UserRole.HOSPITAL, UserRole.DRIVER)
-  async findOne(@Param('id') id: string) {
-    return this.dispatchService.findById(id);
+  async findOne(@Param('id') id: string, @CurrentUser() user: any) {
+    return this.dispatchService.findById(id, user);
   }
 
   @Patch(':id')

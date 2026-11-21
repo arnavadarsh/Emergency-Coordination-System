@@ -15,6 +15,11 @@ import { enumColumnType, timestampColumnType } from '../../common/column-types';
  */
 @Entity('users')
 @Index(['email'], { unique: true })
+// Role counts on the admin console, and the hospital/ambulance lookups behind
+// access checks and driver identity.
+@Index('IDX_users_role', ['role'])
+@Index('IDX_users_hospital_id', ['hospitalId'])
+@Index('IDX_users_ambulance_id', ['ambulanceId'])
 export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -47,6 +52,14 @@ export class User {
 
   @Column({ type: timestampColumnType(), nullable: true, name: 'last_login' })
   lastLoginAt: Date;
+
+  /**
+   * Tokens issued before this instant are refused. Set when an admin signs the
+   * account out everywhere or resets its password — a JWT cannot be recalled,
+   * so this is how an existing session is ended.
+   */
+  @Column({ type: timestampColumnType(), nullable: true, name: 'sessions_revoked_at' })
+  sessionsRevokedAt: Date | null;
 
   // Profile fields (merged from user_profiles)
   @Column({ type: 'varchar', length: 100, nullable: true, name: 'first_name' })

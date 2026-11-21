@@ -1,10 +1,15 @@
-import React from 'react';
+import React, { lazy, Suspense } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
-import Landing from './pages/Landing';
-import DashboardRouter from './pages/DashboardRouter';
-import PublicTracking from './pages/PublicTracking';
 import TokenStorage from './utils/tokenStorage';
+import { PageLoading } from '@shared/components/ui/primitives';
+
+// Each screen is its own download. A relative opening a tracking link from an
+// SMS gets the tracking page, not the whole patient dashboard and triage
+// engine; a patient signing in does not wait for the dashboard to load first.
+const Landing = lazy(() => import('./pages/Landing'));
+const DashboardRouter = lazy(() => import('./pages/DashboardRouter'));
+const PublicTracking = lazy(() => import('./pages/PublicTracking'));
 
 /**
  * Protected Route Component
@@ -27,7 +32,8 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 const App: React.FC = () => {
   return (
     <BrowserRouter basename={(import.meta as any).env?.BASE_URL || '/'}>
-      <Toaster position="top-right" toastOptions={{ duration: 4000 }} />
+      <Toaster position="top-right" toastOptions={{ duration: 4000, className: 'ui-toast' }} />
+      <Suspense fallback={<PageLoading label="Loading…" />}>
       <Routes>
         <Route path="/" element={<Landing />} />
         {/* Shared ambulance tracking. Deliberately outside ProtectedRoute:
@@ -42,6 +48,7 @@ const App: React.FC = () => {
           }
         />
       </Routes>
+      </Suspense>
     </BrowserRouter>
   );
 };

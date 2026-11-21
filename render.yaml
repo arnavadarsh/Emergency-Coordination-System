@@ -17,7 +17,11 @@ services:
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     plan: free
-    region: singapore          # closest to the ap-south-1 Supabase project
+    # Render has no India region; Singapore is the closest to the ap-south-1
+    # (Mumbai) Supabase project, at a round trip of tens of milliseconds per
+    # query. For the lowest latency, run the backend on a host with a Mumbai
+    # region instead — see docs/deployment.md, "Latency".
+    region: singapore
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
@@ -54,8 +58,9 @@ services:
       # Optional integrations. Each degrades cleanly when unset: no Gemini key
       # means triage uses the offline engine, no Maps key means travel times are
       # estimated from distance, no Twilio means alerts only reach the log.
-      - key: SMS_PROVIDER
-        value: log
+      # SMS_PROVIDER is deliberately not set: Twilio switches on by itself once
+      # the three TWILIO_* values are filled in (a hard-coded "log" here used to
+      # override that, so adding the keys changed nothing).
       - key: SMS_DEFAULT_COUNTRY_CODE
         value: "+91"
       - key: TWILIO_ACCOUNT_SID
@@ -71,6 +76,11 @@ services:
       # The Supabase project already holds real hospitals and ambulances.
       - key: SEED_DEMO_DATA
         value: "false"
+      # First admin on a brand-new database only; remove after signing in.
+      - key: BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
 
   # ── Dashboards ────────────────────────────────────────────────────────────
   # All four built into one static site: the patient app at the root (which is
@@ -78,7 +88,8 @@ services:
   - type: web
     name: ecs-web
     runtime: static
-    buildCommand: ./deploy/build-web.sh
+    # Through bash: the script is not stored as executable in git.
+    buildCommand: bash ./deploy/build-web.sh
     staticPublishPath: ./deploy/public
     pullRequestPreviewsEnabled: false
     envVars:

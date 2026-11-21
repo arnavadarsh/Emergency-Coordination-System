@@ -2,6 +2,8 @@ import { Controller, Get } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import { KeepAliveService } from './keep-alive.service';
+import { SmsService } from '../notifications/sms.service';
 
 /**
  * Health Controller
@@ -17,6 +19,8 @@ export class HealthController {
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
+    private readonly keepAlive: KeepAliveService,
+    private readonly smsService: SmsService,
   ) {}
 
   /** Liveness: the process is up. Never touches the database. */
@@ -42,12 +46,23 @@ export class HealthController {
   async ready() {
     const database = await this.checkDatabase();
     const storage = this.checkStorage();
+    const sms = this.checkSms();
+    if (database.ok) await this.keepAlive.beatIfDue();
 
     return {
-      status: database.ok && storage.configured ? 'ok' : 'degraded',
-      checks: { database, storage },
+      status: database.ok && storage.configured && sms.liveDelivery ? 'ok' : 'degraded',
+      checks: {
+        database: { ...database, lastHeartbeat: this.keepAlive.lastBeat?.toISOString() ?? null },
+        storage,
+        sms,
+      },
       timestamp: new Date().toISOString(),
     };
+  }
+
+  /** Whether emergency-contact texts actually leave the building. */
+  private checkSms(): { provider: string; liveDelivery: boolean } {
+    return { provider: this.smsService.providerName, liveDelivery: this.smsService.isLiveDelivery };
   }
 
   private async checkDatabase(): Promise<{ ok: boolean; latencyMs?: number; error?: string }> {

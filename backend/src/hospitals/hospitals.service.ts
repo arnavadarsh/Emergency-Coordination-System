@@ -3,14 +3,16 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Hospital, HospitalCapability } from './entities';
 import { UpdateCapabilityDto } from './dto';
-import { BookingStatus, HospitalCapability as CapabilityType, HospitalStatus, SeverityLevel } from '../common/enums';
+import { HospitalCapability as CapabilityType, SeverityLevel, UserRole } from '../common/enums';
 import { Dispatch } from '../dispatch/entities/dispatch.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { HospitalRankingService } from './hospital-ranking.service';
 import { AuditService } from '../audit/audit.service';
 import { DriverIdentityService } from '../users/driver-identity.service';
+import { MedicalProfileService } from '../users/medical-profile.service';
 import { shouldSeedDemoData } from '../config/env';
+import { haversineKm } from '../common/geo';
 
 /**
  * Hospitals Service
@@ -34,23 +36,12 @@ export class HospitalsService implements OnModuleInit {
     private readonly hospitalRankingService: HospitalRankingService,
     private readonly auditService: AuditService,
     private readonly driverIdentityService: DriverIdentityService,
+    private readonly medicalProfileService: MedicalProfileService,
   ) {}
 
   private isHospitalAccepting(status?: string): boolean {
     const normalized = (status || '').toUpperCase();
     return normalized === 'ACTIVE' || normalized === 'ACCEPTING';
-  }
-
-  private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371;
-    const dLat = (lat2 - lat1) * (Math.PI / 180);
-    const dLon = (lon2 - lon1) * (Math.PI / 180);
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
   }
 
   private resolveEmergencyType(booking: Booking): string | null {
@@ -127,13 +118,22 @@ export class HospitalsService implements OnModuleInit {
     const requiredCapability = this.resolveRequiredCapability(booking);
 
     const hospitals = await this.hospitalRepository.find({ relations: ['capabilities'] });
-    const eligibleHospitals = hospitals.filter(hospital => {
+    const openHospitals = hospitals.filter(hospital => {
       if (this.isDuplicateHospital(hospital, closedHospital)) return false;
       if (!this.isHospitalAccepting(hospital.status as any)) return false;
       if ((hospital.availableBeds ?? 0) <= 0) return false;
-      if (requiredCapability && !this.capabilityCanAccept(hospital, requiredCapability)) return false;
       return true;
     });
+    // Hospitals with the specialist unit this patient needs come first. If none
+    // has it, any open hospital is still better than leaving the ambulance
+    // heading for one that cannot take the patient.
+    const capableHospitals = requiredCapability
+      ? openHospitals.filter(hospital => this.capabilityCanAccept(hospital, requiredCapability))
+      : openHospitals;
+    const eligibleHospitals = capableHospitals.length > 0 ? capableHospitals : openHospitals;
+    if (requiredCapability && capableHospitals.length === 0 && openHospitals.length > 0) {
+      this.logger.warn(`[reroute] No open hospital has an accepting ${requiredCapability} unit — considering every open hospital`);
+    }
 
     const ranking = await this.hospitalRankingService.selectBest(eligibleHospitals, {
       pickupLatitude: pickupLat,
@@ -200,13 +200,21 @@ export class HospitalsService implements OnModuleInit {
     };
   }
 
+  /**
+   * Reroute news goes to the people on that case — the patient, the ambulance,
+   * the hospital it is leaving and the one it is heading to — plus admins.
+   */
   private emitRerouteEvent(
     event: string,
     payload: any,
-    _oldHospitalId?: string,
-    _newHospitalId?: string,
+    oldHospitalId?: string,
+    newHospitalId?: string,
   ): void {
-    this.realtimeGateway.server.emit(event, payload);
+    this.realtimeGateway.emitToCase(
+      { patientId: payload?.userId, ambulanceId: payload?.ambulanceId, hospitalIds: [oldHospitalId, newHospitalId] },
+      event,
+      payload,
+    );
   }
 
   private async logReroute(data: {
@@ -261,7 +269,7 @@ export class HospitalsService implements OnModuleInit {
 
     const dispatches = await this.dispatchRepository.find({
       where: dispatchId ? { id: dispatchId } : undefined,
-      relations: ['booking', 'hospital', 'ambulance'],
+      relations: ['booking', 'booking.triageReport', 'hospital', 'ambulance'],
     });
 
     for (const dispatch of dispatches) {
@@ -334,15 +342,24 @@ export class HospitalsService implements OnModuleInit {
       this.emitRerouteEvent('dispatch_diverted', payload, closedHospital.id, reroute.hospital.id);
       this.emitRerouteEvent('hospital_reroute_completed', payload, closedHospital.id, reroute.hospital.id);
 
-      this.realtimeGateway.server.emit('dispatch_status_updated', {
-        dispatchId: dispatch.id,
-        bookingId: booking.id,
-        ambulanceId: dispatch.ambulanceId,
-        hospitalId: reroute.hospital.id,
-        hospitalName: reroute.hospital.name,
-        status: dispatch.status,
-        estimatedHospitalTime: dispatch.estimatedHospitalTime,
-      });
+      this.realtimeGateway.emitToCase(
+        {
+          patientId: booking.userId,
+          ambulanceId: dispatch.ambulanceId,
+          driverId: dispatch.driverId,
+          hospitalIds: [closedHospital.id, reroute.hospital.id],
+        },
+        'dispatch_status_updated',
+        {
+          dispatchId: dispatch.id,
+          bookingId: booking.id,
+          ambulanceId: dispatch.ambulanceId,
+          hospitalId: reroute.hospital.id,
+          hospitalName: reroute.hospital.name,
+          status: dispatch.status,
+          estimatedHospitalTime: dispatch.estimatedHospitalTime,
+        },
+      );
 
       // The newly assigned hospital gets the same driver identity as the original alert.
       const driver = await this.driverIdentityService.resolveOne({
@@ -350,6 +367,10 @@ export class HospitalsService implements OnModuleInit {
         ambulanceId: dispatch.ambulanceId,
         vehicleNumber: dispatch.ambulance?.vehicleNumber ?? null,
       });
+
+      // The hospital taking over gets the same briefing the first one had.
+      const triage = (booking as any).triageReport ?? null;
+      const medicalProfile = await this.medicalProfileService.resolveOne(booking.userId);
 
       this.realtimeGateway.emitToHospital(reroute.hospital.id, 'pre_arrival_alert', {
         dispatchId: dispatch.id,
@@ -363,7 +384,14 @@ export class HospitalsService implements OnModuleInit {
         },
         patientSeverity: booking.severity ?? 'MEDIUM',
         emergencyType: this.resolveEmergencyType(booking),
-        triage: null,
+        triage: triage ? {
+          breathing: triage.breathing,
+          bleeding: triage.bleeding,
+          conscious: triage.conscious,
+          painLevel: triage.painLevel,
+          pregnancy: triage.pregnancy,
+        } : null,
+        medicalProfile,
         etaMinutes: reroute.etaMinutes,
         status: dispatch.status,
         alertedAt: new Date().toISOString(),
@@ -376,122 +404,6 @@ export class HospitalsService implements OnModuleInit {
         reason,
         etaMinutes: reroute.etaMinutes,
         status: 'COMPLETED',
-      });
-    }
-  }
-
-  private async findNearestAlternativeHospital(
-    latitude: number,
-    longitude: number,
-    closedHospital: Hospital,
-  ): Promise<Hospital | null> {
-    const hospitals = await this.hospitalRepository.find();
-
-    let nearest: Hospital | null = null;
-    let minDistance = Number.MAX_VALUE;
-
-    const closedName = (closedHospital.name || '').trim().toLowerCase();
-    const closedLat = Number(closedHospital.latitude);
-    const closedLng = Number(closedHospital.longitude);
-
-    for (const hospital of hospitals) {
-      const candidateName = (hospital.name || '').trim().toLowerCase();
-      const candidateLat = Number(hospital.latitude);
-      const candidateLng = Number(hospital.longitude);
-
-      // Exclude the same hospital record and any duplicate clone of the same hospital.
-      if (hospital.id === closedHospital.id) continue;
-      if (candidateName && candidateName === closedName) continue;
-      if (
-        Number.isFinite(candidateLat) &&
-        Number.isFinite(candidateLng) &&
-        Number.isFinite(closedLat) &&
-        Number.isFinite(closedLng) &&
-        Math.abs(candidateLat - closedLat) < 0.0001 &&
-        Math.abs(candidateLng - closedLng) < 0.0001
-      ) {
-        continue;
-      }
-      if ((hospital.availableBeds || 0) <= 0) continue;
-      if (!this.isHospitalAccepting(hospital.status as any)) continue;
-
-      const distance = this.calculateDistance(
-        latitude,
-        longitude,
-        Number(hospital.latitude),
-        Number(hospital.longitude),
-      );
-
-      if (distance < minDistance) {
-        minDistance = distance;
-        nearest = hospital;
-      }
-    }
-
-    return nearest;
-  }
-
-  private async divertInFlightDispatches(closedHospital: Hospital): Promise<void> {
-    const activeStatuses = ['AT_PICKUP', 'EN_ROUTE_HOSPITAL'];
-
-    const dispatches = await this.dispatchRepository.find({
-      relations: ['booking', 'hospital'],
-    });
-
-    for (const dispatch of dispatches) {
-      if (!activeStatuses.includes(dispatch.status)) continue;
-      if (!dispatch.booking) continue;
-
-      const destinationMatchesClosedHospital =
-        dispatch.hospitalId === closedHospital.id ||
-        dispatch.booking.destinationAddress === closedHospital.name ||
-        (
-          dispatch.booking.destinationLatitude != null &&
-          dispatch.booking.destinationLongitude != null &&
-          Number(dispatch.booking.destinationLatitude) === Number(closedHospital.latitude) &&
-          Number(dispatch.booking.destinationLongitude) === Number(closedHospital.longitude)
-        );
-
-      if (!destinationMatchesClosedHospital) continue;
-
-      const sourceLat = dispatch.booking.pickupLatitude || Number(closedHospital.latitude);
-      const sourceLng = dispatch.booking.pickupLongitude || Number(closedHospital.longitude);
-      const alternative = await this.findNearestAlternativeHospital(sourceLat, sourceLng, closedHospital);
-      if (!alternative) continue;
-
-      dispatch.hospitalId = alternative.id;
-      await this.dispatchRepository.save(dispatch);
-
-      const booking = dispatch.booking;
-      booking.destinationAddress = alternative.name;
-      booking.destinationLatitude = Number(alternative.latitude);
-      booking.destinationLongitude = Number(alternative.longitude);
-      await this.bookingRepository.save(booking);
-
-      this.realtimeGateway.server.emit('dispatch_diverted', {
-        dispatchId: dispatch.id,
-        bookingId: booking.id,
-        userId: booking.userId,
-        oldHospital: {
-          id: closedHospital.id,
-          name: closedHospital.name,
-        },
-        newHospital: {
-          id: alternative.id,
-          name: alternative.name,
-          address: alternative.address,
-          latitude: Number(alternative.latitude),
-          longitude: Number(alternative.longitude),
-        },
-        reason: 'Hospital stopped accepting patients',
-        message: `Destination changed from ${closedHospital.name} to ${alternative.name}`,
-      });
-
-      this.realtimeGateway.server.emit('dispatch_status_updated', {
-        dispatchId: dispatch.id,
-        bookingId: booking.id,
-        ambulanceId: dispatch.ambulanceId,
-        status: dispatch.status,
       });
     }
   }
@@ -612,7 +524,8 @@ export class HospitalsService implements OnModuleInit {
   }
 
   /**
-   * Broadcast a hospital's current diversion state and bed position.
+   * Send a hospital's current diversion state and bed position to admins and
+   * to the hospital's own dashboard.
    *
    * Feeds the admin Live Operations Map, which recolours the hospital and
    * updates its bed readout without waiting for the next poll.
@@ -623,7 +536,7 @@ export class HospitalsService implements OnModuleInit {
     const totalBeds = hospital.totalBeds ?? 0;
     const availableBeds = hospital.availableBeds ?? 0;
 
-    this.realtimeGateway.server.emit('hospital_status_updated', {
+    this.realtimeGateway.emitToCase({ hospitalIds: [hospital.id] }, 'hospital_status_updated', {
       id: hospital.id,
       name: hospital.name,
       status: hospital.status,
@@ -737,7 +650,8 @@ export class HospitalsService implements OnModuleInit {
     if (dispatch.hospitalId !== hospitalId) {
       throw new ForbiddenException('This dispatch is not assigned to this hospital');
     }
-    if (user?.hospitalId && user.hospitalId !== hospitalId) {
+    // A hospital account with no hospital linked used to slip past this check.
+    if (user?.role !== UserRole.ADMIN && user?.hospitalId !== hospitalId) {
       throw new ForbiddenException('You can only reject dispatches assigned to your hospital');
     }
 
@@ -756,7 +670,7 @@ export class HospitalsService implements OnModuleInit {
     return hospitals
       .filter((hospital) => this.isHospitalAccepting(hospital.status as any))
       .filter((hospital) => {
-        const distance = this.calculateDistance(
+        const distance = haversineKm(
           latitude,
           longitude,
           Number(hospital.latitude),
@@ -765,8 +679,8 @@ export class HospitalsService implements OnModuleInit {
         return distance <= radiusKm;
       })
       .sort((a, b) => {
-        const distA = this.calculateDistance(latitude, longitude, Number(a.latitude), Number(a.longitude));
-        const distB = this.calculateDistance(latitude, longitude, Number(b.latitude), Number(b.longitude));
+        const distA = haversineKm(latitude, longitude, Number(a.latitude), Number(a.longitude));
+        const distB = haversineKm(latitude, longitude, Number(b.latitude), Number(b.longitude));
         return distA - distB;
       });
   }

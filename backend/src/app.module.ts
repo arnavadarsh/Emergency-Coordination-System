@@ -21,7 +21,6 @@ import { HospitalsModule } from './hospitals/hospitals.module';
 import { AmbulancesModule } from './ambulances/ambulances.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { DispatchModule } from './dispatch/dispatch.module';
-import { TriageController } from './triage/triage.controller';
 import { TriageModule } from './triage/triage.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { AuditModule } from './audit/audit.module';
@@ -31,6 +30,8 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { RateLimitModule } from './common/rate-limit/rate-limit.module';
 import { TravelTimeModule } from './common/travel-time/travel-time.module';
 import { HealthModule } from './health/health.module';
+import { SettingsModule } from './settings/settings.module';
+import { AdminModule } from './admin/admin.module';
 
 /**
  * Main Application Module
@@ -132,6 +133,9 @@ import { HealthModule } from './health/health.module';
     // Outbound messaging (global — SMS is used across features)
     NotificationsModule,
 
+    // Admin-editable runtime switches (global — read by dispatch, sign-up, SMS)
+    SettingsModule,
+
     // Feature modules
     AuthModule,
     UploadsModule,
@@ -146,6 +150,7 @@ import { HealthModule } from './health/health.module';
     DashboardModule,
     TrackingModule,
     HealthModule,
+    AdminModule,
   ],
 })
 export class AppModule {}

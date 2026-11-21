@@ -1,8 +1,9 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import 'leaflet/dist/leaflet.css';
+// Design system first, so each page's stylesheet can build on it.
+import '@shared/styles/design-system.css';
 import App from './App';
-import './styles/index.css';
 import { installAuthInterceptor } from './utils/authInterceptor';
 
 

@@ -36,7 +36,8 @@ services:
       # ── Feature configuration ──────────────────────────────────────────────
       PUBLIC_TRACKING_BASE_URL: ${PUBLIC_TRACKING_BASE_URL:?set PUBLIC_TRACKING_BASE_URL}
       TRACKING_LINK_TTL_HOURS: ${TRACKING_LINK_TTL_HOURS:-24}
-      SMS_PROVIDER: ${SMS_PROVIDER:-log}
+      # Empty = Twilio once TWILIO_* are set, log-only otherwise.
+      SMS_PROVIDER: ${SMS_PROVIDER:-}
       SMS_DEFAULT_COUNTRY_CODE: ${SMS_DEFAULT_COUNTRY_CODE:-+91}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
@@ -48,6 +49,11 @@ services:
       # Demo hospitals and ambulances. On for a test deployment that needs
       # something to dispatch; turn it off before real use.
       SEED_DEMO_DATA: ${SEED_DEMO_DATA:-false}
+
+      # First admin on an empty database; ignored once any admin exists.
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+      DB_KEEPALIVE_INTERVAL_HOURS: ${DB_KEEPALIVE_INTERVAL_HOURS:-6}
     expose:
       - "3000"
     healthcheck:

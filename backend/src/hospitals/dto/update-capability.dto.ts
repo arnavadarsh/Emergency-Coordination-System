@@ -1,5 +1,5 @@
-import { IsEnum, IsString, IsOptional, IsInt, Min } from 'class-validator';
-import { HospitalCapability } from '../../common/enums';
+import { IsEnum, IsIn, IsOptional, IsInt, Min } from 'class-validator';
+import { CAPABILITY_STATUSES, HospitalCapability } from '../../common/enums';
 
 /**
  * DTO for updating hospital capability status
@@ -9,7 +9,7 @@ export class UpdateCapabilityDto {
   capabilityType: HospitalCapability;
 
   @IsOptional()
-  @IsString()
+  @IsIn(CAPABILITY_STATUSES)
   status?: string;
 
   @IsOptional()

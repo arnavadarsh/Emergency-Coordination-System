@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
-import { formatIstFull } from '../utils/datetime';
+import { formatIstFull } from '@shared/utils/datetime';
+import { Icon } from '@shared/components/ui/Icon';
+import { Badge } from '@shared/components/ui/Status';
+import { EmptyState, initialsOf } from '@shared/components/ui/primitives';
 
 /**
  * Emergency contacts, editable from the patient's own Profile.
@@ -16,18 +19,6 @@ import { formatIstFull } from '../utils/datetime';
  */
 
 const RELATION_PRESETS = ['Parent', 'Spouse', 'Sibling', 'Child', 'Friend', 'Relative', 'Neighbour', 'Caregiver'];
-
-const C = {
-  text: '#172b4d',
-  sub: '#6b778c',
-  muted: '#97a0af',
-  border: '#e0e0e0',
-  soft: '#f4f5f7',
-  green: '#00875a',
-  red: '#de350b',
-  info: '#0066cc',
-  infoSoft: '#e3f5ff',
-};
 
 export interface EmergencyContact {
   id: string;
@@ -53,26 +44,6 @@ interface ContactForm {
 }
 
 const EMPTY_FORM: ContactForm = { name: '', phoneNumber: '', relation: 'Parent', customRelation: '' };
-
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '10px 12px',
-  borderRadius: '8px',
-  border: `1px solid ${C.border}`,
-  fontSize: '14px',
-  color: C.text,
-  boxSizing: 'border-box',
-};
-
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: '12px',
-  fontWeight: 600,
-  color: C.sub,
-  marginBottom: '6px',
-  textTransform: 'uppercase',
-  letterSpacing: '0.03em',
-};
 
 const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ apiBaseUrl, token }) => {
   const [contacts, setContacts] = useState<EmergencyContact[]>([]);
@@ -180,13 +151,13 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
               toast.error('Could not remove this contact.');
             }
           }}
-          style={{ padding: '4px 10px', background: C.red, color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}
+          className="ui-btn ui-btn--danger ui-btn--sm"
         >
           Remove
         </button>
         <button
           onClick={() => toast.dismiss(t.id)}
-          style={{ padding: '4px 10px', background: C.soft, color: C.text, border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 600, fontSize: '13px' }}
+          className="ui-btn ui-btn--secondary ui-btn--sm"
         >
           Keep
         </button>
@@ -197,54 +168,56 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
   const activeCount = contacts.filter(contact => contact.notifyBySms && !contact.optedOut).length;
 
   return (
-    <div style={{ marginTop: '32px' }}>
-      <div style={{ background: 'white', borderRadius: '12px', border: `1px solid ${C.border}`, padding: '24px', boxShadow: '0 1px 3px rgba(0,0,0,0.06)' }}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap', paddingBottom: '12px', marginBottom: '20px', borderBottom: `2px solid ${C.border}` }}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: '18px', color: C.text }}>👨‍👩‍👧 Emergency Contacts</h3>
-            <p style={{ margin: '6px 0 0', fontSize: '13px', color: C.sub, maxWidth: '620px', lineHeight: 1.5 }}>
-              The moment an ambulance is assigned to you, everyone here gets a text with a private link to
-              follow it live — so nobody at the scene has to stop and make phone calls.
-            </p>
-          </div>
-          {!showForm && (
-            <button
-              onClick={startAdd}
-              style={{ padding: '10px 16px', borderRadius: '8px', border: 'none', background: C.info, color: 'white', fontWeight: 600, fontSize: '14px', cursor: 'pointer', whiteSpace: 'nowrap' }}
-            >
-              + Add Contact
-            </button>
-          )}
+    <section className="ui-card ui-enter" aria-labelledby="contacts-title">
+      <div className="ui-card__header">
+        <div style={{ minWidth: 0, flex: '1 1 260px' }}>
+          <h3 id="contacts-title" className="ui-card__title"><Icon name="users" size={17} />Emergency Contacts</h3>
+          <p className="ui-card__subtitle" style={{ maxWidth: 620, lineHeight: 1.5 }}>
+            The moment an ambulance is assigned to you, everyone here gets a text with a private link to
+            follow it live — so nobody at the scene has to stop and make phone calls.
+          </p>
         </div>
+        {!showForm && (
+          <button type="button" onClick={startAdd} className="ui-btn ui-btn--secondary">
+            <Icon name="plus" size={15} />
+            Add Contact
+          </button>
+        )}
+      </div>
 
+      <div className="ui-card__body ui-stack">
         {showForm && (
-          <div style={{ background: C.soft, borderRadius: '10px', padding: '18px', marginBottom: '20px' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '14px' }}>
-              <div>
-                <label style={labelStyle}>Name</label>
+          <div className="usr-contact-form ui-enter">
+            <div className="ui-form-grid">
+              <div className="ui-field">
+                <label className="ui-label" htmlFor="ec-name">Name</label>
                 <input
-                  style={inputStyle}
+                  id="ec-name"
+                  className="ui-input"
                   value={form.name}
                   onChange={e => setForm({ ...form, name: e.target.value })}
                   placeholder="e.g. Meera Verma"
                   maxLength={100}
                 />
               </div>
-              <div>
-                <label style={labelStyle}>Phone Number</label>
+              <div className="ui-field">
+                <label className="ui-label" htmlFor="ec-phone">Phone Number</label>
                 <input
-                  style={inputStyle}
+                  id="ec-phone"
+                  className="ui-input"
                   value={form.phoneNumber}
                   onChange={e => setForm({ ...form, phoneNumber: e.target.value })}
                   placeholder="e.g. 98765 43210"
                   inputMode="tel"
+                  type="tel"
                   maxLength={20}
                 />
               </div>
-              <div>
-                <label style={labelStyle}>Relation</label>
+              <div className="ui-field">
+                <label className="ui-label" htmlFor="ec-relation">Relation</label>
                 <select
-                  style={inputStyle}
+                  id="ec-relation"
+                  className="ui-select"
                   value={form.relation}
                   onChange={e => setForm({ ...form, relation: e.target.value })}
                 >
@@ -255,10 +228,11 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
                 </select>
               </div>
               {form.relation === 'Other' && (
-                <div>
-                  <label style={labelStyle}>Relation (your words)</label>
+                <div className="ui-field">
+                  <label className="ui-label" htmlFor="ec-custom">Relation (your words)</label>
                   <input
-                    style={inputStyle}
+                    id="ec-custom"
+                    className="ui-input"
                     value={form.customRelation}
                     onChange={e => setForm({ ...form, customRelation: e.target.value })}
                     placeholder="e.g. Flatmate"
@@ -268,19 +242,12 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
               )}
             </div>
 
-            <div style={{ display: 'flex', gap: '10px', marginTop: '16px' }}>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                style={{ padding: '10px 18px', borderRadius: '8px', border: 'none', background: C.green, color: 'white', fontWeight: 600, fontSize: '14px', cursor: saving ? 'wait' : 'pointer', opacity: saving ? 0.7 : 1 }}
-              >
+            <div className="ui-row" style={{ marginTop: 16 }}>
+              <button type="button" onClick={handleSave} disabled={saving} className="ui-btn ui-btn--success">
+                {saving ? <span className="ui-spinner" aria-hidden="true" /> : <Icon name="save" size={16} />}
                 {saving ? 'Saving…' : editingId ? 'Save Changes' : 'Add Contact'}
               </button>
-              <button
-                onClick={resetForm}
-                disabled={saving}
-                style={{ padding: '10px 18px', borderRadius: '8px', border: `1px solid ${C.border}`, background: 'white', color: C.text, fontWeight: 600, fontSize: '14px', cursor: 'pointer' }}
-              >
+              <button type="button" onClick={resetForm} disabled={saving} className="ui-btn ui-btn--secondary">
                 Cancel
               </button>
             </div>
@@ -288,61 +255,58 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
         )}
 
         {loading ? (
-          <p style={{ color: C.muted, fontSize: '14px', margin: 0 }}>Loading contacts…</p>
-        ) : contacts.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '28px 16px', background: C.soft, borderRadius: '10px' }}>
-            <div style={{ fontSize: '32px', marginBottom: '8px' }}>📇</div>
-            <p style={{ margin: '0 0 4px', fontWeight: 600, color: C.text }}>No emergency contacts yet</p>
-            <p style={{ margin: 0, fontSize: '13px', color: C.sub }}>
-              Add the people who should know when an ambulance is on its way to you.
-            </p>
+          <div style={{ display: 'grid', gap: 10 }} aria-busy="true" aria-label="Loading contacts">
+            {[0, 1].map(i => <span key={i} className="ui-skeleton" style={{ height: 64 }} />)}
           </div>
+        ) : contacts.length === 0 ? (
+          <EmptyState icon="users" title="No emergency contacts yet" dashed>
+            Add the people who should know when an ambulance is on its way to you.
+          </EmptyState>
         ) : (
-          <div style={{ display: 'grid', gap: '10px' }}>
+          <div className="usr-contacts">
             {contacts.map(contact => {
               const willBeAlerted = contact.notifyBySms && !contact.optedOut;
               return (
-                <div
-                  key={contact.id}
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '14px', flexWrap: 'wrap', padding: '14px 16px', border: `1px solid ${C.border}`, borderRadius: '10px', background: willBeAlerted ? 'white' : C.soft }}
-                >
-                  <div style={{ minWidth: '200px' }}>
-                    <div style={{ fontWeight: 600, color: C.text, fontSize: '15px' }}>
+                <div key={contact.id} className={`usr-contact${willBeAlerted ? '' : ' is-muted'}`}>
+                  <span className="ui-avatar">{initialsOf(contact.name)}</span>
+                  <div className="usr-contact__info">
+                    <div className="usr-contact__name">
                       {contact.name}
-                      <span style={{ marginLeft: '8px', fontSize: '12px', fontWeight: 500, color: C.sub }}>{contact.relation}</span>
+                      <Badge tone="neutral">{contact.relation}</Badge>
                     </div>
-                    <div style={{ fontSize: '13px', color: C.sub, marginTop: '2px' }}>{contact.phoneNumber}</div>
+                    <div className="usr-contact__phone ui-num">{contact.phoneNumber}</div>
                     {contact.optedOut ? (
-                      <div style={{ fontSize: '12px', color: C.red, marginTop: '4px' }}>
+                      <div className="usr-contact__note is-danger">
+                        <Icon name="ban" size={13} />
                         Unsubscribed — they chose to stop receiving these messages
                       </div>
                     ) : contact.lastNotifiedAt ? (
-                      <div style={{ fontSize: '12px', color: C.green, marginTop: '4px' }}>
+                      <div className="usr-contact__note is-success">
+                        <Icon name="checkCheck" size={13} />
                         Last alerted {formatIstFull(contact.lastNotifiedAt)}
                       </div>
                     ) : null}
                   </div>
 
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div className="usr-contact__actions">
                     {!contact.optedOut && (
                       <button
+                        type="button"
+                        role="switch"
+                        aria-checked={contact.notifyBySms}
                         onClick={() => toggleAlerts(contact)}
                         title={contact.notifyBySms ? 'Stop alerting this contact' : 'Alert this contact again'}
-                        style={{ padding: '7px 12px', borderRadius: '7px', border: `1px solid ${contact.notifyBySms ? C.green : C.border}`, background: contact.notifyBySms ? '#e3fcef' : 'white', color: contact.notifyBySms ? C.green : C.sub, fontWeight: 600, fontSize: '13px', cursor: 'pointer' }}
+                        className={`ui-btn ui-btn--sm ${contact.notifyBySms ? 'ui-btn--soft' : 'ui-btn--secondary'}`}
                       >
-                        {contact.notifyBySms ? '✓ Alerts on' : 'Alerts off'}
+                        <Icon name={contact.notifyBySms ? 'bell' : 'circleDot'} size={14} />
+                        {contact.notifyBySms ? 'Alerts on' : 'Alerts off'}
                       </button>
                     )}
-                    <button
-                      onClick={() => startEdit(contact)}
-                      style={{ padding: '7px 12px', borderRadius: '7px', border: `1px solid ${C.border}`, background: 'white', color: C.info, fontWeight: 600, fontSize: '13px', cursor: 'pointer' }}
-                    >
+                    <button type="button" onClick={() => startEdit(contact)} className="ui-btn ui-btn--ghost ui-btn--sm">
+                      <Icon name="pencil" size={14} />
                       Edit
                     </button>
-                    <button
-                      onClick={() => handleDelete(contact)}
-                      style={{ padding: '7px 12px', borderRadius: '7px', border: `1px solid ${C.border}`, background: 'white', color: C.red, fontWeight: 600, fontSize: '13px', cursor: 'pointer' }}
-                    >
+                    <button type="button" onClick={() => handleDelete(contact)} className="ui-btn ui-btn--danger-soft ui-btn--sm">
                       Remove
                     </button>
                   </div>
@@ -353,7 +317,7 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
         )}
 
         {contacts.length > 0 && (
-          <p style={{ margin: '16px 0 0', fontSize: '12px', color: C.muted, lineHeight: 1.6 }}>
+          <p className="ui-help" style={{ lineHeight: 1.6 }}>
             {activeCount === 0
               ? 'Nobody is currently set to be alerted.'
               : `${activeCount} ${activeCount === 1 ? 'person' : 'people'} will be texted a tracking link when an ambulance is assigned to you.`}
@@ -361,7 +325,7 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
           </p>
         )}
       </div>
-    </div>
+    </section>
   );
 };
 

@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsDateString, IsPhoneNumber, MaxLength } from 'class-validator';
+import { IsString, IsOptional, IsDateString, MaxLength } from 'class-validator';
 
 /**
  * DTO for updating user profile

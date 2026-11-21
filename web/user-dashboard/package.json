@@ -23,6 +23,10 @@
   "scripts": {
     "dev": "vite --port 3001",
     "build": "tsc && vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "preview": "vite preview"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

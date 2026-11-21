@@ -4,15 +4,17 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { RealtimeGateway } from './realtime.gateway';
 import { CaseChatMessage } from './entities/case-chat-message.entity';
+import { User } from '../users/entities/user.entity';
+import { CaseAccessModule } from '../access/case-access.module';
 
 /**
  * Realtime Module
- * Provides WebSocket functionality with JWT authentication
- * Phase 0: Foundation only, no business logic
+ * WebSocket gateway: authenticated connections, identity-scoped rooms and case chat.
  */
 @Module({
   imports: [
-    TypeOrmModule.forFeature([CaseChatMessage]),
+    TypeOrmModule.forFeature([CaseChatMessage, User]),
+    CaseAccessModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => ({

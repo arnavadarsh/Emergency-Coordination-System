@@ -24,6 +24,7 @@ export const isSqlite = (): boolean => process.env.USE_SQLITE === 'true';
  * data. Set SEED_DEMO_DATA=true to opt in on a live test environment.
  */
 export const shouldSeedDemoData = (): boolean => {
-  if (process.env.SEED_DEMO_DATA !== undefined) return process.env.SEED_DEMO_DATA === 'true';
+  // An empty value (as in .env.example) means "use the default", not "off".
+  if (process.env.SEED_DEMO_DATA) return process.env.SEED_DEMO_DATA === 'true';
   return (process.env.NODE_ENV || 'development') !== 'production';
 };

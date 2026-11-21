@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import TokenStorage from '../utils/tokenStorage';
 import { ROLE_APP_URLS } from '../config/api';
 import UserDashboard from './Dashboard';
+import { PageLoading } from '@shared/components/ui/primitives';
 
 /**
  * Decides what a signed-in account sees at /dashboard.
@@ -48,11 +49,7 @@ const DashboardRouter: React.FC = () => {
   }, [role, navigate]);
 
   if (role !== 'USER') {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', fontSize: '18px', color: '#6b778c' }}>
-        Taking you to your dashboard&hellip;
-      </div>
-    );
+    return <PageLoading label="Taking you to your dashboard…" />;
   }
 
   return <UserDashboard />;

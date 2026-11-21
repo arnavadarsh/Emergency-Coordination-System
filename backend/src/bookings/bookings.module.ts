@@ -13,6 +13,8 @@ import { TriageModule } from '../triage/triage.module';
 import { HospitalsModule } from '../hospitals/hospitals.module';
 import { UsersModule } from '../users/users.module';
 import { TrackingModule } from '../tracking/tracking.module';
+import { CaseAccessModule } from '../access/case-access.module';
+import { DispatchRetryService } from './dispatch-retry.service';
 
 @Module({
   imports: [
@@ -22,9 +24,10 @@ import { TrackingModule } from '../tracking/tracking.module';
     HospitalsModule,
     UsersModule,
     TrackingModule,
+    CaseAccessModule,
   ],
   controllers: [BookingsController],
-  providers: [BookingsService],
-  exports: [BookingsService, TypeOrmModule],
+  providers: [BookingsService, DispatchRetryService],
+  exports: [BookingsService, DispatchRetryService, TypeOrmModule],
 })
 export class BookingsModule {}

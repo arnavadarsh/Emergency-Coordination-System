@@ -1,5 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import { fileURLToPath } from 'node:url';
+
+/** Code and styles shared by all four dashboards (web/shared). */
+const SHARED_DIR = fileURLToPath(new URL('../shared', import.meta.url));
 
 /**
  * BASE_PATH lets this app be served from a sub-path of a shared host
@@ -22,7 +26,15 @@ export default defineConfig(({ mode }) => {
   return {
     base: process.env.BASE_PATH || '/',
     plugins: [react()],
+    resolve: {
+      alias: { '@shared': SHARED_DIR },
+      // web/shared has no node_modules: make its React imports use this app's
+      // copy, so there is exactly one React instance in the bundle.
+      dedupe: ['react', 'react-dom'],
+    },
     server: {
+      // Let the dev server serve web/shared, which sits outside this app.
+      fs: { allow: [fileURLToPath(new URL('..', import.meta.url))] },
       port: 3004,
     },
     preview: {

@@ -3,6 +3,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../../users/users.service';
+import { isTokenRevoked } from '../session-revocation';
 
 /**
  * JWT Strategy for validating JWT tokens
@@ -29,6 +30,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     const user = await this.usersService.findById(payload.sub);
     if (!user || !user.isActive) {
       throw new UnauthorizedException('User not found or inactive');
+    }
+    // An admin signed this account out (or reset its password) after the token was issued.
+    if (isTokenRevoked(user, payload.iat)) {
+      throw new UnauthorizedException('This session has ended. Please sign in again.');
     }
     return user;
   }

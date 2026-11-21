@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
-import { formatIstTime } from '../utils/datetime';
+import { formatIstTime } from '@shared/utils/datetime';
+import { Icon } from '@shared/components/ui/Icon';
 
 /**
  * Sharing the case's tracking link by hand, from inside the live tracking view.
@@ -11,16 +12,6 @@ import { formatIstTime } from '../utils/datetime';
  * is not on the list. It also shows who the system already told, so the patient
  * knows what has been taken care of without asking anyone.
  */
-
-const C = {
-  ink: '#172b4d',
-  sub: '#6b778c',
-  muted: '#97a0af',
-  line: '#e0e0e0',
-  blue: '#0066cc',
-  green: '#00875a',
-  amber: '#ff8b00',
-};
 
 interface NotifiedContact {
   name: string;
@@ -110,83 +101,87 @@ const TrackingShareCard: React.FC<TrackingShareCardProps> = ({ apiBaseUrl, token
   const failed = (info.notifiedContacts ?? []).filter(contact => contact.status === 'FAILED');
 
   return (
-    <div style={{ background: 'white', border: `1px solid ${C.line}`, borderRadius: '10px', padding: '14px 16px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
-        <div style={{ minWidth: '220px' }}>
-          <div style={{ fontSize: '14px', fontWeight: 700, color: C.ink }}>🔗 Share live tracking</div>
-          <div style={{ fontSize: '12px', color: C.sub, marginTop: '3px', lineHeight: 1.5 }}>
+    <section className="ui-card ui-card--flat usr-share" aria-labelledby="share-title">
+      <div className="usr-share__head">
+        <span className="ui-icon-tile ui-icon-tile--sm"><Icon name="share" size={17} /></span>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h3 id="share-title" className="usr-share__title">Share live tracking</h3>
+          <p className="ui-help">
             Anyone with this link can watch the ambulance — no login, no app. It shows no personal or medical
             details, and stops working when the case ends.
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: '8px' }}>
-          <button
-            onClick={copyLink}
-            style={{ padding: '9px 16px', borderRadius: '8px', border: 'none', background: copied ? C.green : C.blue, color: 'white', fontWeight: 600, fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap' }}
-          >
-            {copied ? '✓ Copied' : 'Copy link'}
-          </button>
-          {typeof navigator !== 'undefined' && 'share' in navigator && (
-            <button
-              onClick={shareViaSheet}
-              title="Open your device's share sheet"
-              style={{ padding: '9px 14px', borderRadius: '8px', border: `1px solid ${C.line}`, background: 'white', color: C.ink, fontWeight: 600, fontSize: '13px', cursor: 'pointer', whiteSpace: 'nowrap' }}
-            >
-              Share…
-            </button>
-          )}
+          </p>
         </div>
       </div>
 
       {/* The link itself, visible and selectable. A copy button alone gives no
           way to tell a good link from a mangled one when a paste goes wrong. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '12px' }}>
-        <input
-          readOnly
-          value={info.url ?? ''}
-          onFocus={event => event.currentTarget.select()}
-          onClick={event => event.currentTarget.select()}
-          style={{ flex: 1, minWidth: 0, padding: '8px 10px', borderRadius: '7px', border: `1px solid ${C.line}`, background: '#f7f8fa', color: C.ink, fontSize: '12px', fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace' }}
-        />
-        <a
-          href={info.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{ padding: '8px 12px', borderRadius: '7px', border: `1px solid ${C.line}`, color: C.blue, fontSize: '12px', fontWeight: 600, textDecoration: 'none', whiteSpace: 'nowrap' }}
-        >
-          Open ↗
+      <div className="usr-share__link">
+        {/* Takes a full row on a phone, so the link is readable, not four letters wide. */}
+        <div className="ui-input-wrap" style={{ flex: '1 1 240px', minWidth: 0 }}>
+          <Icon name="link" size={15} />
+          <input
+            readOnly
+            className="ui-input ui-mono usr-share__url"
+            value={info.url ?? ''}
+            aria-label="Tracking link"
+            onFocus={event => event.currentTarget.select()}
+            onClick={event => event.currentTarget.select()}
+          />
+        </div>
+        <button type="button" onClick={copyLink} className={`ui-btn ${copied ? 'ui-btn--success' : 'ui-btn--primary'}`}>
+          <Icon name={copied ? 'check' : 'copy'} size={15} />
+          {copied ? 'Copied' : 'Copy link'}
+        </button>
+        {typeof navigator !== 'undefined' && 'share' in navigator && (
+          <button type="button" onClick={shareViaSheet} title="Open your device's share sheet" className="ui-btn ui-btn--secondary">
+            <Icon name="share" size={15} />
+            Share…
+          </button>
+        )}
+        <a href={info.url} target="_blank" rel="noopener noreferrer" className="ui-btn ui-btn--ghost" aria-label="Open tracking page in a new tab">
+          <Icon name="externalLink" size={15} />
+          Open
         </a>
       </div>
 
-      {alerted.length > 0 && (
-        <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: `1px solid ${C.line}`, fontSize: '12px', color: C.sub, lineHeight: 1.6 }}>
-          ✅ Already texted to{' '}
-          {alerted.map((contact, index) => (
-            <span key={`${contact.name}-${index}`} style={{ color: C.ink, fontWeight: 600 }}>
-              {contact.name}
-              <span style={{ fontWeight: 400, color: C.sub }}>
-                {contact.relation ? ` (${contact.relation})` : ''}
-                {contact.sentAt ? ` at ${formatIstTime(contact.sentAt)}` : ''}
+      {(alerted.length > 0 || failed.length > 0 || (info.viewCount ?? 0) > 0) && (
+        <div className="usr-share__status">
+          {alerted.length > 0 && (
+            <div className="usr-share__line is-success">
+              <Icon name="checkCheck" size={15} />
+              <span>
+                Already texted to{' '}
+                {alerted.map((contact, index) => (
+                  <span key={`${contact.name}-${index}`}>
+                    <strong>{contact.name}</strong>
+                    {contact.relation ? ` (${contact.relation})` : ''}
+                    {contact.sentAt ? ` at ${formatIstTime(contact.sentAt)}` : ''}
+                    {index < alerted.length - 1 ? ', ' : ''}
+                  </span>
+                ))}
               </span>
-              {index < alerted.length - 1 ? ', ' : ''}
-            </span>
-          ))}
-        </div>
-      )}
+            </div>
+          )}
 
-      {failed.length > 0 && (
-        <div style={{ marginTop: '8px', fontSize: '12px', color: C.amber, lineHeight: 1.6 }}>
-          ⚠️ Could not reach {failed.map(contact => contact.name).join(', ')} — share the link with them yourself.
-        </div>
-      )}
+          {failed.length > 0 && (
+            <div className="usr-share__line is-warning">
+              <Icon name="alertTriangle" size={15} />
+              <span>Could not reach {failed.map(contact => contact.name).join(', ')} — share the link with them yourself.</span>
+            </div>
+          )}
 
-      {(info.viewCount ?? 0) > 0 && (
-        <div style={{ marginTop: '8px', fontSize: '12px', color: C.green }}>
-          Opened {info.viewCount} {info.viewCount === 1 ? 'time' : 'times'}
-          {info.lastViewedAt ? `, last at ${formatIstTime(info.lastViewedAt)}` : ''}
+          {(info.viewCount ?? 0) > 0 && (
+            <div className="usr-share__line">
+              <Icon name="eye" size={15} />
+              <span>
+                Opened {info.viewCount} {info.viewCount === 1 ? 'time' : 'times'}
+                {info.lastViewedAt ? `, last at ${formatIstTime(info.lastViewedAt)}` : ''}
+              </span>
+            </div>
+          )}
         </div>
       )}
-    </div>
+    </section>
   );
 };
 

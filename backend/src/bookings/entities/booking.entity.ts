@@ -25,6 +25,9 @@ import { Hospital } from '../../hospitals/entities/hospital.entity';
 @Index(['userId'])
 @Index(['status'])
 @Index(['createdAt'])
+// A patient's bookings newest-first, and the retry worker's open-bookings scan.
+@Index('IDX_bookings_user_created', ['userId', 'createdAt'])
+@Index('IDX_bookings_status_created', ['status', 'createdAt'])
 export class Booking {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -78,6 +81,10 @@ export class Booking {
 
   @Column({ type: 'text', nullable: true, name: 'destination_address' })
   destinationAddress: string;
+
+  /** When a SCHEDULED transport is wanted. Null for an emergency, which is wanted now. */
+  @Column({ type: timestampColumnType(), nullable: true, name: 'scheduled_time' })
+  scheduledTime: Date | null;
 
   @Column({ type: timestampColumnType(), nullable: true, name: 'completed_at' })
   completedAt: Date;

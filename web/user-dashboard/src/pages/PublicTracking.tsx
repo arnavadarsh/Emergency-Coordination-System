@@ -4,7 +4,10 @@ import axios from 'axios';
 import 'leaflet/dist/leaflet.css';
 import { LiveRouteMap } from '../components/LiveRouteMap';
 import { API_CONFIG } from '../config/api';
-import { formatIstTime, formatTimeAgo } from '../utils/datetime';
+import { formatIstTime, formatTimeAgo } from '@shared/utils/datetime';
+import { Icon } from '@shared/components/ui/Icon';
+import { BrandMark } from '@shared/components/ui/primitives';
+import '../styles/PublicTracking.css';
 
 /**
  * The page a family member opens from the SMS.
@@ -19,20 +22,6 @@ import { formatIstTime, formatTimeAgo } from '../utils/datetime';
  */
 
 const POLL_INTERVAL_MS = 8000;
-
-const C = {
-  ink: '#172b4d',
-  sub: '#6b778c',
-  muted: '#97a0af',
-  line: '#e4e7ec',
-  soft: '#f4f5f7',
-  blue: '#0066cc',
-  blueSoft: '#e3f5ff',
-  green: '#00875a',
-  greenSoft: '#e3fcef',
-  red: '#de350b',
-  amber: '#ff8b00',
-};
 
 interface TrackingPoint {
   latitude: number;
@@ -142,26 +131,32 @@ function PublicTracking() {
   };
 
   const shell = (children: React.ReactNode) => (
-    <div style={{ minHeight: '100vh', background: '#f5f7fa', padding: '16px', boxSizing: 'border-box' }}>
-      <style>{`@keyframes ecsPulse{0%,100%{opacity:1}50%{opacity:0.35}}`}</style>
-      <div style={{ maxWidth: '640px', margin: '0 auto' }}>{children}</div>
+    <div className="pt">
+      <div className="pt__inner">{children}</div>
     </div>
   );
 
-  const brandHeader = (subtitle: string) => (
-    <div style={{ background: 'linear-gradient(135deg, #0066cc 0%, #00a3bf 100%)', color: 'white', borderRadius: '14px', padding: '20px', marginBottom: '16px' }}>
-      <div style={{ fontSize: '13px', opacity: 0.9, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-        Emergency Coordination System
+  const brandHeader = (subtitle: string, live = false) => (
+    <header className="pt-header">
+      <div className="pt-header__brand">
+        <BrandMark />
+        <div>
+          <div className="pt-header__product">Emergency Coordination System</div>
+          <h1 className="pt-header__title">Ambulance Tracking</h1>
+        </div>
+        {live && (
+          <span className="pt-header__live" role="status">
+            <span className="ui-live" aria-hidden="true" />
+            Live
+          </span>
+        )}
       </div>
-      <div style={{ fontSize: '22px', fontWeight: 700, marginTop: '4px' }}>Ambulance Tracking</div>
-      <div style={{ fontSize: '14px', opacity: 0.92, marginTop: '6px' }}>{subtitle}</div>
-    </div>
+      <div className="pt-header__subtitle">{subtitle}</div>
+    </header>
   );
 
-  const card = (children: React.ReactNode, extra: React.CSSProperties = {}) => (
-    <div style={{ background: 'white', border: `1px solid ${C.line}`, borderRadius: '14px', padding: '18px', marginBottom: '14px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)', ...extra }}>
-      {children}
-    </div>
+  const card = (children: React.ReactNode, className = '') => (
+    <section className={`ui-card pt-card ui-enter ${className}`}>{children}</section>
   );
 
   if (state.kind === 'loading') {
@@ -169,11 +164,12 @@ function PublicTracking() {
       <>
         {brandHeader('Loading the latest position…')}
         {card(
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: C.sub }}>
-            <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: C.blue, animation: 'ecsPulse 1.2s ease-in-out infinite' }} />
-            <span style={{ fontSize: '14px' }}>Connecting to the ambulance…</span>
+          <div className="pt-connecting" role="status">
+            <span className="ui-spinner" aria-hidden="true" />
+            <span>Connecting to the ambulance…</span>
           </div>,
         )}
+        <span className="ui-skeleton" style={{ height: 120, borderRadius: 14 }} aria-hidden="true" />
       </>,
     );
   }
@@ -184,20 +180,22 @@ function PublicTracking() {
       <>
         {brandHeader(ended ? 'This case has ended' : 'Link not valid')}
         {card(
-          <>
-            <div style={{ fontSize: '34px', marginBottom: '10px' }}>{ended ? '✅' : '🔒'}</div>
-            <p style={{ margin: '0 0 8px', fontSize: '16px', fontWeight: 600, color: C.ink }}>{state.message}</p>
+          <div className="pt-ended">
+            <div className={`ui-empty__icon ${ended ? 'tone-success' : 'tone-neutral'}`}>
+              <Icon name={ended ? 'checkCircle' : 'lock'} size={24} />
+            </div>
+            <p className="pt-ended__message">{state.message}</p>
             {ended && state.hospitalName && (
-              <p style={{ margin: '0 0 8px', fontSize: '15px', color: C.ink }}>
+              <p className="pt-ended__hospital">
                 The ambulance completed its trip to <strong>{state.hospitalName}</strong>.
               </p>
             )}
-            <p style={{ margin: 0, fontSize: '13px', color: C.sub, lineHeight: 1.6 }}>
+            <p className="pt-ended__note">
               {ended
                 ? 'Tracking links are live only while a case is in progress, so nobody can keep watching afterwards.'
                 : 'Check that you opened the most recent link you were sent.'}
             </p>
-          </>,
+          </div>,
         )}
         {contactToken && optedOut !== null && optOutCard(optedOut, optOutBusy, changeOptOut)}
       </>,
@@ -211,136 +209,130 @@ function PublicTracking() {
 
   return shell(
     <>
-      {brandHeader(`Case ${view.caseReference}`)}
+      {brandHeader(`Case ${view.caseReference}`, true)}
 
       {/* What is happening, in one line, before anything else. */}
       {card(
         <>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
-            <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: C.green, animation: 'ecsPulse 1.6s ease-in-out infinite' }} />
-            <span style={{ fontSize: '12px', fontWeight: 700, color: C.green, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Live</span>
+          <div className="pt-stage">
+            <h2 className="pt-stage__label">{view.stage.label}</h2>
+            <p className="pt-stage__desc">{view.stage.description}</p>
           </div>
-          <h1 style={{ margin: '0 0 6px', fontSize: '22px', lineHeight: 1.25, color: C.ink }}>{view.stage.label}</h1>
-          <p style={{ margin: 0, fontSize: '14px', color: C.sub, lineHeight: 1.55 }}>{view.stage.description}</p>
+
+          {/* Progress rail — where this case has got to. */}
+          <ol className="ui-stepper pt-stepper" aria-label="Progress">
+            {STAGE_ORDER.map((stage, index) => {
+              const done = index < currentStageIndex;
+              const current = index === currentStageIndex;
+              return (
+                <li
+                  key={stage}
+                  className={`ui-stepper__step${done ? ' is-done' : ''}${current ? ' is-current' : ''}`}
+                  aria-current={current ? 'step' : undefined}
+                >
+                  <span className="ui-stepper__dot">{done ? <Icon name="check" size={14} strokeWidth={3} /> : index + 1}</span>
+                  <span className="ui-stepper__label">{STAGE_SHORT[stage]}</span>
+                </li>
+              );
+            })}
+          </ol>
         </>,
       )}
 
       {/* ETA and vehicle, the two numbers people actually want. */}
-      {card(
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: '12px' }}>
-          <div style={{ background: C.blueSoft, borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
-            <div style={{ fontSize: '12px', color: C.sub, marginBottom: '4px' }}>{view.eta.label}</div>
-            <div style={{ fontSize: '26px', fontWeight: 700, color: C.blue }}>{view.eta.text}</div>
-            {view.eta.expectedArrivalIso && (
-              <div style={{ fontSize: '12px', color: C.sub, marginTop: '4px' }}>
-                around {formatIstTime(view.eta.expectedArrivalIso)}
-              </div>
-            )}
+      <div className="pt-figures ui-enter">
+        <div className="pt-figure pt-figure--eta">
+          <div className="pt-figure__label">{view.eta.label}</div>
+          <div className="pt-figure__value">{view.eta.text}</div>
+          {view.eta.expectedArrivalIso && (
+            <div className="pt-figure__sub">around {formatIstTime(view.eta.expectedArrivalIso)}</div>
+          )}
+        </div>
+        <div className="pt-figure">
+          <div className="pt-figure__label">Ambulance</div>
+          <div className="pt-figure__plate">
+            <span className="ui-plate"><Icon name="ambulance" size={15} />{view.ambulance.vehicleNumber || 'Assigned'}</span>
           </div>
-          <div style={{ background: C.soft, borderRadius: '10px', padding: '14px', textAlign: 'center' }}>
-            <div style={{ fontSize: '12px', color: C.sub, marginBottom: '4px' }}>Ambulance</div>
-            <div style={{ fontSize: '18px', fontWeight: 700, color: C.ink }}>
-              {view.ambulance.vehicleNumber || 'Assigned'}
-            </div>
-            {view.ambulance.locationUpdatedAt && (
-              <div style={{ fontSize: '12px', color: C.sub, marginTop: '4px' }}>
-                position {formatTimeAgo(view.ambulance.locationUpdatedAt).toLowerCase()}
-              </div>
-            )}
-          </div>
-        </div>,
-      )}
-
-      {/* Progress rail — where this case has got to. */}
-      {card(
-        <div style={{ display: 'flex', gap: '4px' }}>
-          {STAGE_ORDER.map((stage, index) => {
-            const done = index <= currentStageIndex;
-            return (
-              <div key={stage} style={{ flex: 1, textAlign: 'center' }}>
-                <div style={{ height: '6px', borderRadius: '3px', background: done ? C.green : C.line, marginBottom: '8px' }} />
-                <div style={{ fontSize: '11px', fontWeight: index === currentStageIndex ? 700 : 500, color: index === currentStageIndex ? C.green : done ? C.sub : C.muted, lineHeight: 1.3 }}>
-                  {STAGE_SHORT[stage]}
-                </div>
-              </div>
-            );
-          })}
-        </div>,
-      )}
+          {view.ambulance.locationUpdatedAt && (
+            <div className="pt-figure__sub">position {formatTimeAgo(view.ambulance.locationUpdatedAt).toLowerCase()}</div>
+          )}
+        </div>
+      </div>
 
       {/* The map itself. */}
       {card(
         ambulanceLocation || view.target ? (
-          <div style={{ margin: '-18px' }}>
-            <LiveRouteMap
-              ambulanceLat={ambulanceLocation?.latitude}
-              ambulanceLng={ambulanceLocation?.longitude}
-              targetLat={view.target?.latitude}
-              targetLng={view.target?.longitude}
-              targetLabel={view.target?.label}
-              title={headingToHospital ? 'Route to hospital' : 'Route to the patient'}
-              ctaLabel="Open in Maps"
-            />
-          </div>
+          <LiveRouteMap
+            ambulanceLat={ambulanceLocation?.latitude}
+            ambulanceLng={ambulanceLocation?.longitude}
+            targetLat={view.target?.latitude}
+            targetLng={view.target?.longitude}
+            targetLabel={view.target?.label}
+            title={headingToHospital ? 'Route to hospital' : 'Route to the patient'}
+            ctaLabel="Open in Maps"
+          />
         ) : (
-          <p style={{ margin: 0, color: C.sub, fontSize: '14px' }}>
+          <div className="pt-pad pt-muted">
+            <Icon name="mapPin" size={18} />
             The ambulance has not reported its position yet. This page updates on its own.
-          </p>
+          </div>
         ),
+        'pt-card--flush',
       )}
 
       {/* Where the patient is being taken — the thing relatives act on. */}
       {view.hospital &&
         card(
-          <>
-            <div style={{ fontSize: '12px', color: C.sub, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '6px' }}>
-              Heading to
+          <div className="pt-pad pt-hospital">
+            <span className="ui-icon-tile tone-info"><Icon name="hospital" size={22} /></span>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div className="ui-eyebrow">Heading to</div>
+              <div className="pt-hospital__name">{view.hospital.name}</div>
+              {view.hospital.address && <div className="pt-hospital__address">{view.hospital.address}</div>}
+              {view.hospital.location && (
+                <a
+                  href={`https://www.google.com/maps/search/?api=1&query=${view.hospital.location.latitude},${view.hospital.location.longitude}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="ui-btn ui-btn--primary pt-hospital__cta"
+                >
+                  <Icon name="navigation" size={16} />
+                  Directions to the hospital
+                </a>
+              )}
             </div>
-            <div style={{ fontSize: '18px', fontWeight: 700, color: C.ink }}>{view.hospital.name}</div>
-            {view.hospital.address && (
-              <div style={{ fontSize: '14px', color: C.sub, marginTop: '4px' }}>{view.hospital.address}</div>
-            )}
-            {view.hospital.location && (
-              <a
-                href={`https://www.google.com/maps/search/?api=1&query=${view.hospital.location.latitude},${view.hospital.location.longitude}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ display: 'inline-block', marginTop: '12px', padding: '9px 14px', borderRadius: '8px', background: C.blue, color: 'white', fontSize: '14px', fontWeight: 600, textDecoration: 'none' }}
-              >
-                Directions to the hospital
-              </a>
-            )}
-          </>,
-          { borderLeft: `4px solid ${C.blue}` },
+          </div>,
+          'ui-accent ui-accent--info',
         )}
 
       {/* Times so far. */}
       {card(
-        <>
-          <div style={{ fontSize: '12px', color: C.sub, textTransform: 'uppercase', letterSpacing: '0.04em', marginBottom: '10px' }}>
-            Progress
-          </div>
-          {[
-            { label: 'Ambulance assigned', at: view.timeline.assignedAt },
-            { label: 'Reached the patient', at: view.timeline.arrivedAtPickupAt },
-            { label: 'Left for the hospital', at: view.timeline.departedPickupAt },
-            { label: 'Arrived at the hospital', at: view.timeline.arrivedAtHospitalAt },
-          ].map(row => (
-            <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '7px 0', borderBottom: `1px solid ${C.soft}`, fontSize: '14px' }}>
-              <span style={{ color: row.at ? C.ink : C.muted }}>{row.label}</span>
-              <span style={{ color: row.at ? C.green : C.muted, fontWeight: row.at ? 600 : 400, whiteSpace: 'nowrap' }}>
-                {row.at ? formatIstTime(row.at) : 'Pending'}
-              </span>
-            </div>
-          ))}
-        </>,
+        <div className="pt-pad">
+          <div className="ui-eyebrow" style={{ marginBottom: 10 }}>Progress</div>
+          <ol className="pt-timeline">
+            {[
+              { label: 'Ambulance assigned', at: view.timeline.assignedAt },
+              { label: 'Reached the patient', at: view.timeline.arrivedAtPickupAt },
+              { label: 'Left for the hospital', at: view.timeline.departedPickupAt },
+              { label: 'Arrived at the hospital', at: view.timeline.arrivedAtHospitalAt },
+            ].map(row => (
+              <li key={row.label} className={row.at ? 'is-done' : ''}>
+                <span className="pt-timeline__dot" aria-hidden="true">{row.at && <Icon name="check" size={12} strokeWidth={3} />}</span>
+                <span className="pt-timeline__label">{row.label}</span>
+                <span className="pt-timeline__time">{row.at ? formatIstTime(row.at) : 'Pending'}</span>
+              </li>
+            ))}
+          </ol>
+        </div>,
       )}
 
       {contactToken && optedOut !== null && optOutCard(optedOut, optOutBusy, changeOptOut)}
 
-      <p style={{ fontSize: '12px', color: C.muted, textAlign: 'center', lineHeight: 1.7, margin: '4px 0 24px' }}>
+      <p className="pt-footnote">
+        <Icon name="refresh" size={13} />
         Updated {formatTimeAgo(view.updatedAt).toLowerCase()} · refreshes automatically
         <br />
+        <Icon name="lock" size={13} />
         This page shows the ambulance only — no patient details are shared. It stops working when the case ends.
       </p>
     </>,
@@ -354,23 +346,28 @@ function PublicTracking() {
  */
 function optOutCard(optedOut: boolean, busy: boolean, onChange: (optOut: boolean) => void) {
   return (
-    <div style={{ background: 'white', border: `1px solid ${C.line}`, borderRadius: '14px', padding: '16px 18px', marginBottom: '14px' }}>
-      <div style={{ fontSize: '14px', color: C.ink, fontWeight: 600, marginBottom: '4px' }}>
-        {optedOut ? 'You have stopped these alerts' : 'Getting these alerts by SMS'}
+    <section className="ui-card pt-card pt-pad pt-optout">
+      <span className="ui-icon-tile ui-icon-tile--sm tone-neutral"><Icon name={optedOut ? 'bell' : 'messageCircle'} size={17} /></span>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div className="pt-optout__title">
+          {optedOut ? 'You have stopped these alerts' : 'Getting these alerts by SMS'}
+        </div>
+        <p className="pt-optout__text">
+          {optedOut
+            ? 'You will not be texted about future emergencies for this person. This link still works while the current case is live.'
+            : 'You were listed as an emergency contact, so you are texted a link like this when an ambulance is dispatched.'}
+        </p>
+        <button
+          type="button"
+          onClick={() => onChange(!optedOut)}
+          disabled={busy}
+          className={`ui-btn ui-btn--sm ${optedOut ? 'ui-btn--soft' : 'ui-btn--secondary'}`}
+        >
+          {busy && <span className="ui-spinner" aria-hidden="true" />}
+          {busy ? 'Saving…' : optedOut ? 'Start alerts again' : 'Stop alerts'}
+        </button>
       </div>
-      <p style={{ margin: '0 0 12px', fontSize: '13px', color: C.sub, lineHeight: 1.55 }}>
-        {optedOut
-          ? 'You will not be texted about future emergencies for this person. This link still works while the current case is live.'
-          : 'You were listed as an emergency contact, so you are texted a link like this when an ambulance is dispatched.'}
-      </p>
-      <button
-        onClick={() => onChange(!optedOut)}
-        disabled={busy}
-        style={{ padding: '9px 14px', borderRadius: '8px', border: `1px solid ${optedOut ? C.green : C.line}`, background: optedOut ? C.greenSoft : 'white', color: optedOut ? C.green : C.sub, fontSize: '13px', fontWeight: 600, cursor: busy ? 'wait' : 'pointer' }}
-      >
-        {busy ? 'Saving…' : optedOut ? 'Start alerts again' : 'Stop alerts'}
-      </button>
-    </div>
+    </section>
   );
 }
 

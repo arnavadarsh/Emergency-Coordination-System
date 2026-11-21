@@ -1,17 +1,46 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { io } from 'socket.io-client';
 import TokenStorage from '../utils/tokenStorage';
 import '../styles/Dashboard.css';
-import { formatIstClock, formatIstDate, formatIstDateTime, formatIstFull, formatTimeAgo } from '../utils/datetime';
-import { BarChart, Bar, PieChart, Pie, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
-import CaseReportModal from '../components/CaseReportModal';
-import OperationsMap from '../components/OperationsMap';
-import { normalizeMedicalProfile, type MedicalProfile } from '../types/medicalProfile';
-import { API_BASE_URL } from '../config/api';
+import { formatIstClock, formatIstDate, formatIstDateTime, formatIstFull, formatTimeAgo } from '@shared/utils/datetime';
+import { BarChart, Bar, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LabelList } from 'recharts';
+import CreateAccountModal from '../components/CreateAccountModal';
+import DispatchQueue from '../components/admin/DispatchQueue';
+import { adminApi, errorText, type AdminAmbulance, type AdminHospital } from '../services/adminApi';
+import { normalizeMedicalProfile, type MedicalProfile } from '@shared/types/medicalProfile';
+import { API_BASE_URL, SOCKET_URL } from '../config/api';
+import { Icon, type IconName } from '@shared/components/ui/Icon';
+import { Badge, SeverityBadge, StatusBadge, TONE_COLOR, toneClass, type Tone } from '@shared/components/ui/Status';
+import { AnimatedNumber, BrandMark, EmptyState, PageError, PageLoading } from '@shared/components/ui/primitives';
+import { Modal } from '@shared/components/ui/Modal';
+import { NoticeStack, useNotices } from '@shared/components/ui/Notices';
 
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8'];
+// Loaded on first use: the map pulls in Leaflet, and most visits never open
+// either of these.
+const OperationsMap = lazy(() => import('../components/OperationsMap'));
+const CaseReportModal = lazy(() => import('../components/CaseReportModal'));
+// The admin controls are loaded the first time one is opened.
+const UserManageModal = lazy(() => import('../components/admin/UserManageModal'));
+const HospitalFormModal = lazy(() => import('../components/admin/HospitalFormModal'));
+const AmbulanceFormModal = lazy(() => import('../components/admin/AmbulanceFormModal'));
+const CaseControlModal = lazy(() => import('../components/admin/CaseControlModal'));
+const SystemPanel = lazy(() => import('../components/admin/SystemPanel'));
+const AuditPanel = lazy(() => import('../components/admin/AuditPanel'));
+
+// Changes arrive over the socket as they happen. This slow poll only catches
+// anything missed while the connection was down.
+const FALLBACK_REFRESH_MS = 5 * 60_000;
+
+// Chart colours come from the design system: one brand hue for single-series
+// charts, and the badge tones for booking states so a chart and a badge agree.
+const CHART = {
+  series: '#0891b2',
+  grid: '#e2e8f0',
+  tick: '#64748b',
+};
 
 interface SystemStats {
   totalUsers: number;
@@ -111,7 +140,17 @@ interface Booking {
   medicalProfile: MedicalProfile;
 }
 
-type TabType = 'dashboard' | 'map' | 'users' | 'hospitals' | 'ambulances' | 'pending' | 'bookings' | 'audit';
+type TabType = 'dashboard' | 'map' | 'users' | 'hospitals' | 'ambulances' | 'pending' | 'bookings' | 'audit' | 'system';
+
+/** The signed-in admin's own id, read from the token, so the console can stop them locking themselves out. */
+const currentAdminId = (): string | null => {
+  try {
+    const payload = (TokenStorage.getToken() ?? '').split('.')[1];
+    return payload ? JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))).sub ?? null : null;
+  } catch {
+    return null;
+  }
+};
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -148,6 +187,31 @@ const Dashboard = () => {
   const [ambulances, setAmbulances] = useState<Ambulance[]>([]);
   const [pendingAmbulances, setPendingAmbulances] = useState<PendingAmbulance[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
+  // Presentation only: mobile drawer, the registration awaiting a reject
+  // confirmation, and in-page notices in place of window.alert().
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [rejectTarget, setRejectTarget] = useState<PendingAmbulance | null>(null);
+  const [showCreateAccount, setShowCreateAccount] = useState(false);
+  const [manageUserId, setManageUserId] = useState<string | null>(null);
+  const [hospitalForm, setHospitalForm] = useState<AdminHospital | 'new' | null>(null);
+  const [ambulanceForm, setAmbulanceForm] = useState<AdminAmbulance | 'new' | null>(null);
+  const [caseControlId, setCaseControlId] = useState<string | null>(null);
+  // Full records (capabilities, staff, linked drivers, current trip) for the edit dialogs.
+  const [adminHospitals, setAdminHospitals] = useState<AdminHospital[]>([]);
+  const [adminAmbulances, setAdminAmbulances] = useState<AdminAmbulance[]>([]);
+  // Bumped on every live event, so panels that fetch their own data refetch.
+  const [liveTick, setLiveTick] = useState(0);
+  const { notices, notify, dismiss } = useNotices();
+
+  const fetchFleetDetails = async () => {
+    try {
+      const [h, a] = await Promise.all([adminApi.listHospitals(), adminApi.listAmbulances()]);
+      setAdminHospitals(h);
+      setAdminAmbulances(a);
+    } catch (err) {
+      console.error('Failed to fetch fleet details:', err);
+    }
+  };
 
   const fetchDashboardData = async () => {
     try {
@@ -289,7 +353,7 @@ const Dashboard = () => {
   const exportToCSV = (rows: any[], filename: string) => {
     const data = (rows || []).map(toReportRow);
     if (!data || data.length === 0) {
-      alert('No data to export');
+      notify({ tone: 'info', text: 'There is nothing to export yet.' });
       return;
     }
 
@@ -367,19 +431,46 @@ const Dashboard = () => {
     fetchBookings();
     fetchPendingAmbulances();
     
-    const refreshInterval = setInterval(() => {
+    const refreshAll = () => {
       fetchDashboardData();
       fetchBookings();
       fetchPendingAmbulances();
-    }, 30000);
+      fetchFleetDetails();
+      setLiveTick(t => t + 1);
+    };
+    fetchFleetDetails();
+    const refreshInterval = setInterval(refreshAll, FALLBACK_REFRESH_MS);
     
     const clockTimer = setInterval(() => {
       setCurrentTime(new Date());
     }, 1000);
 
+    // Live updates: the server sends new bookings, dispatch changes and fleet
+    // and hospital changes to the admin room. Bursts fold into one refetch.
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => { refreshTimer = null; refreshAll(); }, 500);
+    };
+    const socket = io(SOCKET_URL, { transports: ['websocket'], auth: cb => cb({ token: TokenStorage.getToken() }) });
+    let connectedBefore = false;
+    socket.on('connect', () => {
+      // Catch up on anything that happened while the connection was down.
+      if (connectedBefore) scheduleRefresh();
+      connectedBefore = true;
+    });
+    for (const event of ['booking_created', 'dispatch_assigned', 'dispatch_status_updated', 'dispatch_diverted', 'ambulance_status_updated', 'hospital_status_updated', 'settings_updated']) {
+      socket.on(event, scheduleRefresh);
+    }
+    socket.on('system_announcement', (p: { message: string; tone: Tone }) => {
+      notify({ tone: p.tone ?? 'info', title: 'Announcement', text: p.message, sticky: true });
+    });
+
     return () => {
       clearInterval(refreshInterval);
       clearInterval(clockTimer);
+      if (refreshTimer) clearTimeout(refreshTimer);
+      socket.disconnect();
     };
   }, []);
 
@@ -389,6 +480,17 @@ const Dashboard = () => {
       fetchFilteredUsers();
     }
   }, [userSearch, userRoleFilter, userStatusFilter, userPage]);
+
+  /** After any admin control: confirm it, and pull fresh data everywhere. */
+  const afterAdminChange = (message: string) => {
+    notify({ tone: 'success', text: message });
+    fetchDashboardData();
+    fetchBookings();
+    fetchPendingAmbulances();
+    fetchFleetDetails();
+    setLiveTick(t => t + 1);
+    if (userSearch || userRoleFilter !== 'ALL' || userStatusFilter !== 'ALL' || userPage > 1) fetchFilteredUsers();
+  };
 
   const handleLogout = () => {
     TokenStorage.removeToken();
@@ -405,15 +507,14 @@ const Dashboard = () => {
       );
       await fetchPendingAmbulances();
       await fetchDashboardData();
-      alert('Ambulance verified successfully!');
+      notify({ tone: 'success', text: 'Ambulance verified and approved.' });
     } catch (err) {
       console.error('Failed to verify ambulance:', err);
-      alert('Failed to verify ambulance');
+      notify({ tone: 'danger', title: 'Not verified', text: 'Failed to verify ambulance.' });
     }
   };
 
   const handleRejectAmbulance = async (ambulanceId: string) => {
-    if (!window.confirm('Are you sure you want to reject this registration?')) return;
     try {
       const token = TokenStorage.getToken();
       await axios.delete(
@@ -421,10 +522,10 @@ const Dashboard = () => {
         { headers: { Authorization: `Bearer ${token}` } }
       );
       await fetchPendingAmbulances();
-      alert('Ambulance registration rejected');
+      notify({ tone: 'info', text: 'Ambulance registration rejected.' });
     } catch (err) {
       console.error('Failed to reject ambulance:', err);
-      alert('Failed to reject ambulance');
+      notify({ tone: 'danger', title: 'Not rejected', text: 'Failed to reject ambulance.' });
     }
   };
 
@@ -439,7 +540,7 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update user status:', err);
-      alert('Failed to update user status');
+      notify({ tone: 'danger', text: errorText(err, 'Failed to update user status.') });
     }
   };
 
@@ -454,7 +555,7 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update user role:', err);
-      alert('Failed to update user role');
+      notify({ tone: 'danger', text: errorText(err, 'Failed to update user role.') });
     }
   };
 
@@ -469,7 +570,7 @@ const Dashboard = () => {
       await fetchDashboardData();
     } catch (err) {
       console.error('Failed to update hospital status:', err);
-      alert('Failed to update hospital status');
+      notify({ tone: 'danger', text: 'Failed to update hospital status.' });
     }
   };
 
@@ -482,34 +583,20 @@ const Dashboard = () => {
         { headers: { Authorization: `Bearer ${token}` } }
       );
       await fetchDashboardData();
+      fetchFleetDetails();
     } catch (err) {
       console.error('Failed to update ambulance status:', err);
-      alert('Failed to update ambulance status');
+      notify({ tone: 'danger', text: errorText(err, 'Failed to update ambulance status.') });
     }
   };
 
 
   if (loading) {
-    return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Loading...</div>
-          <div style={{ color: '#666' }}>Fetching data from server</div>
-        </div>
-      </div>
-    );
+    return <PageLoading label="Loading admin console…" />;
   }
 
   if (error) {
-    return (
-      <div className="dashboard-container" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>
-        <div style={{ textAlign: 'center', color: '#ff4444' }}>
-          <div style={{ fontSize: '24px', marginBottom: '10px' }}>Error</div>
-          <div>{error}</div>
-          <button onClick={fetchDashboardData} style={{ marginTop: '20px', padding: '10px 20px', cursor: 'pointer' }}>Retry</button>
-        </div>
-      </div>
-    );
+    return <PageError message={error} onRetry={fetchDashboardData} />;
   }
 
   const renderDashboardTab = () => {
@@ -527,14 +614,15 @@ const Dashboard = () => {
     ];
 
     const bookingStatusData = systemStats.bookingStats ? [
-      { name: 'Active', value: systemStats.bookingStats.active || 0 },
-      { name: 'Completed', value: systemStats.bookingStats.completed || 0 },
-      { name: 'Cancelled', value: systemStats.bookingStats.cancelled || 0 },
+      { name: 'Active', value: systemStats.bookingStats.active || 0, tone: 'info' as Tone },
+      { name: 'Completed', value: systemStats.bookingStats.completed || 0, tone: 'success' as Tone },
+      { name: 'Cancelled', value: systemStats.bookingStats.cancelled || 0, tone: 'neutral' as Tone },
     ] : [
-      { name: 'Active', value: systemStats.activeBookings || 0 },
-      { name: 'Completed', value: systemStats.completedToday || 0 },
-      { name: 'Cancelled', value: 0 },
+      { name: 'Active', value: systemStats.activeBookings || 0, tone: 'info' as Tone },
+      { name: 'Completed', value: systemStats.completedToday || 0, tone: 'success' as Tone },
+      { name: 'Cancelled', value: 0, tone: 'neutral' as Tone },
     ];
+    const bookingTotal = bookingStatusData.reduce((sum, d) => sum + d.value, 0);
 
     // Mock line chart data (bookings trend over days) - in real scenario, fetch from API
     const bookingsTrendData = [
@@ -547,138 +635,186 @@ const Dashboard = () => {
       { day: 'Sun', bookings: 38 },
     ];
 
+    const kpis: { label: string; value: number; icon: IconName; tone: Tone; meta: string; tab?: TabType; alert?: boolean }[] = [
+      { label: 'Active bookings', value: systemStats.activeBookings, icon: 'siren', tone: 'danger', meta: 'In progress now', tab: 'bookings', alert: systemStats.activeBookings > 0 },
+      { label: 'Emergencies', value: systemStats.emergenciesHandled, icon: 'alertTriangle', tone: 'orange', meta: 'Handled today' },
+      { label: 'Completed today', value: systemStats.completedToday, icon: 'checkCircle', tone: 'success', meta: 'Successful transports' },
+      { label: 'Ambulances', value: systemStats.totalAmbulances, icon: 'ambulance', tone: 'brand', meta: 'Manage fleet', tab: 'ambulances' },
+      { label: 'Hospitals', value: systemStats.totalHospitals, icon: 'hospital', tone: 'info', meta: 'Manage hospitals', tab: 'hospitals' },
+      { label: 'Total users', value: systemStats.totalUsers, icon: 'users', tone: 'violet', meta: 'Manage accounts', tab: 'users' },
+    ];
+
+    const tooltipStyle = {
+      borderRadius: 10,
+      border: '1px solid #e2e8f0',
+      boxShadow: '0 10px 20px -6px rgba(15,23,42,.12)',
+      fontSize: 13,
+      padding: '8px 12px',
+    };
+
     return (
       <>
-        <div className="stats-grid">
-          <div className="stat-card" onClick={() => setActiveTab('users')} style={{ cursor: 'pointer' }}>
-            <div className="stat-header">
-              <h3>Total Users</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3z"/></svg>
-            </div>
-            <div className="stat-value">{systemStats.totalUsers}</div>
-            <div className="stat-footer"><span className="stat-detail">Click to manage</span></div>
-          </div>
-          <div className="stat-card" onClick={() => setActiveTab('hospitals')} style={{ cursor: 'pointer' }}>
-            <div className="stat-header">
-              <h3>Hospitals</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-1.99.9-1.99 2L3 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 11h-4v4h-4v-4H6v-4h4V6h4v4h4v4z"/></svg>
-            </div>
-            <div className="stat-value">{systemStats.totalHospitals}</div>
-            <div className="stat-footer"><span className="stat-detail">Click to manage</span></div>
-          </div>
-          <div className="stat-card" onClick={() => setActiveTab('ambulances')} style={{ cursor: 'pointer' }}>
-            <div className="stat-header">
-              <h3>Ambulances</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99z"/></svg>
-            </div>
-            <div className="stat-value">{systemStats.totalAmbulances}</div>
-            <div className="stat-footer"><span className="stat-detail">Click to manage</span></div>
-          </div>
-          <div className="stat-card highlight" onClick={() => setActiveTab('bookings')} style={{ cursor: 'pointer' }}>
-            <div className="stat-header">
-              <h3>Active Bookings</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-            </div>
-            <div className="stat-value">{systemStats.activeBookings}</div>
-            <div className="stat-footer"><span className="stat-badge active">Click to view</span></div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-header">
-              <h3>Completed Today</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.2L4.8 12l-1.4 1.4L9 19 21 7l-1.4-1.4L9 16.2z"/></svg>
-            </div>
-            <div className="stat-value">{systemStats.completedToday}</div>
-            <div className="stat-footer"><span className="stat-detail">Successful transports</span></div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-header">
-              <h3>Emergencies</h3>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2L1 21h22L12 2zm0 3.99L19.53 19H4.47L12 5.99zM11 16h2v2h-2zm0-6h2v4h-2z"/></svg>
-            </div>
-            <div className="stat-value">{systemStats.emergenciesHandled}</div>
-            <div className="stat-footer"><span className="stat-detail">Handled today</span></div>
-          </div>
-        </div>
+        {pendingAmbulances.length > 0 && (
+          <button type="button" className="adm-prompt tone-warning ui-enter" onClick={() => setActiveTab('pending')}>
+            <span className="ui-icon-tile ui-icon-tile--sm"><Icon name="badgeCheck" size={18} /></span>
+            <span className="adm-prompt__text">
+              <strong>{pendingAmbulances.length} ambulance registration{pendingAmbulances.length === 1 ? '' : 's'}</strong> waiting for verification
+            </span>
+            <span className="adm-prompt__cta">Review <Icon name="arrowRight" size={15} /></span>
+          </button>
+        )}
+
+        <section className="ui-kpi-grid ui-kpi-grid--3" aria-label="System figures">
+          {kpis.map((kpi, i) => {
+            const body = (
+              <>
+                <div className="ui-kpi__top">
+                  <span className="ui-kpi__label">{kpi.label}</span>
+                  <span className="ui-kpi__icon"><Icon name={kpi.icon} /></span>
+                </div>
+                <div className="ui-kpi__value"><AnimatedNumber value={kpi.value} /></div>
+                <div className="ui-kpi__meta">
+                  {kpi.tab ? <span className="adm-kpi-link">{kpi.meta}<Icon name="chevronRight" size={14} /></span> : kpi.meta}
+                </div>
+              </>
+            );
+            const className = `ui-card ui-kpi ui-enter ${toneClass(kpi.tone)}${kpi.alert ? ' ui-kpi--alert' : ''}${kpi.tab ? ' ui-card--interactive' : ''}`;
+            return kpi.tab ? (
+              <button key={kpi.label} type="button" className={className} style={{ ['--i' as string]: i }} onClick={() => setActiveTab(kpi.tab!)}>
+                {body}
+              </button>
+            ) : (
+              <div key={kpi.label} className={className} style={{ ['--i' as string]: i }}>{body}</div>
+            );
+          })}
+        </section>
 
         {/* Chart Visualizations */}
-        <div className="charts-section" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(350px, 1fr))', gap: '20px', marginBottom: '20px' }}>
-          <div className="chart-card" style={{ background: 'white', borderRadius: '8px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>Users by Role</h3>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={roleChartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="name" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Bar dataKey="count" fill="#0088FE" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div className="chart-card" style={{ background: 'white', borderRadius: '8px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>Booking Status Distribution</h3>
-            <ResponsiveContainer width="100%" height={250}>
-              <PieChart>
-                <Pie
-                  data={bookingStatusData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={({ name, percent }) => `${name}: ${((percent ?? 0) * 100).toFixed(0)}%`}
-                  outerRadius={80}
-                  fill="#8884d8"
-                  dataKey="value"
-                >
-                  {bookingStatusData.map((_entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                  ))}
-                </Pie>
-                <Tooltip />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div className="chart-card" style={{ background: 'white', borderRadius: '8px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)', gridColumn: 'span 1' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '20px', fontSize: '18px' }}>Bookings Trend (Last 7 Days)</h3>
-            <ResponsiveContainer width="100%" height={250}>
-              <LineChart data={bookingsTrendData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis dataKey="day" />
-                <YAxis />
-                <Tooltip />
-                <Legend />
-                <Line type="monotone" dataKey="bookings" stroke="#8884d8" strokeWidth={2} />
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        <div className="content-grid">
-          <div className="audit-card">
-            <div className="card-header">
-              <h3>Recent Audit Logs</h3>
-              <button onClick={() => setActiveTab('audit')} className="view-all" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#0066cc' }}>View All</button>
+        <div className="adm-charts">
+          <section className="ui-card ui-enter adm-chart" style={{ ['--i' as string]: 3 }} aria-labelledby="chart-roles">
+            <div className="ui-card__header">
+              <div>
+                <h2 id="chart-roles" className="ui-card__title">Users by role</h2>
+                <div className="ui-card__subtitle">Registered accounts</div>
+              </div>
             </div>
-            <div className="audit-list">
-              {recentAudit.length > 0 ? recentAudit.slice(0, 5).map(log => (
-                <div key={log.id} className="audit-item">
-                  <div className="audit-id">{String(log.id).slice(0, 8)}</div>
-                  <div className="audit-details">
-                    <div className="audit-action">
-                      <span className="action-badge">{log.action}</span>
-                      <span className="entity-info">{log.entity}: {String(log.entityId).slice(0, 8)}</span>
-                    </div>
-                    <div className="audit-actor">Actor: {log.actor}</div>
-                  </div>
-                  <div className="audit-time">{log.timestamp}</div>
-                </div>
-              )) : (
-                <div style={{ padding: '20px', textAlign: 'center', color: '#888' }}>No recent audit logs</div>
+            <div className="adm-chart__body">
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={roleChartData} margin={{ top: 22, right: 8, left: -12, bottom: 0 }}>
+                  <CartesianGrid vertical={false} stroke={CHART.grid} />
+                  <XAxis dataKey="name" tickLine={false} axisLine={{ stroke: CHART.grid }} tick={{ fill: CHART.tick, fontSize: 12 }} />
+                  <YAxis tickLine={false} axisLine={false} tick={{ fill: CHART.tick, fontSize: 12 }} allowDecimals={false} />
+                  <Tooltip cursor={{ fill: 'rgba(8,145,178,0.06)' }} contentStyle={tooltipStyle} />
+                  <Bar dataKey="count" name="Accounts" fill={CHART.series} radius={[4, 4, 0, 0]} maxBarSize={44}>
+                    <LabelList dataKey="count" position="top" style={{ fill: '#334155', fontSize: 12, fontWeight: 600 }} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+
+          <section className="ui-card ui-enter adm-chart" style={{ ['--i' as string]: 4 }} aria-labelledby="chart-status">
+            <div className="ui-card__header">
+              <div>
+                <h2 id="chart-status" className="ui-card__title">Booking status</h2>
+                <div className="ui-card__subtitle">{bookingTotal} bookings in total</div>
+              </div>
+            </div>
+            <div className="adm-chart__body adm-split">
+              <div className="adm-split__bar" role="img" aria-label={bookingStatusData.map(d => `${d.name} ${d.value}`).join(', ')}>
+                {bookingStatusData.filter(d => d.value > 0).map(d => (
+                  <span
+                    key={d.name}
+                    className="adm-split__seg"
+                    style={{ flexGrow: d.value, background: d.tone === 'neutral' ? '#64748b' : TONE_COLOR[d.tone] }}
+                    title={`${d.name}: ${d.value}`}
+                  />
+                ))}
+              </div>
+              <ul className="adm-split__legend">
+                {bookingStatusData.map(d => (
+                  <li key={d.name}>
+                    <span className="adm-split__key" style={{ background: d.tone === 'neutral' ? '#64748b' : TONE_COLOR[d.tone] }} />
+                    <span className="adm-split__name">{d.name}</span>
+                    <span className="adm-split__value ui-num">{d.value}</span>
+                    <span className="adm-split__pct ui-num">{bookingTotal ? Math.round((d.value / bookingTotal) * 100) : 0}%</span>
+                  </li>
+                ))}
+              </ul>
+              {systemStats.bookingStats?.completionRate && (
+                <p className="ui-help">Completion rate {systemStats.bookingStats.completionRate}</p>
               )}
             </div>
-          </div>
+          </section>
+
+          <section className="ui-card ui-enter adm-chart" style={{ ['--i' as string]: 5 }} aria-labelledby="chart-trend">
+            <div className="ui-card__header">
+              <div>
+                <h2 id="chart-trend" className="ui-card__title">Bookings trend</h2>
+                <div className="ui-card__subtitle">Last 7 days</div>
+              </div>
+              <Badge tone="warning" icon="info" title="These figures are placeholder values, not live booking history.">Sample data</Badge>
+            </div>
+            <div className="adm-chart__body">
+              <ResponsiveContainer width="100%" height={240}>
+                <AreaChart data={bookingsTrendData} margin={{ top: 12, right: 12, left: -12, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor={CHART.series} stopOpacity={0.18} />
+                      <stop offset="100%" stopColor={CHART.series} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid vertical={false} stroke={CHART.grid} />
+                  <XAxis dataKey="day" tickLine={false} axisLine={{ stroke: CHART.grid }} tick={{ fill: CHART.tick, fontSize: 12 }} />
+                  <YAxis tickLine={false} axisLine={false} tick={{ fill: CHART.tick, fontSize: 12 }} allowDecimals={false} />
+                  <Tooltip cursor={{ stroke: '#94a3b8', strokeWidth: 1 }} contentStyle={tooltipStyle} />
+                  <Area
+                    type="monotone"
+                    dataKey="bookings"
+                    name="Bookings"
+                    stroke={CHART.series}
+                    strokeWidth={2}
+                    fill="url(#trendFill)"
+                    dot={{ r: 4, fill: '#fff', stroke: CHART.series, strokeWidth: 2 }}
+                    activeDot={{ r: 5, fill: CHART.series, stroke: '#fff', strokeWidth: 2 }}
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
         </div>
+
+        <section className="ui-card ui-enter" style={{ ['--i' as string]: 6 }} aria-labelledby="audit-recent">
+          <div className="ui-card__header">
+            <div>
+              <h2 id="audit-recent" className="ui-card__title"><Icon name="scrollText" size={17} />Recent audit logs</h2>
+              <div className="ui-card__subtitle">Latest system and admin actions</div>
+            </div>
+            <button type="button" onClick={() => setActiveTab('audit')} className="ui-btn ui-btn--ghost ui-btn--sm">
+              View all
+              <Icon name="chevronRight" size={15} />
+            </button>
+          </div>
+          {recentAudit.length > 0 ? (
+            <div className="ui-list">
+              {recentAudit.slice(0, 5).map(log => (
+                <div key={log.id} className="ui-list__row adm-audit">
+                  <span className="ui-icon-tile ui-icon-tile--sm tone-neutral"><Icon name="activity" size={16} /></span>
+                  <div className="adm-audit__main">
+                    <div className="ui-row">
+                      <Badge tone="brand">{log.action.replace(/_/g, ' ')}</Badge>
+                      <span className="adm-audit__entity">{log.entity} <code className="ui-code">{String(log.entityId).slice(0, 8)}</code></span>
+                    </div>
+                    <div className="adm-audit__actor">by {log.actor}</div>
+                  </div>
+                  <div className="adm-audit__time">{log.timestamp}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState icon="scrollText" title="No recent audit logs">Actions taken in the system will be recorded here.</EmptyState>
+          )}
+        </section>
       </>
     );
   };
@@ -688,52 +824,45 @@ const Dashboard = () => {
     const endIndex = Math.min(startIndex + userLimit, users.length);
     const paginatedUsers = users.slice(startIndex, endIndex);
     const totalPages = Math.ceil(totalUsers / userLimit);
+    const filtered = !!(userSearch || userRoleFilter !== 'ALL' || userStatusFilter !== 'ALL');
 
     return (
-      <div className="management-section">
-        <div className="section-header">
-          <h2>User Management</h2>
-          <span className="count-badge">{totalUsers || users.length} users</span>
+      <section className="ui-enter">
+        <div className="ui-page-header">
+          <div>
+            <p className="ui-page-header__text">Create staff accounts, change roles, activate or deactivate accounts, and export reports.</p>
+          </div>
+          <div className="ui-row">
+            <Badge tone="info" large>{totalUsers || users.length} users</Badge>
+            <button type="button" className="ui-btn ui-btn--primary" onClick={() => setShowCreateAccount(true)}>
+              <Icon name="userPlus" size={16} />
+              Create account
+            </button>
+          </div>
         </div>
 
-        {/* Search and Filter Controls */}
-        <div className="filter-controls" style={{ marginBottom: '20px', display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center', background: 'white', padding: '16px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-          <div style={{ flex: '1 1 300px' }}>
+        <div className="ui-toolbar">
+          <div className="ui-input-wrap ui-toolbar__search">
+            <Icon name="search" size={16} />
             <input
+              className="ui-input"
               type="text"
-              placeholder="🔍 Search by name, email, or phone..."
+              placeholder="Search by name, email, or phone…"
+              aria-label="Search users"
               value={userSearch}
               onChange={(e) => {
                 setUserSearch(e.target.value);
                 setUserPage(1);
               }}
-              style={{ 
-                width: '100%', 
-                padding: '10px 16px', 
-                border: '2px solid #e0e0e0', 
-                borderRadius: '8px',
-                fontSize: '14px',
-                outline: 'none',
-                transition: 'border-color 0.2s'
-              }}
-              onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-              onBlur={(e) => e.target.style.borderColor = '#e0e0e0'}
             />
           </div>
-          
           <select
+            className="ui-select adm-filter"
+            aria-label="Filter by role"
             value={userRoleFilter}
             onChange={(e) => {
               setUserRoleFilter(e.target.value);
               setUserPage(1);
-            }}
-            style={{ 
-              padding: '10px 16px', 
-              border: '2px solid #e0e0e0', 
-              borderRadius: '8px',
-              fontSize: '14px',
-              cursor: 'pointer',
-              background: 'white'
             }}
           >
             <option value="ALL">All Roles</option>
@@ -742,130 +871,94 @@ const Dashboard = () => {
             <option value="HOSPITAL">Hospital</option>
             <option value="ADMIN">Admin</option>
           </select>
-
           <select
+            className="ui-select adm-filter"
+            aria-label="Filter by status"
             value={userStatusFilter}
             onChange={(e) => {
               setUserStatusFilter(e.target.value);
               setUserPage(1);
-            }}
-            style={{ 
-              padding: '10px 16px', 
-              border: '2px solid #e0e0e0', 
-              borderRadius: '8px',
-              fontSize: '14px',
-              cursor: 'pointer',
-              background: 'white'
             }}
           >
             <option value="ALL">All Status</option>
             <option value="ACTIVE">Active</option>
             <option value="INACTIVE">Inactive</option>
           </select>
-
-          <button
-            onClick={() => exportToCSV(users, 'users')}
-            style={{
-              padding: '10px 20px',
-              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              fontSize: '14px',
-              fontWeight: '600',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              transition: 'transform 0.2s'
-            }}
-            onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-            onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
-          >
-            <span>📥</span> Export CSV
-          </button>
-
-          {(userSearch || userRoleFilter !== 'ALL' || userStatusFilter !== 'ALL') && (
+          {filtered && (
             <button
+              type="button"
+              className="ui-btn ui-btn--ghost"
               onClick={() => {
                 setUserSearch('');
                 setUserRoleFilter('ALL');
                 setUserStatusFilter('ALL');
                 setUserPage(1);
               }}
-              style={{
-                padding: '10px 20px',
-                background: '#f5f5f5',
-                color: '#666',
-                border: '2px solid #e0e0e0',
-                borderRadius: '8px',
-                fontSize: '14px',
-                fontWeight: '600',
-                cursor: 'pointer'
-              }}
             >
-              Clear Filters
+              <Icon name="x" size={15} />
+              Clear filters
             </button>
           )}
+          <button type="button" className="ui-btn ui-btn--secondary" onClick={() => exportToCSV(users, 'users')}>
+            <Icon name="download" size={16} />
+            Export CSV
+          </button>
         </div>
 
-        {loading ? (
-          <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>
-            <div style={{ fontSize: '18px', marginBottom: '8px' }}>Loading users...</div>
-            <div style={{ width: '40px', height: '40px', border: '4px solid #f3f3f3', borderTop: '4px solid #0066cc', borderRadius: '50%', margin: '0 auto', animation: 'spin 1s linear infinite' }}></div>
-          </div>
-        ) : paginatedUsers.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '40px', background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <div style={{ fontSize: '48px', marginBottom: '16px' }}>🔍</div>
-            <div style={{ fontSize: '18px', color: '#666', marginBottom: '8px' }}>No users found</div>
-            <div style={{ fontSize: '14px', color: '#999' }}>Try adjusting your search or filter criteria</div>
+        {paginatedUsers.length === 0 ? (
+          <div className="ui-card">
+            <EmptyState icon="search" title="No users found">Try adjusting your search or filter criteria.</EmptyState>
           </div>
         ) : (
           <>
-            <div className="table-container">
-              <table className="data-table enhanced-table">
+            <div className="ui-table-wrap">
+              <table className="ui-table ui-table--stack">
                 <thead>
                   <tr>
-                    <th>Email</th>
-                    <th>Role</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                    <th>Actions</th>
+                    <th scope="col">Email</th>
+                    <th scope="col">Role</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Created</th>
+                    <th scope="col"><span className="ui-sr-only">Actions</span></th>
                   </tr>
                 </thead>
                 <tbody>
                   {paginatedUsers.map(user => (
-                    <tr key={user.id} className="table-row-hover">
-                      <td>{user.email}</td>
-                      <td>
-                        <select 
-                          value={user.role} 
-                          onChange={(e) => handleUpdateUserRole(user.id, e.target.value)} 
-                          style={{ 
-                            padding: '8px 12px', 
-                            borderRadius: '6px',
-                            border: '2px solid #e0e0e0',
-                            cursor: 'pointer',
-                            fontSize: '14px'
-                          }}
-                        >
-                          <option value="USER">USER</option>
-                          <option value="DRIVER">DRIVER</option>
-                          <option value="HOSPITAL">HOSPITAL</option>
-                          <option value="ADMIN">ADMIN</option>
-                        </select>
+                    <tr key={user.id}>
+                      <td data-label="Email">
+                        <div className="adm-user">
+                          <span className="ui-avatar">{user.email.charAt(0).toUpperCase()}</span>
+                          <span className="ui-table__primary">{user.email}</span>
+                        </div>
                       </td>
-                      <td>
-                        <span className={`status-badge ${user.isActive ? 'status-active' : 'status-inactive'}`}>
-                          {user.isActive ? 'Active' : 'Inactive'}
-                        </span>
+                      <td data-label="Role">
+                        <div className="adm-role">
+                          <select
+                            className="ui-select ui-select--sm"
+                            aria-label={`Change role for ${user.email}`}
+                            value={user.role}
+                            onChange={(e) => handleUpdateUserRole(user.id, e.target.value)}
+                          >
+                            <option value="USER">USER</option>
+                            <option value="DRIVER">DRIVER</option>
+                            <option value="HOSPITAL">HOSPITAL</option>
+                            <option value="ADMIN">ADMIN</option>
+                          </select>
+                        </div>
                       </td>
-                      <td title={formatIstFull(user.createdAt)}>{formatIstDate(user.createdAt)}</td>
-                      <td>
-                        <button 
-                          onClick={() => handleUpdateUserStatus(user.id, !user.isActive)} 
-                          className={`action-btn ${user.isActive ? 'action-btn-danger' : 'action-btn-success'}`}
+                      <td data-label="Status"><StatusBadge status={user.isActive ? 'ACTIVE' : 'INACTIVE'} variant="dot" /></td>
+                      <td data-label="Created" className="ui-table__secondary" title={formatIstFull(user.createdAt)}>{formatIstDate(user.createdAt)}</td>
+                      <td data-label="Actions" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
+                        <button type="button" className="ui-btn ui-btn--secondary ui-btn--sm" onClick={() => setManageUserId(user.id)}>
+                          <Icon name="sliders" size={14} />
+                          Manage
+                        </button>{' '}
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateUserStatus(user.id, !user.isActive)}
+                          className={`ui-btn ui-btn--sm ${user.isActive ? 'ui-btn--danger-soft' : 'ui-btn--secondary'}`}
                         >
+                          <Icon name={user.isActive ? 'ban' : 'checkCircle'} size={14} />
                           {user.isActive ? 'Deactivate' : 'Activate'}
                         </button>
                       </td>
@@ -876,69 +969,35 @@ const Dashboard = () => {
             </div>
 
             {/* Pagination Controls */}
-            <div className="pagination-controls" style={{ 
-              display: 'flex', 
-              justifyContent: 'space-between', 
-              alignItems: 'center', 
-              marginTop: '20px',
-              padding: '16px',
-              background: 'white',
-              borderRadius: '8px',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
-            }}>
-              <div style={{ color: '#666', fontSize: '14px' }}>
-                Showing {startIndex + 1}-{endIndex} of {totalUsers || users.length}
-              </div>
-              
-              <div style={{ display: 'flex', gap: '8px' }}>
+            <nav className="ui-pagination" aria-label="Pagination">
+              <span>
+                Showing <strong className="ui-num">{startIndex + 1}–{endIndex}</strong> of <span className="ui-num">{totalUsers || users.length}</span>
+              </span>
+              <div className="ui-row">
                 <button
+                  type="button"
+                  className="ui-btn ui-btn--secondary ui-btn--sm"
                   onClick={() => setUserPage(Math.max(1, userPage - 1))}
                   disabled={userPage === 1}
-                  style={{
-                    padding: '8px 16px',
-                    background: userPage === 1 ? '#f5f5f5' : '#0066cc',
-                    color: userPage === 1 ? '#999' : 'white',
-                    border: 'none',
-                    borderRadius: '6px',
-                    cursor: userPage === 1 ? 'not-allowed' : 'pointer',
-                    fontWeight: '600',
-                    fontSize: '14px'
-                  }}
                 >
-                  ← Previous
+                  <Icon name="chevronLeft" size={15} />
+                  Previous
                 </button>
-                
-                <div style={{ 
-                  padding: '8px 16px', 
-                  background: '#f5f5f5', 
-                  borderRadius: '6px',
-                  fontWeight: '600',
-                  fontSize: '14px'
-                }}>
-                  Page {userPage} of {totalPages || 1}
-                </div>
-                
+                <span className="adm-page ui-num">Page {userPage} of {totalPages || 1}</span>
                 <button
+                  type="button"
+                  className="ui-btn ui-btn--secondary ui-btn--sm"
                   onClick={() => setUserPage(Math.min(totalPages, userPage + 1))}
                   disabled={userPage >= totalPages}
-                  style={{
-                    padding: '8px 16px',
-                    background: userPage >= totalPages ? '#f5f5f5' : '#0066cc',
-                    color: userPage >= totalPages ? '#999' : 'white',
-                    border: 'none',
-                    borderRadius: '6px',
-                    cursor: userPage >= totalPages ? 'not-allowed' : 'pointer',
-                    fontWeight: '600',
-                    fontSize: '14px'
-                  }}
                 >
-                  Next →
+                  Next
+                  <Icon name="chevronRight" size={15} />
                 </button>
               </div>
-            </div>
+            </nav>
           </>
         )}
-      </div>
+      </section>
     );
   };
 
@@ -948,131 +1007,105 @@ const Dashboard = () => {
     );
 
     return (
-      <div className="management-section">
-        <div className="section-header">
-          <h2>Hospital Management</h2>
-          <span className="count-badge">{filteredHospitals.length} hospitals</span>
+      <section className="ui-enter">
+        <div className="ui-page-header">
+          <div>
+            <p className="ui-page-header__text">Intake status and live bed capacity across the network. Add hospitals, edit their details and capabilities, or retire them.</p>
+          </div>
+          <div className="ui-row">
+            <Badge tone="info" large>{filteredHospitals.length} hospitals</Badge>
+            <button type="button" className="ui-btn ui-btn--primary" onClick={() => setHospitalForm('new')}>
+              <Icon name="plus" size={16} />
+              Add hospital
+            </button>
+          </div>
         </div>
 
-        {/* Search Control */}
-        <div className="filter-controls" style={{ marginBottom: '20px', display: 'flex', gap: '12px', alignItems: 'center', background: 'white', padding: '16px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-          <div style={{ flex: '1 1 300px' }}>
+        <div className="ui-toolbar">
+          <div className="ui-input-wrap ui-toolbar__search">
+            <Icon name="search" size={16} />
             <input
+              className="ui-input"
               type="text"
-              placeholder="🔍 Search by hospital name..."
+              placeholder="Search by hospital name…"
+              aria-label="Search hospitals"
               value={hospitalSearch}
               onChange={(e) => setHospitalSearch(e.target.value)}
-              style={{ 
-                width: '100%', 
-                padding: '10px 16px', 
-                border: '2px solid #e0e0e0', 
-                borderRadius: '8px',
-                fontSize: '14px',
-                outline: 'none',
-                transition: 'border-color 0.2s'
-              }}
-              onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-              onBlur={(e) => e.target.style.borderColor = '#e0e0e0'}
             />
           </div>
-          
           {hospitalSearch && (
-            <button
-              onClick={() => setHospitalSearch('')}
-              style={{
-                padding: '10px 20px',
-                background: '#f5f5f5',
-                color: '#666',
-                border: '2px solid #e0e0e0',
-                borderRadius: '8px',
-                fontSize: '14px',
-                fontWeight: '600',
-                cursor: 'pointer'
-              }}
-            >
-              Clear Search
+            <button type="button" className="ui-btn ui-btn--ghost" onClick={() => setHospitalSearch('')}>
+              <Icon name="x" size={15} />
+              Clear search
             </button>
           )}
         </div>
 
-        {loading ? (
-          <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>
-            <div style={{ fontSize: '18px', marginBottom: '8px' }}>Loading hospitals...</div>
-            <div style={{ width: '40px', height: '40px', border: '4px solid #f3f3f3', borderTop: '4px solid #0066cc', borderRadius: '50%', margin: '0 auto', animation: 'spin 1s linear infinite' }}></div>
-          </div>
-        ) : filteredHospitals.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '40px', background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <div style={{ fontSize: '48px', marginBottom: '16px' }}>🏥</div>
-            <div style={{ fontSize: '18px', color: '#666', marginBottom: '8px' }}>No hospitals found</div>
-            <div style={{ fontSize: '14px', color: '#999' }}>Try adjusting your search criteria</div>
+        {filteredHospitals.length === 0 ? (
+          <div className="ui-card">
+            <EmptyState icon="hospital" title="No hospitals found">Try adjusting your search criteria.</EmptyState>
           </div>
         ) : (
-          <div className="table-container">
-            <table className="data-table enhanced-table">
+          <div className="ui-table-wrap">
+            <table className="ui-table ui-table--stack">
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>Address</th>
-                  <th>Status</th>
-                  <th>Beds (Available/Total)</th>
-                  <th>Actions</th>
+                  <th scope="col">Name</th>
+                  <th scope="col">Address</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Beds available</th>
+                  <th scope="col">Set status</th>
+                  <th scope="col"><span className="ui-sr-only">Edit</span></th>
                 </tr>
               </thead>
               <tbody>
-                {filteredHospitals.map(hospital => (
-                  <tr key={hospital.id} className="table-row-hover">
-                    <td><strong>{hospital.name}</strong></td>
-                    <td>{hospital.address}</td>
-                    <td>
-                      <span className={`status-badge status-${hospital.status.toLowerCase()}`}>
-                        {hospital.status}
-                      </span>
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                        <span style={{ fontWeight: '600', color: hospital.availableBeds > 10 ? '#00875a' : '#de350b' }}>
-                          {hospital.availableBeds}
-                        </span> / {hospital.totalBeds}
-                        <div style={{ 
-                          width: '60px', 
-                          height: '6px', 
-                          background: '#e0e0e0', 
-                          borderRadius: '3px',
-                          overflow: 'hidden'
-                        }}>
-                          <div style={{ 
-                            width: `${(hospital.availableBeds / hospital.totalBeds) * 100}%`, 
-                            height: '100%', 
-                            background: hospital.availableBeds > 10 ? '#00875a' : '#de350b',
-                            transition: 'width 0.3s'
-                          }}></div>
+                {filteredHospitals.map(hospital => {
+                  const ratio = hospital.totalBeds ? hospital.availableBeds / hospital.totalBeds : 0;
+                  const bedTone: Tone = hospital.availableBeds > 10 ? 'success' : hospital.availableBeds > 0 ? 'warning' : 'danger';
+                  return (
+                    <tr key={hospital.id}>
+                      <td data-label="Name" className="ui-table__primary">{hospital.name}</td>
+                      <td data-label="Address" className="ui-table__secondary adm-address">{hospital.address}</td>
+                      <td data-label="Status"><StatusBadge status={hospital.status} /></td>
+                      <td data-label="Beds available">
+                        <div className={`adm-beds ${toneClass(bedTone)}`}>
+                          <span className="adm-beds__value ui-num"><strong>{hospital.availableBeds}</strong> / {hospital.totalBeds}</span>
+                          <div className="ui-meter adm-beds__meter">
+                            <div className="ui-meter__fill" style={{ width: `${Math.min(100, ratio * 100)}%` }} />
+                          </div>
                         </div>
-                      </div>
-                    </td>
-                    <td>
-                      <select 
-                        value={hospital.status} 
-                        onChange={(e) => handleUpdateHospitalStatus(hospital.id, e.target.value)} 
-                        style={{ 
-                          padding: '8px 12px', 
-                          borderRadius: '6px',
-                          border: '2px solid #e0e0e0',
-                          cursor: 'pointer',
-                          fontSize: '14px'
-                        }}
-                      >
-                        <option value="ACCEPTING">ACCEPTING</option>
-                        <option value="LIMITED">LIMITED</option>
-                        <option value="DIVERT">DIVERT</option>
-                      </select>
-                    </td>
-                  </tr>
-                ))}
+                      </td>
+                      <td data-label="Set status">
+                        <select
+                          className="ui-select ui-select--sm"
+                          aria-label={`Set status for ${hospital.name}`}
+                          value={hospital.status}
+                          onChange={(e) => handleUpdateHospitalStatus(hospital.id, e.target.value)}
+                        >
+                          <option value="ACCEPTING">ACCEPTING</option>
+                          <option value="LIMITED">LIMITED</option>
+                          <option value="DIVERT">DIVERT</option>
+                        </select>
+                      </td>
+                      <td data-label="Edit" style={{ textAlign: 'right' }}>
+                        <button
+                          type="button"
+                          className="ui-btn ui-btn--secondary ui-btn--sm"
+                          onClick={() => setHospitalForm(adminHospitals.find(h => h.id === hospital.id) ?? null)}
+                          disabled={!adminHospitals.some(h => h.id === hospital.id)}
+                        >
+                          <Icon name="pencil" size={14} />
+                          Edit
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
-      </div>
+      </section>
     );
   };
 
@@ -1082,106 +1115,75 @@ const Dashboard = () => {
     );
 
     return (
-      <div className="management-section">
-        <div className="section-header">
-          <h2>Ambulance Management</h2>
-          <span className="count-badge">{filteredAmbulances.length} ambulances</span>
+      <section className="ui-enter">
+        <div className="ui-page-header">
+          <div>
+            <p className="ui-page-header__text">Fleet availability. Units marked offline or in maintenance are not dispatched. Add units, edit them, set a position by hand, or retire them.</p>
+          </div>
+          <div className="ui-row">
+            <Badge tone="info" large>{filteredAmbulances.length} ambulances</Badge>
+            <button type="button" className="ui-btn ui-btn--primary" onClick={() => setAmbulanceForm('new')}>
+              <Icon name="plus" size={16} />
+              Add ambulance
+            </button>
+          </div>
         </div>
 
-        {/* Search Control */}
-        <div className="filter-controls" style={{ marginBottom: '20px', display: 'flex', gap: '12px', alignItems: 'center', background: 'white', padding: '16px', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-          <div style={{ flex: '1 1 300px' }}>
+        <div className="ui-toolbar">
+          <div className="ui-input-wrap ui-toolbar__search">
+            <Icon name="search" size={16} />
             <input
+              className="ui-input"
               type="text"
-              placeholder="🔍 Search by vehicle number..."
+              placeholder="Search by vehicle number…"
+              aria-label="Search ambulances"
               value={ambulanceSearch}
               onChange={(e) => setAmbulanceSearch(e.target.value)}
-              style={{ 
-                width: '100%', 
-                padding: '10px 16px', 
-                border: '2px solid #e0e0e0', 
-                borderRadius: '8px',
-                fontSize: '14px',
-                outline: 'none',
-                transition: 'border-color 0.2s'
-              }}
-              onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-              onBlur={(e) => e.target.style.borderColor = '#e0e0e0'}
             />
           </div>
-          
           {ambulanceSearch && (
-            <button
-              onClick={() => setAmbulanceSearch('')}
-              style={{
-                padding: '10px 20px',
-                background: '#f5f5f5',
-                color: '#666',
-                border: '2px solid #e0e0e0',
-                borderRadius: '8px',
-                fontSize: '14px',
-                fontWeight: '600',
-                cursor: 'pointer'
-              }}
-            >
-              Clear Search
+            <button type="button" className="ui-btn ui-btn--ghost" onClick={() => setAmbulanceSearch('')}>
+              <Icon name="x" size={15} />
+              Clear search
             </button>
           )}
         </div>
 
-        {loading ? (
-          <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>
-            <div style={{ fontSize: '18px', marginBottom: '8px' }}>Loading ambulances...</div>
-            <div style={{ width: '40px', height: '40px', border: '4px solid #f3f3f3', borderTop: '4px solid #0066cc', borderRadius: '50%', margin: '0 auto', animation: 'spin 1s linear infinite' }}></div>
-          </div>
-        ) : filteredAmbulances.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '40px', background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-            <div style={{ fontSize: '48px', marginBottom: '16px' }}>🚑</div>
-            <div style={{ fontSize: '18px', color: '#666', marginBottom: '8px' }}>No ambulances found</div>
-            <div style={{ fontSize: '14px', color: '#999' }}>Try adjusting your search criteria</div>
+        {filteredAmbulances.length === 0 ? (
+          <div className="ui-card">
+            <EmptyState icon="ambulance" title="No ambulances found">Try adjusting your search criteria.</EmptyState>
           </div>
         ) : (
-          <div className="table-container">
-            <table className="data-table enhanced-table">
+          <div className="ui-table-wrap">
+            <table className="ui-table ui-table--stack">
               <thead>
                 <tr>
-                  <th>Vehicle Number</th>
-                  <th>Type</th>
-                  <th>Status</th>
-                  <th>Actions</th>
+                  <th scope="col">Vehicle number</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Driver</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Set status</th>
+                  <th scope="col"><span className="ui-sr-only">Edit</span></th>
                 </tr>
               </thead>
               <tbody>
                 {filteredAmbulances.map(ambulance => (
-                  <tr key={ambulance.id} className="table-row-hover">
-                    <td><strong>{ambulance.vehicleNumber}</strong></td>
-                    <td>
-                      <span style={{ 
-                        padding: '4px 10px', 
-                        background: '#f0f0f0', 
-                        borderRadius: '6px',
-                        fontSize: '13px',
-                        fontWeight: '500'
-                      }}>
-                        {ambulance.vehicleType}
-                      </span>
+                  <tr key={ambulance.id}>
+                    <td data-label="Vehicle"><span className="ui-plate">{ambulance.vehicleNumber}</span></td>
+                    <td data-label="Type"><Badge tone="neutral">{String(ambulance.vehicleType || '').replace(/_/g, ' ')}</Badge></td>
+                    <td data-label="Driver" className="ui-table__secondary">
+                      {(() => {
+                        const drivers = adminAmbulances.find(a => a.id === ambulance.id)?.drivers ?? [];
+                        return drivers.length ? drivers.map(d => d.name || d.email).join(', ') : 'None linked';
+                      })()}
                     </td>
-                    <td>
-                      <span className={`status-badge status-${ambulance.status.toLowerCase()}`}>
-                        {ambulance.status}
-                      </span>
-                    </td>
-                    <td>
-                      <select 
-                        value={ambulance.status} 
-                        onChange={(e) => handleUpdateAmbulanceStatus(ambulance.id, e.target.value)} 
-                        style={{ 
-                          padding: '8px 12px', 
-                          borderRadius: '6px',
-                          border: '2px solid #e0e0e0',
-                          cursor: 'pointer',
-                          fontSize: '14px'
-                        }}
+                    <td data-label="Status"><StatusBadge status={ambulance.status} /></td>
+                    <td data-label="Set status">
+                      <select
+                        className="ui-select ui-select--sm"
+                        aria-label={`Set status for ${ambulance.vehicleNumber}`}
+                        value={ambulance.status}
+                        onChange={(e) => handleUpdateAmbulanceStatus(ambulance.id, e.target.value)}
                       >
                         <option value="AVAILABLE">AVAILABLE</option>
                         <option value="BUSY">BUSY</option>
@@ -1189,109 +1191,106 @@ const Dashboard = () => {
                         <option value="MAINTENANCE">MAINTENANCE</option>
                       </select>
                     </td>
+                    <td data-label="Edit" style={{ textAlign: 'right' }}>
+                      <button
+                        type="button"
+                        className="ui-btn ui-btn--secondary ui-btn--sm"
+                        onClick={() => setAmbulanceForm(adminAmbulances.find(a => a.id === ambulance.id) ?? null)}
+                        disabled={!adminAmbulances.some(a => a.id === ambulance.id)}
+                      >
+                        <Icon name="pencil" size={14} />
+                        Edit
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
-      </div>
+      </section>
     );
   };
 
   const renderBookingsTab = () => (
-    <div className="management-section">
-      <div className="section-header">
-        <h2>Booking Management</h2>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          <span className="count-badge">{bookings.length} bookings</span>
-          <button
-            onClick={() => exportToCSV(bookings, 'bookings')}
-            style={{
-              padding: '8px 16px',
-              background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              fontSize: '14px',
-              fontWeight: '600',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px',
-              transition: 'transform 0.2s'
-            }}
-            onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-2px)'}
-            onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
-          >
-            <span>📥</span> Export CSV
+    <section className="ui-enter">
+      <div className="ui-page-header">
+        <div>
+          <p className="ui-page-header__text">Every booking, with the patient's blood group, a full case report, and operator control over each case.</p>
+        </div>
+        <div className="ui-row">
+          <Badge tone="info" large>{bookings.length} bookings</Badge>
+          <button type="button" className="ui-btn ui-btn--secondary" onClick={() => exportToCSV(bookings, 'bookings')}>
+            <Icon name="download" size={16} />
+            Export CSV
           </button>
         </div>
       </div>
 
-      {loading ? (
-        <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>
-          <div style={{ fontSize: '18px', marginBottom: '8px' }}>Loading bookings...</div>
-          <div style={{ width: '40px', height: '40px', border: '4px solid #f3f3f3', borderTop: '4px solid #0066cc', borderRadius: '50%', margin: '0 auto', animation: 'spin 1s linear infinite' }}></div>
-        </div>
-      ) : bookings.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '40px', background: 'white', borderRadius: '8px', boxShadow: '0 1px 3px rgba(0,0,0,0.1)' }}>
-          <div style={{ fontSize: '48px', marginBottom: '16px' }}>📋</div>
-          <div style={{ fontSize: '18px', color: '#666', marginBottom: '8px' }}>No bookings found</div>
-          <div style={{ fontSize: '14px', color: '#999' }}>All bookings will appear here</div>
+      <DispatchQueue
+        refreshKey={liveTick}
+        onManage={setCaseControlId}
+        notify={notify}
+        onChanged={() => { fetchBookings(); fetchFleetDetails(); }}
+      />
+
+      {bookings.length === 0 ? (
+        <div className="ui-card">
+          <EmptyState icon="clipboardList" title="No bookings found">All bookings will appear here.</EmptyState>
         </div>
       ) : (
-        <div className="table-container">
-          <table className="data-table enhanced-table">
+        <div className="ui-table-wrap">
+          <table className="ui-table ui-table--stack">
             <thead>
               <tr>
-                <th>Booking ID</th>
-                <th>Patient</th>
-                <th>Blood Group</th>
-                <th>Status</th>
-                <th>Severity</th>
-                <th>Pickup Address</th>
-                <th>Created</th>
-                <th>Report</th>
+                <th scope="col">Booking ID</th>
+                <th scope="col">Patient</th>
+                <th scope="col">Blood group</th>
+                <th scope="col">Status</th>
+                <th scope="col">Severity</th>
+                <th scope="col">Pickup address</th>
+                <th scope="col">Created</th>
+                <th scope="col"><span className="ui-sr-only">Report</span></th>
               </tr>
             </thead>
             <tbody>
               {bookings.map(booking => (
-                <tr key={booking.id} className="table-row-hover">
-                  <td><code style={{ background: '#f0f0f0', padding: '4px 8px', borderRadius: '4px', fontFamily: 'monospace', fontSize: '13px' }}>{booking.id.slice(0, 8)}</code></td>
-                  <td>{booking.patientName}</td>
-                  <td>
+                <tr key={booking.id}>
+                  <td data-label="Booking ID"><code>{booking.id.slice(0, 8)}</code></td>
+                  <td data-label="Patient" className="ui-table__primary">{booking.patientName}</td>
+                  <td data-label="Blood group">
                     {/* Straight from the patient's Medical Profile; "Not Provided"
                         when they have not recorded a blood group. */}
-                    <span style={{ color: booking.medicalProfile.bloodGroup ? '#172b4d' : '#97a0af', fontStyle: booking.medicalProfile.bloodGroup ? 'normal' : 'italic' }}>
-                      {booking.medicalProfile.display.bloodGroup}
-                    </span>
+                    {booking.medicalProfile.bloodGroup ? (
+                      <span className="adm-blood"><Icon name="droplet" size={13} />{booking.medicalProfile.display.bloodGroup}</span>
+                    ) : (
+                      <span className="ui-table__secondary" style={{ fontStyle: 'italic' }}>{booking.medicalProfile.display.bloodGroup}</span>
+                    )}
                   </td>
-                  <td>
-                    <span className={`status-badge status-${booking.status.toLowerCase().replace('_', '-')}`}>
-                      {booking.status}
-                    </span>
-                  </td>
-                  <td>
-                    <span className={`severity-badge severity-${(booking.severity || 'MEDIUM').toLowerCase()}`}>
-                      {booking.severity || 'MEDIUM'}
-                    </span>
-                  </td>
-                  <td style={{ maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  <td data-label="Status"><StatusBadge status={booking.status} variant="dot" /></td>
+                  <td data-label="Severity"><SeverityBadge severity={booking.severity || 'MEDIUM'} /></td>
+                  <td data-label="Pickup" className="adm-address ui-truncate" title={booking.pickupAddress || 'N/A'}>
                     {booking.pickupAddress || 'N/A'}
                   </td>
-                  <td title={formatIstFull(booking.createdAt)}>{formatIstDateTime(booking.createdAt)}</td>
-                  <td>
+                  <td data-label="Created" className="ui-table__secondary" style={{ whiteSpace: 'nowrap' }} title={formatIstFull(booking.createdAt)}>{formatIstDateTime(booking.createdAt)}</td>
+                  <td data-label="Report" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                     <button
-                      onClick={() => setReportBookingId(booking.id)}
-                      style={{
-                        padding: '6px 12px', background: '#f4f5f7', color: '#172b4d',
-                        border: '1px solid #dfe1e6', borderRadius: '6px',
-                        fontSize: '12px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
-                      }}
-                      title="Full case report: patient, Medical Profile, triage and dispatch"
+                      type="button"
+                      className="ui-btn ui-btn--secondary ui-btn--sm"
+                      onClick={() => setCaseControlId(booking.id)}
+                      title="Dispatch, swap the ambulance, change hospital, override status, cancel"
                     >
-                      📄 View
+                      <Icon name="sliders" size={14} />
+                      Manage
+                    </button>{' '}
+                    <button
+                      type="button"
+                      className="ui-btn ui-btn--secondary ui-btn--sm"
+                      onClick={() => setReportBookingId(booking.id)}
+                      title="Full case report: patient, Medical Profile, triage and dispatch"
+                      aria-label="Case report"
+                    >
+                      <Icon name="fileText" size={14} />
                     </button>
                   </td>
                 </tr>
@@ -1300,114 +1299,87 @@ const Dashboard = () => {
           </table>
         </div>
       )}
-    </div>
-  );
-
-  const renderAuditTab = () => (
-    <div className="management-section">
-      <div className="section-header"><h2>Audit Logs</h2><span className="count-badge">{recentAudit.length} logs</span></div>
-      <div className="table-container">
-        <table className="data-table">
-          <thead><tr><th>Log ID</th><th>Action</th><th>Entity</th><th>Entity ID</th><th>Actor</th><th>Time</th></tr></thead>
-          <tbody>
-            {recentAudit.map(log => (
-              <tr key={log.id}>
-                <td><code>{String(log.id).slice(0, 8)}</code></td>
-                <td><span style={{ padding: '4px 12px', borderRadius: '12px', backgroundColor: '#0066cc20', color: '#0066cc' }}>{log.action}</span></td>
-                <td>{log.entity}</td>
-                <td><code>{String(log.entityId).slice(0, 8)}</code></td>
-                <td>{log.actor}</td>
-                <td>{log.timestamp}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    </section>
   );
 
   const renderPendingTab = () => (
-    <div className="management-section">
-      <div className="section-header">
-        <h2>Pending Verifications</h2>
-        <span className="count-badge" style={{ background: pendingAmbulances.length > 0 ? '#fff3e0' : '#e3f2fd', color: pendingAmbulances.length > 0 ? '#f57c00' : '#1976d2' }}>
-          {pendingAmbulances.length} pending
-        </span>
+    <section className="ui-enter">
+      <div className="ui-page-header">
+        <div>
+          <p className="ui-page-header__text">New ambulance registrations cannot be dispatched until they are verified.</p>
+        </div>
+        <Badge tone={pendingAmbulances.length > 0 ? 'warning' : 'success'} large dot>{pendingAmbulances.length} pending</Badge>
       </div>
       {pendingAmbulances.length === 0 ? (
-        <div style={{ textAlign: 'center', padding: '40px', color: '#888' }}>
-          <div style={{ fontSize: '48px', marginBottom: '16px' }}>✅</div>
-          <div style={{ fontSize: '18px' }}>No pending verifications</div>
-          <div style={{ fontSize: '14px', marginTop: '8px' }}>All ambulance registrations have been reviewed</div>
+        <div className="ui-card">
+          <EmptyState icon="checkCircle" tone="success" title="No pending verifications">All ambulance registrations have been reviewed.</EmptyState>
         </div>
       ) : (
-        <div className="pending-cards">
-          {pendingAmbulances.map(ambulance => (
-            <div key={ambulance.id} className="pending-card">
-              <div className="pending-header">
-                <div className="pending-vehicle">
-                  <span className="vehicle-icon">🚑</span>
-                  <div>
-                    <strong>{ambulance.vehicleNumber}</strong>
-                    <span className="vehicle-type">{ambulance.vehicleType}</span>
+        <div className="adm-pending">
+          {pendingAmbulances.map((ambulance, i) => (
+            <article key={ambulance.id} className="ui-card ui-accent ui-accent--warning adm-pending__card ui-enter" style={{ ['--i' as string]: i }}>
+              <header className="adm-pending__head">
+                <span className="ui-icon-tile tone-brand"><Icon name="ambulance" size={22} /></span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="adm-pending__plate ui-mono">{ambulance.vehicleNumber}</div>
+                  <Badge tone="neutral">{String(ambulance.vehicleType || '').replace(/_/g, ' ')}</Badge>
+                </div>
+                <Badge tone="warning" icon="hourglass">Pending</Badge>
+              </header>
+
+              <dl className="adm-pending__details">
+                {([
+                  ['Driver name', ambulance.driverName, 'user'],
+                  ['Phone', ambulance.driverPhone, 'phone'],
+                  ['License', ambulance.driverLicense, 'idCard'],
+                  ['Location', ambulance.locationAddress, 'mapPin'],
+                ] as [string, string, IconName][]).map(([label, value, icon]) => (
+                  <div key={label} className="adm-pending__row">
+                    <dt><Icon name={icon} size={14} />{label}</dt>
+                    <dd>{value}</dd>
                   </div>
+                ))}
+                <div className="adm-pending__row adm-pending__row--stack">
+                  <dt><Icon name="medKit" size={14} />Equipment</dt>
+                  <dd>
+                    {ambulance.equipment.length > 0 ? (
+                      <span className="ui-row">{ambulance.equipment.map(eq => <Badge key={eq} tone="neutral">{eq}</Badge>)}</span>
+                    ) : 'None specified'}
+                  </dd>
                 </div>
-                <span className="pending-badge">PENDING</span>
-              </div>
-              
-              <div className="pending-details">
-                <div className="detail-row">
-                  <span className="detail-label">Driver Name</span>
-                  <span className="detail-value">{ambulance.driverName}</span>
+                <div className="adm-pending__row">
+                  <dt><Icon name="clock" size={14} />Submitted</dt>
+                  <dd title={formatIstFull(ambulance.createdAt)}>{formatIstDateTime(ambulance.createdAt)}</dd>
                 </div>
-                <div className="detail-row">
-                  <span className="detail-label">Phone</span>
-                  <span className="detail-value">{ambulance.driverPhone}</span>
-                </div>
-                <div className="detail-row">
-                  <span className="detail-label">License</span>
-                  <span className="detail-value">{ambulance.driverLicense}</span>
-                </div>
-                <div className="detail-row">
-                  <span className="detail-label">Location</span>
-                  <span className="detail-value">{ambulance.locationAddress}</span>
-                </div>
-                <div className="detail-row">
-                  <span className="detail-label">Equipment</span>
-                  <span className="detail-value equipment-list">
-                    {ambulance.equipment.length > 0 ? ambulance.equipment.join(', ') : 'None specified'}
-                  </span>
-                </div>
-                <div className="detail-row">
-                  <span className="detail-label">Submitted</span>
-                  <span className="detail-value" title={formatIstFull(ambulance.createdAt)}>{formatIstDateTime(ambulance.createdAt)}</span>
-                </div>
-              </div>
-              
-              <div className="pending-actions">
-                <button className="verify-btn" onClick={() => handleVerifyAmbulance(ambulance.id)}>
-                  ✓ Verify & Approve
+              </dl>
+
+              <footer className="ui-card__footer adm-pending__actions">
+                <button type="button" className="ui-btn ui-btn--danger-soft" onClick={() => setRejectTarget(ambulance)}>
+                  <Icon name="x" size={16} />
+                  Reject
                 </button>
-                <button className="reject-btn" onClick={() => handleRejectAmbulance(ambulance.id)}>
-                  ✕ Reject
+                <button type="button" className="ui-btn ui-btn--success" onClick={() => handleVerifyAmbulance(ambulance.id)}>
+                  <Icon name="badgeCheck" size={16} />
+                  Verify &amp; approve
                 </button>
-              </div>
-            </div>
+              </footer>
+            </article>
           ))}
         </div>
       )}
-    </div>
+    </section>
   );
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'map': return <OperationsMap />;
+      case 'map': return <Suspense fallback={<PageLoading label="Loading map…" />}><OperationsMap /></Suspense>;
       case 'users': return renderUsersTab();
       case 'hospitals': return renderHospitalsTab();
       case 'ambulances': return renderAmbulancesTab();
       case 'pending': return renderPendingTab();
       case 'bookings': return renderBookingsTab();
-      case 'audit': return renderAuditTab();
+      case 'audit': return <Suspense fallback={<PageLoading label="Loading audit log…" />}><AuditPanel /></Suspense>;
+      case 'system': return <Suspense fallback={<PageLoading label="Loading system controls…" />}><SystemPanel notify={notify} /></Suspense>;
       default: return renderDashboardTab();
     }
   };
@@ -1421,253 +1393,214 @@ const Dashboard = () => {
       case 'pending': return 'Pending Verifications';
       case 'bookings': return 'Booking Management';
       case 'audit': return 'Audit Logs';
+      case 'system': return 'System Controls';
       default: return 'System Overview';
     }
   };
 
+  const NAV_GROUPS: { label: string; items: { id: TabType; label: string; icon: IconName; badge?: number }[] }[] = [
+    {
+      label: 'Operations',
+      items: [
+        { id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
+        { id: 'map', label: 'Live Map', icon: 'map' },
+        { id: 'bookings', label: 'Bookings', icon: 'clipboardList' },
+      ],
+    },
+    {
+      label: 'Network',
+      items: [
+        { id: 'hospitals', label: 'Hospitals', icon: 'hospital' },
+        { id: 'ambulances', label: 'Ambulances', icon: 'ambulance' },
+        { id: 'pending', label: 'Pending Verifications', icon: 'badgeCheck', badge: pendingAmbulances.length },
+      ],
+    },
+    {
+      label: 'Administration',
+      items: [
+        { id: 'users', label: 'Users', icon: 'users' },
+        { id: 'system', label: 'System', icon: 'sliders' },
+        { id: 'audit', label: 'Audit Logs', icon: 'scrollText' },
+      ],
+    },
+  ];
+
   return (
-    <div className="dashboard-container">
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <div className="logo">
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5zm0 10h7c-.53 4.12-3.28 7.79-7 8.94V12H5V9h7V4.21l7 3.5V12z"/>
-            </svg>
+    <div className="ui-app">
+      <a href="#main" className="ui-skip-link">Skip to content</a>
+      <div className={`ui-scrim${sidebarOpen ? ' is-visible' : ''}`} onClick={() => setSidebarOpen(false)} aria-hidden="true" />
+
+      <aside className={`ui-sidebar${sidebarOpen ? ' is-open' : ''}`} aria-label="Admin navigation">
+        <div className="ui-sidebar__brand">
+          <BrandMark />
+          <div className="ui-sidebar__brand-text">
+            <div className="ui-sidebar__product">ECS Admin</div>
+            <div className="ui-sidebar__portal">Operations console</div>
           </div>
-          <h2>Admin Portal</h2>
-          <div className="admin-badge">ADMINISTRATOR</div>
+          <button type="button" className="ui-btn ui-btn--ghost ui-btn--icon ui-btn--sm ui-sidebar__close" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
+            <Icon name="x" />
+          </button>
         </div>
-        
-        <nav className="sidebar-nav">
-          <a href="#" className={`nav-item ${activeTab === 'dashboard' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('dashboard'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
-            Dashboard
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'map' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('map'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20.5 3l-.16.03L15 5.1 9 3 3.36 4.9c-.21.07-.36.25-.36.48V20.5c0 .28.22.5.5.5l.16-.03L9 18.9l6 2.1 5.64-1.9c.21-.07.36-.25.36-.48V3.5c0-.28-.22-.5-.5-.5zM15 19l-6-2.11V5l6 2.11V19z"/></svg>
-            Live Map
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'users' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('users'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
-            Users
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'hospitals' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('hospitals'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3H5c-1.1 0-1.99.9-1.99 2L3 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-1 11h-4v4h-4v-4H6v-4h4V6h4v4h4v4z"/></svg>
-            Hospitals
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'ambulances' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('ambulances'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M18.92 6.01C18.72 5.42 18.16 5 17.5 5h-11c-.66 0-1.21.42-1.42 1.01L3 12v8c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-1h12v1c0 .55.45 1 1 1h1c.55 0 1-.45 1-1v-8l-2.08-5.99z"/></svg>
-            Ambulances
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'pending' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('pending'); }} style={{ position: 'relative' }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
-            Pending Verifications
-            {pendingAmbulances.length > 0 && (
-              <span style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', background: '#f57c00', color: 'white', padding: '2px 8px', borderRadius: '10px', fontSize: '12px', fontWeight: 'bold' }}>
-                {pendingAmbulances.length}
-              </span>
-            )}
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'bookings' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('bookings'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm2 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
-            Bookings
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'audit' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('audit'); }}>
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M9 11H7v2h2v-2zm4 0h-2v2h2v-2zm4 0h-2v2h2v-2zm2-7h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"/></svg>
-            Audit Logs
-          </a>
+
+        <nav className="ui-nav" aria-label="Sections">
+          {NAV_GROUPS.map(group => (
+            <div key={group.label} role="group" aria-label={group.label}>
+              <div className="ui-nav__label">{group.label}</div>
+              {group.items.map(item => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`ui-nav__item${activeTab === item.id ? ' is-active' : ''}`}
+                  aria-current={activeTab === item.id ? 'page' : undefined}
+                  onClick={() => { setActiveTab(item.id); setSidebarOpen(false); }}
+                >
+                  <Icon name={item.icon} />
+                  {item.label}
+                  {!!item.badge && (
+                    <span className="ui-nav__badge ui-nav__badge--warning" aria-label={`${item.badge} pending`}>{item.badge}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          ))}
         </nav>
-        
-        <div className="sidebar-footer">
-          <button onClick={handleLogout} className="logout-btn">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z"/></svg>
-            Logout
+
+        <div className="ui-sidebar__footer">
+          <div className="ui-user">
+            <span className="ui-avatar" style={{ background: 'var(--violet-soft)', color: 'var(--violet-text)' }}><Icon name="shieldCheck" size={17} /></span>
+            <div style={{ minWidth: 0 }}>
+              <div className="ui-user__name">Administrator</div>
+              <div className="ui-user__meta">Full access</div>
+            </div>
+          </div>
+          <button type="button" onClick={handleLogout} className="ui-btn ui-btn--ghost ui-btn--block adm-signout">
+            <Icon name="logOut" />
+            Sign out
           </button>
         </div>
       </aside>
 
-      <main className="main-content">
-        <div className="top-bar">
-          <div className="top-bar-left">
-            <h1>{getTabTitle()}</h1>
-            <div className="time">{formatIstClock(currentTime)}</div>
+      <div className="ui-main">
+        <header className="ui-topbar">
+          <button type="button" className="ui-btn ui-btn--secondary ui-btn--icon ui-menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+            <Icon name="menu" />
+          </button>
+          <div className="ui-topbar__titles">
+            <h1 className="ui-topbar__title">{getTabTitle()}</h1>
+            <div className="ui-topbar__subtitle ui-num">{formatIstClock(currentTime)}</div>
           </div>
-          <div className="top-bar-right">
-            <div className="system-status">
-              <span className="status-dot online"></span>
+          <div className="ui-topbar__actions">
+            <span className="ui-badge ui-badge--lg tone-success ui-hide-sm">
+              <span className="ui-live" aria-hidden="true" />
               All Systems Operational
-            </div>
+            </span>
           </div>
-        </div>
+        </header>
 
-        {renderContent()}
-      </main>
+        <main id="main" className="ui-content" key={activeTab}>
+          {renderContent()}
+        </main>
+      </div>
 
-      <style>{`
-        .management-section { background: white; border-radius: 8px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-        .section-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
-        .section-header h2 { margin: 0; font-size: 20px; }
-        .count-badge { background: #e3f2fd; color: #1976d2; padding: 4px 12px; border-radius: 12px; font-size: 14px; }
-        .table-container { overflow-x: auto; }
-        .data-table { width: 100%; border-collapse: collapse; }
-        .data-table th, .data-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid #e0e0e0; }
-        .data-table th { background: #f5f5f5; font-weight: 600; color: #333; }
-        .data-table code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-family: monospace; }
-        
-        /* Enhanced Table Styling */
-        .enhanced-table tbody tr { transition: all 0.2s ease; }
-        .table-row-hover:hover { 
-          background: linear-gradient(to right, #f0f7ff 0%, #ffffff 100%);
-          transform: translateX(4px);
-          box-shadow: -4px 0 0 #0066cc;
-        }
-        
-        /* Status Badges with Better Colors */
-        .status-badge {
-          padding: 6px 14px;
-          border-radius: 16px;
-          font-size: 12px;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          display: inline-block;
-        }
-        
-        .status-active, .status-available, .status-accepting {
-          background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-          color: white;
-        }
-        
-        .status-inactive, .status-offline, .status-divert {
-          background: linear-gradient(135deg, #de350b 0%, #ff6b6b 100%);
-          color: white;
-        }
-        
-        .status-busy, .status-limited, .status-in-progress {
-          background: linear-gradient(135deg, #ff8b00 0%, #ffc837 100%);
-          color: white;
-        }
-        
-        .status-maintenance {
-          background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-          color: white;
-        }
+      {/* Admin controls — each loads the first time it is opened. */}
+      <Suspense fallback={null}>
+        {manageUserId && (
+          <UserManageModal
+            userId={manageUserId}
+            currentAdminId={currentAdminId()}
+            hospitals={hospitals}
+            ambulances={ambulances}
+            onClose={() => setManageUserId(null)}
+            onChanged={afterAdminChange}
+          />
+        )}
 
-        .status-completed {
-          background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-          color: white;
-        }
-        
-        .status-cancelled {
-          background: linear-gradient(135deg, #de350b 0%, #ff6b6b 100%);
-          color: white;
-        }
-        
-        /* Severity Badges */
-        .severity-badge {
-          padding: 6px 14px;
-          border-radius: 16px;
-          font-size: 12px;
-          font-weight: 600;
-          text-transform: uppercase;
-          letter-spacing: 0.5px;
-          display: inline-block;
-        }
-        
-        .severity-critical {
-          background: linear-gradient(135deg, #de350b 0%, #ff0000 100%);
-          color: white;
-          animation: pulse 2s infinite;
-        }
-        
-        .severity-high {
-          background: linear-gradient(135deg, #ff8b00 0%, #ffc837 100%);
-          color: white;
-        }
-        
-        .severity-medium {
-          background: linear-gradient(135deg, #0066cc 0%, #4a90e2 100%);
-          color: white;
-        }
-        
-        .severity-low {
-          background: linear-gradient(135deg, #6b778c 0%, #97a0af 100%);
-          color: white;
-        }
-        
-        /* Action Buttons */
-        .action-btn {
-          padding: 8px 16px;
-          border: none;
-          border-radius: 8px;
-          font-weight: 600;
-          font-size: 14px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        
-        .action-btn-danger {
-          background: linear-gradient(135deg, #de350b 0%, #ff6b6b 100%);
-          color: white;
-        }
-        
-        .action-btn-danger:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 4px 12px rgba(222, 53, 11, 0.3);
-        }
-        
-        .action-btn-success {
-          background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-          color: white;
-        }
-        
-        .action-btn-success:hover {
-          transform: translateY(-2px);
-          box-shadow: 0 4px 12px rgba(17, 153, 142, 0.3);
-        }
-        
-        /* Loading Animation */
-        @keyframes spin {
-          0% { transform: rotate(0deg); }
-          100% { transform: rotate(360deg); }
-        }
-        
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.8; }
-        }
-        
-        .pending-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(400px, 1fr)); gap: 20px; }
-        .pending-card { background: #fafafa; border: 2px solid #e0e0e0; border-radius: 12px; overflow: hidden; transition: all 0.3s; }
-        .pending-card:hover { border-color: #f57c00; box-shadow: 0 4px 12px rgba(245, 124, 0, 0.15); }
-        .pending-header { display: flex; justify-content: space-between; align-items: center; padding: 16px; background: white; border-bottom: 1px solid #e0e0e0; }
-        .pending-vehicle { display: flex; align-items: center; gap: 12px; }
-        .vehicle-icon { font-size: 32px; }
-        .pending-vehicle strong { display: block; font-size: 18px; color: #333; }
-        .vehicle-type { font-size: 13px; color: #666; background: #e0e0e0; padding: 2px 8px; border-radius: 4px; }
-        .pending-badge { background: #fff3e0; color: #f57c00; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: bold; }
-        .pending-details { padding: 16px; }
-        .detail-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #eee; }
-        .detail-row:last-child { border-bottom: none; }
-        .detail-label { font-size: 13px; color: #888; }
-        .detail-value { font-size: 14px; color: #333; font-weight: 500; text-align: right; max-width: 60%; }
-        .equipment-list { font-size: 12px; line-height: 1.4; }
-        .pending-actions { display: flex; gap: 12px; padding: 16px; background: white; border-top: 1px solid #e0e0e0; }
-        .verify-btn { flex: 1; padding: 12px; background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-        .verify-btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(17, 153, 142, 0.3); }
-        .reject-btn { flex: 1; padding: 12px; background: white; color: #de350b; border: 2px solid #de350b; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; }
-        .reject-btn:hover { background: #de350b; color: white; }
-      `}</style>
+        {hospitalForm && (
+          <HospitalFormModal
+            hospital={hospitalForm === 'new' ? null : hospitalForm}
+            onClose={() => setHospitalForm(null)}
+            onChanged={afterAdminChange}
+          />
+        )}
 
-      {/* Full ECS case report — patient, Medical Profile, triage and dispatch. */}
+        {ambulanceForm && (
+          <AmbulanceFormModal
+            ambulance={ambulanceForm === 'new' ? null : ambulanceForm}
+            onClose={() => setAmbulanceForm(null)}
+            onChanged={afterAdminChange}
+          />
+        )}
+
+        {caseControlId && (
+          <CaseControlModal
+            bookingId={caseControlId}
+            onClose={() => setCaseControlId(null)}
+            onChanged={afterAdminChange}
+            onOpenReport={id => setReportBookingId(id)}
+          />
+        )}
+      </Suspense>
+
+      {/* Full ECS case report — patient, Medical Profile, triage and dispatch. After the admin controls, so it opens on top of the case panel. */}
       {reportBookingId && (
-        <CaseReportModal
-          bookingId={reportBookingId}
+        <Suspense fallback={null}>
+          <CaseReportModal
+            bookingId={reportBookingId}
+            apiBaseUrl={API_BASE_URL}
+            token={TokenStorage.getToken() || ''}
+            onClose={() => setReportBookingId(null)}
+          />
+        </Suspense>
+      )}
+
+      {showCreateAccount && (
+        <CreateAccountModal
+          hospitals={hospitals}
+          ambulances={ambulances}
           apiBaseUrl={API_BASE_URL}
           token={TokenStorage.getToken() || ''}
-          onClose={() => setReportBookingId(null)}
+          onClose={() => setShowCreateAccount(false)}
+          onCreated={account => {
+            setShowCreateAccount(false);
+            notify({ tone: 'success', title: 'Account created', text: `${account.email} can now sign in as ${account.role.toLowerCase()}.` });
+            fetchDashboardData();
+            if (userSearch || userRoleFilter !== 'ALL' || userStatusFilter !== 'ALL' || userPage > 1) fetchFilteredUsers();
+          }}
         />
       )}
+
+      {rejectTarget && (
+        <Modal onClose={() => setRejectTarget(null)} labelledBy="reject-amb-title" describedBy="reject-amb-desc" role="alertdialog">
+          <div className="ui-modal__header ui-modal__header--plain">
+            <span className="ui-icon-tile tone-danger"><Icon name="x" size={22} /></span>
+            <div>
+              <h2 id="reject-amb-title" className="ui-modal__title">Reject this registration?</h2>
+              <p className="ui-modal__subtitle">{rejectTarget.vehicleNumber} · {rejectTarget.driverName}</p>
+            </div>
+          </div>
+          <div className="ui-modal__body">
+            <p id="reject-amb-desc" style={{ color: 'var(--text-2)' }}>
+              The registration is removed and the ambulance will not be available for dispatch.
+            </p>
+          </div>
+          <div className="ui-modal__footer">
+            <button type="button" className="ui-btn ui-btn--secondary" onClick={() => setRejectTarget(null)} data-autofocus>Cancel</button>
+            <button
+              type="button"
+              className="ui-btn ui-btn--danger"
+              onClick={() => {
+                const id = rejectTarget.id;
+                setRejectTarget(null);
+                handleRejectAmbulance(id);
+              }}
+            >
+              Reject registration
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      <NoticeStack notices={notices} onDismiss={dismiss} />
     </div>
   );
 };

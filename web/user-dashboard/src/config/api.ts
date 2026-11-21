@@ -43,13 +43,5 @@ export const ROLE_APP_URLS: Record<string, string> = {
 
 export const API_CONFIG = {
   BASE_URL: API_BASE_URL,
-  
-  // Auth endpoints
   LOGIN: '/auth/login',
-  
-  // User endpoints
-  USER_PROFILE: '/user/profile',
-  USER_BOOKINGS: '/user/bookings',
-  CREATE_BOOKING: '/user/bookings',
-  HOSPITALS: '/hospitals',
 };

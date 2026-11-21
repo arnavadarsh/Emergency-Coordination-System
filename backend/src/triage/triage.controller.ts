@@ -8,6 +8,7 @@ import {
   UsePipes,
   UseGuards,
   ValidationPipe,
+  BadRequestException,
 } from '@nestjs/common';
 import { TriageService, TriageScoreResult } from './triage.service';
 import { TriageLlmService, TriageConverseResult } from './triage-llm.service';
@@ -90,7 +91,12 @@ export class TriageController {
   @Post('assess')
   @HttpCode(HttpStatus.OK)
   async assessEmergency(@Body() body: { answers: Record<string, string> }) {
-    return this.triageService.assessEmergency(body.answers);
+    // An open route: a missing or malformed body must be a 400, not a crash.
+    const answers = body?.answers;
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+      throw new BadRequestException('answers must be an object of question ids to answers');
+    }
+    return this.triageService.assessEmergency(answers);
   }
 
   /**

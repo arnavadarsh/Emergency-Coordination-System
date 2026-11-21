@@ -16,13 +16,17 @@ import TriageChat from '../components/TriageChat';
 import MedicalProfileSection from '../components/MedicalProfileSection';
 import EmergencyContactsSection from '../components/EmergencyContactsSection';
 import TrackingShareCard from '../components/TrackingShareCard';
-import { normalizeMedicalProfile, type MedicalProfile } from '../types/medicalProfile';
+import { normalizeMedicalProfile, type MedicalProfile } from '@shared/types/medicalProfile';
 import CaseChat from '../components/CaseChat';
 import { useCaseChats } from '../hooks/useCaseChats';
-import { formatIstLongDate, formatIstTime } from '../utils/datetime';
+import { formatIstLongDate, formatIstTime } from '@shared/utils/datetime';
 import DriverIdentity, { type DriverInfo } from '../components/DriverIdentity';
 import type { TriageResult } from '../services/triageEngine';
 import { API_BASE_URL, SOCKET_URL } from '../config/api';
+import { Icon, iconSvg } from '@shared/components/ui/Icon';
+import { Badge, StatusBadge, statusMeta } from '@shared/components/ui/Status';
+import { BrandMark, EmptyState, PageError, PageLoading, initialsOf } from '@shared/components/ui/primitives';
+import { Modal } from '@shared/components/ui/Modal';
 
 
 interface LiveEtaResponse {
@@ -42,24 +46,18 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
 });
 
-// Custom icons
-const greenIcon = new L.Icon({
-  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41]
-});
-
-const redIcon = new L.Icon({
-  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41]
-});
+// Map pins for the booking form, drawn in-app (no third-party marker images):
+// teal for the pickup, red for the destination — the same pins as the live route map.
+const pinIcon = (variant: 'pickup' | 'dropoff') =>
+  L.divIcon({
+    className: 'ui-marker',
+    html: `<span class="ui-marker__pin${variant === 'pickup' ? ' ui-marker__pin--brand' : ''}">${iconSvg(variant === 'pickup' ? 'mapPin' : 'hospital', 16, 2.4)}</span>`,
+    iconSize: [32, 40],
+    iconAnchor: [16, 38],
+    popupAnchor: [0, -34],
+  });
+const greenIcon = pinIcon('pickup');
+const redIcon = pinIcon('dropoff');
 
 interface PlaceSuggestion {
   display_name: string;
@@ -147,6 +145,17 @@ const calculateDistanceKm = (lat1: number, lon1: number, lat2: number, lon2: num
 const formatExpectedTime = (etaMinutes: number) =>
   formatIstTime(new Date(Date.now() + etaMinutes * 60000));
 
+// Dispatch, status and ambulance-position changes arrive over the socket as
+// they happen. This slow poll only catches anything missed while the
+// connection was down.
+const FALLBACK_REFRESH_MS = 5 * 60_000;
+
+const NO_PICKUP_MESSAGE =
+  'We could not find your location. Set the pickup point on the map or tap "Use Current Location", then tap "Request Emergency Ambulance".';
+
+/** Thrown when there is no real pickup position to send an ambulance to. */
+class PickupUnknownError extends Error {}
+
 function Dashboard() {
   const navigate = useNavigate();
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -196,7 +205,7 @@ function Dashboard() {
     hasSevereBleeding: false,
   });
   const [triageCompleted, setTriageCompleted] = useState(false);
-  const [, setTriageResultData] = useState<TriageResult | null>(null);
+  const [triageResultData, setTriageResultData] = useState<TriageResult | null>(null);
   const [fastTrackDispatched, setFastTrackDispatched] = useState(false);
   const fastTrackBookingIdRef = useRef<string | null>(null);
 
@@ -228,7 +237,7 @@ function Dashboard() {
         attribution: '© OpenStreetMap contributors'
       }).addTo(pickupMapInstanceRef.current);
 
-      pickupMarkerRef.current = L.marker(defaultCenter, { icon: greenIcon, draggable: true })
+      pickupMarkerRef.current = L.marker(defaultCenter, { icon: greenIcon, draggable: true, title: 'Pickup point — drag to adjust' })
         .addTo(pickupMapInstanceRef.current);
 
       pickupMarkerRef.current.on('dragend', function() {
@@ -267,7 +276,7 @@ function Dashboard() {
         attribution: '© OpenStreetMap contributors'
       }).addTo(dropoffMapInstanceRef.current);
 
-      dropoffMarkerRef.current = L.marker(defaultCenter, { icon: redIcon, draggable: true })
+      dropoffMarkerRef.current = L.marker(defaultCenter, { icon: redIcon, draggable: true, title: 'Destination — drag to adjust' })
         .addTo(dropoffMapInstanceRef.current);
 
       dropoffMarkerRef.current.on('dragend', function() {
@@ -390,8 +399,19 @@ function Dashboard() {
     };
   }, [trackingBooking]);
 
+  // Live positions now stream in, and each one produces new metrics. The ETA
+  // lookup (Google Distance Matrix when configured, which is billed) keeps its
+  // 30-second cadence: it restarts only when the booking or the place the
+  // ambulance is heading changes, and reads the latest position from this ref.
+  const trackingMetricsRef = useRef(trackingMetrics);
+  trackingMetricsRef.current = trackingMetrics;
+  const etaKey = trackingBooking && trackingMetrics
+    ? `${trackingBooking.id}|${trackingMetrics.targetLat}|${trackingMetrics.targetLng}|${trackingMetrics.etaMinutes === 0}`
+    : null;
+
   useEffect(() => {
-    if (!trackingBooking || !trackingMetrics) {
+    const trackingMetrics = trackingMetricsRef.current;
+    if (!etaKey || !trackingMetrics) {
       setLiveEta(null);
       return;
     }
@@ -415,14 +435,16 @@ function Dashboard() {
     let isCancelled = false;
 
     const fetchLiveEta = async () => {
+      const metrics = trackingMetricsRef.current;
+      if (!metrics) return;
       try {
         const response = await axios.get(`${API_BASE_URL}/dashboard/eta`, {
           headers: { Authorization: `Bearer ${token}` },
           params: {
-            originLat: trackingMetrics.ambulanceLat,
-            originLng: trackingMetrics.ambulanceLng,
-            destinationLat: trackingMetrics.targetLat,
-            destinationLng: trackingMetrics.targetLng,
+            originLat: metrics.ambulanceLat,
+            originLng: metrics.ambulanceLng,
+            destinationLat: metrics.targetLat,
+            destinationLng: metrics.targetLng,
           },
         });
 
@@ -443,7 +465,7 @@ function Dashboard() {
       isCancelled = true;
       clearInterval(interval);
     };
-  }, [trackingBooking, trackingMetrics]);
+  }, [etaKey]);
 
   // Reverse geocode using Nominatim (OpenStreetMap)
   const reverseGeocode = async (lat: number, lng: number, setter: (val: string) => void) => {
@@ -542,14 +564,12 @@ function Dashboard() {
   // Fallback: Get location by IP address
   const getLocationByIP = async () => {
     try {
-      console.log('Trying IP-based geolocation...');
       const response = await fetch('https://ipapi.co/json/');
       const data = await response.json();
       
       if (data.latitude && data.longitude) {
         const lat = data.latitude;
         const lng = data.longitude;
-        console.log('Got IP location:', lat, lng, data.city);
         
         setPickupCoords({ lat, lng });
         setPickupLocation(`${data.city || ''}, ${data.region || ''}, ${data.country_name || ''}`);
@@ -558,6 +578,8 @@ function Dashboard() {
           pickupMapInstanceRef.current.setView([lat, lng], 14);
           pickupMarkerRef.current.setLatLng([lat, lng]);
         }
+        // An address looked up from the network is accurate to the city at best.
+        toast('This is only an approximate location. Drag the pin to exactly where the ambulance should come.', { duration: 9000 });
         return true;
       }
     } catch (err) {
@@ -567,7 +589,6 @@ function Dashboard() {
   };
 
   const getCurrentLocation = async () => {
-    console.log('getCurrentLocation called');
     setGettingLocation(true);
     
     // First try browser geolocation
@@ -578,13 +599,11 @@ function Dashboard() {
         maximumAge: 60000
       };
       
-      console.log('Requesting browser geolocation...');
       
       navigator.geolocation.getCurrentPosition(
         (position) => {
           const lat = position.coords.latitude;
           const lng = position.coords.longitude;
-          console.log('Got browser location:', lat, lng);
           
           setPickupCoords({ lat, lng });
           setPickupLocation('Getting address...');
@@ -661,7 +680,7 @@ function Dashboard() {
       
       // Set bookings
       let mappedBookings: Booking[] = [];
-      if (data.bookings && data.bookings.length > 0) {
+      if (Array.isArray(data.bookings)) {
         mappedBookings = data.bookings.map((b: any) => ({
           id: b.id,
           userId: b.userId,
@@ -718,12 +737,12 @@ function Dashboard() {
 
         setBookings(mappedBookings);
 
-        if (trackingBooking) {
-          const updatedTracking = mappedBookings.find((b: Booking) => b.id === trackingBooking.id);
-          if (updatedTracking) {
-            setTrackingBooking(updatedTracking);
-          }
-        }
+        // Functional update: this runs from timers and socket handlers whose
+        // closure still holds the first render's (null) trackingBooking, so the
+        // open tracking view never refreshed.
+        setTrackingBooking(current =>
+          current ? mappedBookings.find((b: Booking) => b.id === current.id) ?? current : current,
+        );
       }
       
       setLoading(false);
@@ -739,12 +758,18 @@ function Dashboard() {
 
   useEffect(() => {
     fetchDashboardData();
-    
-    // Refresh data every 30 seconds
-    const refreshInterval = setInterval(fetchDashboardData, 30000);
+
+    const refreshInterval = setInterval(fetchDashboardData, FALLBACK_REFRESH_MS);
 
     return () => clearInterval(refreshInterval);
   }, []);
+
+  // The socket handlers read these through refs, so the connection is opened
+  // once — it used to be torn down and reopened on every bookings refresh.
+  const userIdRef = useRef<string | undefined>(undefined);
+  userIdRef.current = userProfile?.id;
+  const bookingsRef = useRef<Booking[]>([]);
+  bookingsRef.current = bookings;
 
   useEffect(() => {
     const token = tokenStorage.getToken();
@@ -752,13 +777,53 @@ function Dashboard() {
       return;
     }
 
+    // Signed-in sockets only. The server puts this account in its own room and
+    // sends it events about its own cases — nobody else's.
     const socket = io(SOCKET_URL, {
       transports: ['websocket'],
+      auth: cb => cb({ token: tokenStorage.getToken() }),
     });
 
+    const isRelevant = (payload: any) =>
+      payload?.userId === userIdRef.current || bookingsRef.current.some((b) => b.id === payload?.bookingId);
+
+    // Fold bursts of events into one refetch.
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => { refreshTimer = null; fetchDashboardData(); }, 400);
+    };
+
+    let connectedBefore = false;
+    const onConnect = () => {
+      // Catch up on anything that happened while the connection was down.
+      if (connectedBefore) scheduleRefresh();
+      connectedBefore = true;
+    };
+
+    // Moves the ambulance on the map the moment it reports a new position.
+    const onAmbulanceLocation = (payload: any) => {
+      if (!payload?.bookingId || payload.latitude == null || payload.longitude == null) return;
+      const patch = (b: Booking): Booking =>
+        b.id === payload.bookingId && b.dispatch
+          ? {
+              ...b,
+              dispatch: {
+                ...b.dispatch,
+                ambulance: {
+                  ...b.dispatch.ambulance,
+                  currentLatitude: Number(payload.latitude),
+                  currentLongitude: Number(payload.longitude),
+                } as NonNullable<Booking['dispatch']>['ambulance'],
+              },
+            }
+          : b;
+      setBookings(prev => prev.map(patch));
+      setTrackingBooking(prev => (prev ? patch(prev) : prev));
+    };
+
     const onDispatchDiverted = (payload: any) => {
-      const isRelevant = payload?.userId === userProfile?.id || bookings.some((b) => b.id === payload?.bookingId);
-      if (!isRelevant) return;
+      if (!isRelevant(payload)) return;
 
       const oldName = payload?.oldHospital?.name || 'previous hospital';
       const newName = payload?.newHospital?.name || 'new hospital';
@@ -767,116 +832,104 @@ function Dashboard() {
     };
 
     const onRerouteSearchStarted = (payload: any) => {
-      const isRelevant = payload?.userId === userProfile?.id || bookings.some((b) => b.id === payload?.bookingId);
-      if (!isRelevant) return;
+      if (!isRelevant(payload)) return;
       toast(payload?.message || 'Assigned hospital is currently unable to accept the patient. Searching for the next best hospital.', { duration: 7000 });
     };
 
     const onRerouteEscalated = (payload: any) => {
-      const isRelevant = payload?.userId === userProfile?.id || bookings.some((b) => b.id === payload?.bookingId);
-      if (!isRelevant) return;
+      if (!isRelevant(payload)) return;
       toast.error('No suitable hospital is currently available. Manual intervention is required.', { duration: 10000 });
       fetchDashboardData();
     };
 
+    // A message from the operations team, shown however long it takes to read.
+    const onAnnouncement = (p: { message: string; tone?: string }) => {
+      const show = p?.tone === 'danger' ? toast.error : p?.tone === 'success' ? toast.success : toast;
+      show(`Announcement: ${p.message}`, { duration: 12000 });
+    };
+    socket.on('system_announcement', onAnnouncement);
+    socket.on('connect', onConnect);
+    // An ambulance was assigned (possibly by the retry worker, after a wait),
+    // or the trip moved on a stage.
+    socket.on('dispatch_assigned', scheduleRefresh);
+    socket.on('dispatch_status_updated', scheduleRefresh);
+    socket.on('ambulance_location_updated', onAmbulanceLocation);
     socket.on('hospital_reroute_search_started', onRerouteSearchStarted);
     socket.on('dispatch_diverted', onDispatchDiverted);
     socket.on('hospital_reroute_escalated', onRerouteEscalated);
 
     return () => {
-      socket.off('hospital_reroute_search_started', onRerouteSearchStarted);
-      socket.off('dispatch_diverted', onDispatchDiverted);
-      socket.off('hospital_reroute_escalated', onRerouteEscalated);
+      if (refreshTimer) clearTimeout(refreshTimer);
       socket.disconnect();
     };
-  }, [userProfile?.id, bookings]);
+  }, []);
 
-  // ── Fast-track: dispatch immediately when triage detects a CRITICAL life-threat ──
-  const handleFastTrack = async (result: TriageResult) => {
-    if (fastTrackDispatched) return;
-    setFastTrackDispatched(true);
-    try {
-      // Resolve pickup — prefer what the user already set, else detect, else default.
-      let lat = pickupCoords?.lat;
-      let lng = pickupCoords?.lng;
-      let address = pickupLocation;
-      if (lat == null || lng == null) {
-        try {
-          const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
-            navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }),
-          );
-          lat = pos.coords.latitude;
-          lng = pos.coords.longitude;
-          address = address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-        } catch {
-          lat = 28.6139;
-          lng = 77.2090;
-          address = address || 'Location being detected';
-        }
-      }
-
-      const token = tokenStorage.getToken();
-      const bookingData = {
-        pickupLocation: address || 'Current Location',
-        pickupAddress: address || 'Current Location',
-        pickupLatitude: lat,
-        pickupLongitude: lng,
-        bookingType: 'EMERGENCY',
-        severity: 'CRITICAL',
-        description: result.chiefComplaint,
-        triageData: {
-          chiefComplaint: result.chiefComplaint,
-          severity: 'CRITICAL',
-          isBreathing: result.isBreathing,
-          isConscious: result.isConscious,
-          hasChestPain: result.hasChestPain,
-          hasSevereBleeding: result.hasSevereBleeding,
-        },
-      };
-      const response = await axios.post(`${API_BASE_URL}/bookings`, bookingData, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      fastTrackBookingIdRef.current = response.data?.id || response.data?.booking?.id || null;
-      toast.success('🚨 CRITICAL detected — ambulance dispatch initiated!', { duration: 6000 });
-      await fetchDashboardData();
-    } catch (err: any) {
-      // Let the user retry via the normal button if auto-dispatch failed.
-      setFastTrackDispatched(false);
-      console.error('Fast-track dispatch failed:', err);
-      toast.error('Auto-dispatch failed — tap "Request Emergency Ambulance" to retry.');
+  /**
+   * Where the ambulance should come: the point already set on the form, else
+   * this device's GPS, else the typed address looked up on the map.
+   *
+   * Returns null when none of those gives a real position. It used to fall
+   * back to a fixed point in central Delhi, which sent the ambulance there
+   * while telling the caller help was on its way — no dispatch is better than
+   * one to the wrong place, because the caller is then asked for the location.
+   */
+  const resolvePickup = async (): Promise<{ lat: number; lng: number; address: string } | null> => {
+    if (pickupCoords) {
+      return { ...pickupCoords, address: pickupLocation || `${pickupCoords.lat.toFixed(5)}, ${pickupCoords.lng.toFixed(5)}` };
     }
+
+    if (navigator.geolocation) {
+      try {
+        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }),
+        );
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        setPickupCoords({ lat, lng });
+        if (!pickupLocation) reverseGeocode(lat, lng, setPickupLocation);
+        return { lat, lng, address: pickupLocation || `${lat.toFixed(5)}, ${lng.toFixed(5)}` };
+      } catch {
+        // Denied, unavailable or timed out — try the typed address next.
+      }
+    }
+
+    const typed = pickupLocation.trim();
+    if (typed.length >= 3) {
+      try {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(typed)}&countrycodes=in&limit=1`,
+          { headers: { 'Accept-Language': 'en' } },
+        );
+        const [match] = (await response.json()) as PlaceSuggestion[];
+        const lat = match ? parseFloat(match.lat) : NaN;
+        const lng = match ? parseFloat(match.lon) : NaN;
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          setPickupCoords({ lat, lng });
+          return { lat, lng, address: typed };
+        }
+      } catch {
+        // No network for the lookup — fall through to "unknown".
+      }
+    }
+
+    return null;
   };
 
   /**
-   * Resolve a pickup location (shared GPS → device GPS → default) and create an
-   * EMERGENCY booking. Returns the created booking. Used to dispatch the
-   * ambulance the moment triage finishes, so the in-chat "ambulance is on its
-   * way" confirmation is accurate.
+   * Create an EMERGENCY booking from a triage result. Used to dispatch the
+   * moment triage finds a life-threat, and again when triage finishes, so the
+   * in-chat "ambulance is on its way" confirmation is accurate.
    */
   const createEmergencyBooking = async (result: TriageResult, severity: string): Promise<Booking | null> => {
-    let lat = pickupCoords?.lat;
-    let lng = pickupCoords?.lng;
-    let address = pickupLocation;
-    if (lat == null || lng == null) {
-      try {
-        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
-          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }),
-        );
-        lat = pos.coords.latitude;
-        lng = pos.coords.longitude;
-        address = address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-      } catch {
-        lat = 28.6139;
-        lng = 77.2090;
-        address = address || 'Location being detected';
-      }
-    }
+    const pickup = await resolvePickup();
+    if (!pickup) throw new PickupUnknownError(NO_PICKUP_MESSAGE);
+
     const token = tokenStorage.getToken();
     const bookingData = {
-      pickupLocation: address || 'Current Location',
-      pickupAddress: address || 'Current Location',
-      pickupLatitude: lat,
-      pickupLongitude: lng,
+      pickupLocation: pickup.address,
+      pickupAddress: pickup.address,
+      pickupLatitude: pickup.lat,
+      pickupLongitude: pickup.lng,
       bookingType: 'EMERGENCY',
       severity,
       description: result.chiefComplaint,
@@ -887,12 +940,43 @@ function Dashboard() {
         isConscious: result.isConscious,
         hasChestPain: result.hasChestPain,
         hasSevereBleeding: result.hasSevereBleeding,
+        emergencyType: result.emergencyType,
+        painLevel: result.painLevel,
+        isPregnant: result.isPregnant,
       },
     };
     const response = await axios.post(`${API_BASE_URL}/bookings`, bookingData, {
       headers: { Authorization: `Bearer ${token}` },
     });
     return (response.data?.booking || response.data) as Booking;
+  };
+
+  // ── Fast-track: dispatch immediately when triage detects a CRITICAL life-threat ──
+  // A ref as well as state: triage can finish while this request is still in
+  // flight, and must not send a second ambulance.
+  const dispatchInFlightRef = useRef(false);
+  const handleFastTrack = async (result: TriageResult) => {
+    if (fastTrackDispatched || dispatchInFlightRef.current || fastTrackBookingIdRef.current) return;
+    dispatchInFlightRef.current = true;
+    try {
+      const booking = await createEmergencyBooking(result, 'CRITICAL');
+      fastTrackBookingIdRef.current = booking?.id ?? null;
+      setFastTrackDispatched(true);
+      toast.success('🚨 CRITICAL detected — ambulance dispatch initiated!', { duration: 6000 });
+      await fetchDashboardData();
+    } catch (err: any) {
+      // Left undispatched, so finishing triage (or the button) tries again.
+      setFastTrackDispatched(false);
+      console.error('Fast-track dispatch failed:', err);
+      toast.error(
+        err instanceof PickupUnknownError
+          ? NO_PICKUP_MESSAGE
+          : 'Auto-dispatch failed — tap "Request Emergency Ambulance" to retry.',
+        { duration: 10000 },
+      );
+    } finally {
+      dispatchInFlightRef.current = false;
+    }
   };
 
   /** "Track ambulance" from the chat success screen → open live tracking. */
@@ -933,12 +1017,24 @@ function Dashboard() {
         return;
       }
 
+      // A real position, never a guess: see resolvePickup.
+      const pickup = await resolvePickup();
+      if (!pickup) {
+        toast.error(
+          bookingType === 'SCHEDULED'
+            ? 'We could not find that pickup address. Choose it from the suggestions or click the map.'
+            : NO_PICKUP_MESSAGE,
+          { duration: 9000 },
+        );
+        return;
+      }
+
       const token = tokenStorage.getToken();
       const bookingData: any = {
-        pickupLocation: pickupLocation || 'Current Location',
-        pickupAddress: pickupLocation || 'Current Location',
-        pickupLatitude: pickupCoords?.lat || 28.6139,
-        pickupLongitude: pickupCoords?.lng || 77.2090,
+        pickupLocation: pickup.address,
+        pickupAddress: pickup.address,
+        pickupLatitude: pickup.lat,
+        pickupLongitude: pickup.lng,
         bookingType,
       };
 
@@ -947,24 +1043,24 @@ function Dashboard() {
         bookingData.destinationAddress = dropoffLocation;
         bookingData.destinationLatitude = dropoffCoords?.lat;
         bookingData.destinationLongitude = dropoffCoords?.lng;
-        bookingData.scheduledTime = scheduledTime;
+        // The picker gives local wall-clock time with no zone; send an exact instant.
+        bookingData.scheduledTime = new Date(scheduledTime).toISOString();
         bookingData.ambulanceFacilities = ambulanceFacilities;
       } else {
         const td = triageOverride || triageData;
-        bookingData.triageData = td;
+        // The hospital's alert and hospital matching need the kind of emergency, not just its severity.
+        bookingData.triageData = triageResultData
+          ? { ...td, emergencyType: triageResultData.emergencyType, painLevel: triageResultData.painLevel, isPregnant: triageResultData.isPregnant }
+          : td;
         bookingData.severity = td.severity;
         bookingData.description = td.chiefComplaint;
       }
 
-      console.log('Creating booking with data:', bookingData);
-
-      const response = await axios.post(
+      await axios.post(
         `${API_BASE_URL}/bookings`,
         bookingData,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-
-      console.log('Booking created successfully:', response.data);
 
       // Reset form
       setShowBookingForm(false);
@@ -1052,21 +1148,16 @@ function Dashboard() {
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
-      // Call emergency services (simulate)
-      console.log('📞 Emergency services alerted!');
-      
-      // Notify emergency contact
-      if (userProfile?.emergencyContact) {
-        console.log(`📲 Notifying emergency contact: ${userProfile.emergencyContact}`);
-      }
-
-      await fetchDashboardData();
+      const fresh = await fetchDashboardData();
       setShowSOSConfirm(false);
-      toast.success('🚨 SOS activated! Ambulance dispatched — stay calm, help is on the way!', { duration: 6000 });
+      toast.success('🚨 SOS activated! Ambulance requested — stay calm, help is on the way!', { duration: 6000 });
 
-      // Start tracking the new booking
-      const newBooking = response.data;
-      setTrackingBooking(newBooking);
+      // Open tracking on the booking as the dashboard knows it (with its
+      // ambulance, hospital and numeric coordinates) — the raw API row has none
+      // of those and left the tracking view half empty.
+      const newId = response.data?.id || response.data?.booking?.id;
+      const newBooking = fresh.find(b => b.id === newId);
+      if (newBooking) setTrackingBooking(newBooking);
 
     } catch (err) {
       console.error('SOS Emergency failed:', err);
@@ -1120,7 +1211,8 @@ function Dashboard() {
     // other case, dispatch now so the chat's "ambulance is on its way"
     // confirmation + Track button are accurate. The booking form stays open
     // showing that success screen until the user taps Track.
-    if (!fastTrackDispatched && !fastTrackBookingIdRef.current) {
+    if (!fastTrackDispatched && !fastTrackBookingIdRef.current && !dispatchInFlightRef.current) {
+      dispatchInFlightRef.current = true;
       try {
         const booking = await createEmergencyBooking(result, mappedSeverity);
         fastTrackBookingIdRef.current = booking?.id ?? null;
@@ -1128,7 +1220,14 @@ function Dashboard() {
         await fetchDashboardData();
       } catch (err) {
         console.error('Auto-dispatch on triage complete failed:', err);
-        toast.error('Could not dispatch automatically — tap "Request Emergency Ambulance".');
+        toast.error(
+          err instanceof PickupUnknownError
+            ? NO_PICKUP_MESSAGE
+            : 'Could not dispatch automatically — tap "Request Emergency Ambulance".',
+          { duration: 10000 },
+        );
+      } finally {
+        dispatchInFlightRef.current = false;
       }
     } else {
       await fetchDashboardData();
@@ -1153,10 +1252,10 @@ function Dashboard() {
           } catch (err: any) {
             toast.error(err.response?.data?.message || 'Failed to cancel booking');
           }
-        }} style={{ padding:'4px 12px', background:'#de350b', color:'white', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+        }} className="ui-btn ui-btn--danger ui-btn--sm">
           Yes, cancel
         </button>
-        <button onClick={() => toast.dismiss(t.id)} style={{ padding:'4px 12px', background:'#f4f5f7', color:'#172b4d', border:'none', borderRadius:'6px', cursor:'pointer', fontWeight:600, fontSize:'13px' }}>
+        <button onClick={() => toast.dismiss(t.id)} className="ui-btn ui-btn--secondary ui-btn--sm">
           Keep
         </button>
       </span>
@@ -1189,1153 +1288,686 @@ function Dashboard() {
   const getDispatchStatusLabel = (status: string) => {
     switch (status) {
       case 'DISPATCHED':
-      case 'ASSIGNED': return ' Ambulance Assigned';
-      case 'EN_ROUTE': return ' En Route to You';
-      case 'AT_PICKUP': return '✅ Arrived - Waiting';
-      case 'EN_ROUTE_HOSPITAL': return '🏥 Going to Hospital';
-      case 'AT_HOSPITAL': return '🏥 At Hospital';
-      case 'COMPLETED': return '✓ Completed';
-      default: return status.replace('_', ' ');
+      case 'ASSIGNED': return 'Ambulance assigned';
+      case 'EN_ROUTE':
+      case 'EN_ROUTE_PICKUP': return 'En route to you';
+      case 'AT_PICKUP': return 'Arrived — waiting';
+      case 'EN_ROUTE_HOSPITAL': return 'Going to hospital';
+      case 'AT_HOSPITAL': return 'At hospital';
+      case 'COMPLETED': return 'Completed';
+      default: return statusMeta(status).label;
     }
   };
 
-
   if (loading) {
-    return (
-      <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background:'#f5f7fa', flexDirection:'column', gap:'16px' }}>
-        <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}`}</style>
-        <div style={{ width:'44px', height:'44px', borderRadius:'50%', border:'3px solid #e6f7f9', borderTopColor:'#00a3bf', animation:'spin 0.8s linear infinite' }} />
-        <div style={{ fontSize:'15px', color:'#6b778c', fontWeight:500 }}>Loading dashboard…</div>
-        <div style={{ display:'flex', flexDirection:'column', gap:'12px', width:'min(420px,90vw)', marginTop:'8px' }}>
-          {[1,2,3].map(i => (
-            <div key={i} style={{ height:'68px', borderRadius:'12px', background:'#e0e0e0', animation:'pulse 1.6s ease-in-out infinite', animationDelay:`${i*0.15}s` }} />
-          ))}
-        </div>
-      </div>
-    );
+    return <PageLoading label="Loading your dashboard…" />;
   }
 
   if (error) {
-    return (
-      <div style={{ display:'flex', justifyContent:'center', alignItems:'center', height:'100vh', background:'#f5f7fa', flexDirection:'column', gap:'12px', padding:'24px' }}>
-        <div style={{ fontSize:'40px' }}>⚠️</div>
-        <div style={{ fontSize:'16px', color:'#de350b', fontWeight:600, textAlign:'center' }}>{error}</div>
-        <button onClick={fetchDashboardData} style={{ padding:'10px 24px', background:'#00a3bf', color:'white', border:'none', borderRadius:'8px', cursor:'pointer', fontWeight:600, fontSize:'14px' }}>Retry</button>
-      </div>
-    );
+    return <PageError message={error} onRetry={fetchDashboardData} />;
   }
 
-  return (
-    <div className="dashboard-container">
-      {/* Mobile overlay */}
-      <div className={`sidebar-overlay ${sidebarOpen ? 'overlay--visible' : ''}`} onClick={() => setSidebarOpen(false)} />
+  const activeBookings = bookings.filter(b => ACTIVE_STATUSES.includes(b.status));
+  const historyBookings = bookings.filter(b => !ACTIVE_STATUSES.includes(b.status));
 
-      <aside className={`sidebar ${sidebarOpen ? 'sidebar--open' : ''}`}>
-        <div className="sidebar-header">
-          <div className="logo-section">
-            <svg className="logo-icon" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" fill="#00a3bf"/>
-              <path d="M12 8v8m-4-4h8" stroke="white" strokeWidth="2" strokeLinecap="round"/>
-            </svg>
-            <span className="logo-text">ECS User</span>
-            <button className="sidebar-close-btn" onClick={() => setSidebarOpen(false)} aria-label="Close menu">✕</button>
+  const TITLES: Record<TabType, { title: string; subtitle: string }> = {
+    bookings: { title: 'My Bookings', subtitle: 'Book ambulance services and track your requests' },
+    profile: { title: 'My Profile', subtitle: 'Manage your personal information' },
+    locations: { title: 'Saved Locations', subtitle: 'Manage your frequently used locations' },
+  };
+
+  const selectTab = (tab: TabType) => {
+    setActiveTab(tab);
+    setShowBookingForm(false);
+    setSidebarOpen(false);
+  };
+
+  const NAV: { id: TabType; label: string; icon: 'ambulance' | 'user' | 'mapPin' }[] = [
+    { id: 'bookings', label: 'My Bookings', icon: 'ambulance' },
+    { id: 'profile', label: 'Profile', icon: 'user' },
+    { id: 'locations', label: 'Saved Locations', icon: 'mapPin' },
+  ];
+
+  const trackingStatus = trackingMetrics?.dispatchStatus || trackingBooking?.status || '';
+  const isEmergencyForm = bookingType === 'EMERGENCY';
+
+  return (
+    <div className="ui-app">
+      <a href="#main" className="ui-skip-link">Skip to content</a>
+      <div className={`ui-scrim${sidebarOpen ? ' is-visible' : ''}`} onClick={() => setSidebarOpen(false)} aria-hidden="true" />
+
+      <aside className={`ui-sidebar${sidebarOpen ? ' is-open' : ''}`} aria-label="Patient navigation">
+        <div className="ui-sidebar__brand">
+          <BrandMark />
+          <div className="ui-sidebar__brand-text">
+            <div className="ui-sidebar__product">ECS</div>
+            <div className="ui-sidebar__portal">Patient portal</div>
           </div>
-          <div className="user-badge">User Portal</div>
+          <button type="button" className="ui-btn ui-btn--ghost ui-btn--icon ui-btn--sm ui-sidebar__close" onClick={() => setSidebarOpen(false)} aria-label="Close menu">
+            <Icon name="x" />
+          </button>
         </div>
 
-        <nav className="nav-menu">
-          <a href="#" className={`nav-item ${activeTab === 'bookings' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('bookings'); setShowBookingForm(false); setSidebarOpen(false); }}>
-            <svg viewBox="0 0 24 24" fill="none">
-              <rect x="3" y="4" width="18" height="18" rx="2" fill="currentColor"/>
-              <path d="M16 2v4M8 2v4M3 10h18" stroke="white" strokeWidth="2"/>
-            </svg>
-            <span>My Bookings</span>
-            {chat.totalUnread > 0 && (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                minWidth: '20px', height: '20px', marginLeft: 'auto', padding: '0 6px',
-                borderRadius: '9999px', background: '#DE350B', color: 'white',
-                fontSize: '11px', fontWeight: 700,
-              }}>
-                {chat.totalUnread}
-              </span>
-            )}
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'profile' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('profile'); setShowBookingForm(false); setSidebarOpen(false); }}>
-            <svg viewBox="0 0 24 24" fill="none">
-              <circle cx="12" cy="8" r="4" fill="currentColor"/>
-              <path d="M6 21v-2a4 4 0 014-4h4a4 4 0 014 4v2" fill="currentColor"/>
-            </svg>
-            <span>Profile</span>
-          </a>
-          <a href="#" className={`nav-item ${activeTab === 'locations' ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); setActiveTab('locations'); setShowBookingForm(false); setSidebarOpen(false); }}>
-            <svg viewBox="0 0 24 24" fill="none">
-              <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z" fill="currentColor"/>
-            </svg>
-            <span>Saved Locations</span>
-          </a>
+        <nav className="ui-nav" aria-label="Sections">
+          {NAV.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              className={`ui-nav__item${activeTab === item.id ? ' is-active' : ''}`}
+              aria-current={activeTab === item.id ? 'page' : undefined}
+              onClick={() => selectTab(item.id)}
+            >
+              <Icon name={item.icon} />
+              {item.label}
+              {item.id === 'bookings' && chat.totalUnread > 0 && (
+                <span className="ui-nav__badge" aria-label={`${chat.totalUnread} unread messages`}>{chat.totalUnread}</span>
+              )}
+            </button>
+          ))}
         </nav>
 
-        <button onClick={handleLogout} className="logout-btn">
-          <svg viewBox="0 0 24 24" fill="none">
-            <path d="M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5-5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z" fill="currentColor"/>
-          </svg>
-          Logout
-        </button>
+        <div className="ui-sidebar__footer">
+          {userProfile && (
+            <div className="ui-user">
+              <span className="ui-avatar">{initialsOf(userProfile.name)}</span>
+              <div style={{ minWidth: 0 }}>
+                <div className="ui-user__name ui-truncate">{userProfile.name}</div>
+                <div className="ui-user__meta ui-truncate">{userProfile.phoneNumber}</div>
+              </div>
+            </div>
+          )}
+          <button type="button" onClick={handleLogout} className="ui-btn ui-btn--ghost ui-btn--block usr-signout">
+            <Icon name="logOut" />
+            Logout
+          </button>
+        </div>
       </aside>
 
-      <main className="main-content">
-        {/* Mobile top bar */}
-        <div className="mobile-topbar">
-          <button className="hamburger-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">☰</button>
-          <svg style={{ width:28, height:28, flexShrink:0 }} viewBox="0 0 24 24" fill="none">
-            <path d="M12 2L2 7v10c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V7l-10-5z" fill="#00a3bf"/>
-            <path d="M12 8v8m-4-4h8" stroke="white" strokeWidth="2" strokeLinecap="round"/>
-          </svg>
-          <span style={{ fontWeight:700, fontSize:16, color:'#172b4d', flex:1 }}>ECS User</span>
-          {userProfile && <span style={{ fontSize:13, color:'#6b778c' }}>{userProfile.name}</span>}
-        </div>
-
-        <header className="dashboard-header">
-          <div>
-            <h1>{activeTab === 'bookings' ? 'My Bookings' : activeTab === 'profile' ? 'My Profile' : 'Saved Locations'}</h1>
-            <p>{activeTab === 'bookings' ? 'Book ambulance services and track your requests' : activeTab === 'profile' ? 'Manage your personal information' : 'Manage your frequently used locations'}</p>
+      <div className="ui-main">
+        <header className="ui-topbar">
+          <button type="button" className="ui-btn ui-btn--secondary ui-btn--icon ui-menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+            <Icon name="menu" />
+          </button>
+          <div className="ui-topbar__titles">
+            <h1 className="ui-topbar__title">{TITLES[activeTab].title}</h1>
+            <div className="ui-topbar__subtitle">{TITLES[activeTab].subtitle}</div>
           </div>
-          {userProfile && activeTab === 'bookings' && (
-            <div className="user-info-card">
-              <div className="info-row">
-                <strong>{userProfile.name}</strong>
-              </div>
-              <div className="info-row">
-                {userProfile.phoneNumber}
-              </div>
+          {userProfile && (
+            <div className="ui-topbar__actions">
               {medicalProfile.bloodGroup && (
-                <div className="info-row">
-                  Blood Group: {medicalProfile.bloodGroup}
-                </div>
+                <Badge tone="danger" icon="droplet" title="Blood group">Blood {medicalProfile.bloodGroup}</Badge>
               )}
+              <span className="usr-topbar-user ui-hide-sm">
+                <span className="ui-avatar">{initialsOf(userProfile.name)}</span>
+                <span className="ui-user__name">{userProfile.name}</span>
+              </span>
             </div>
           )}
         </header>
 
-        {activeTab === 'profile' ? (
-          <div className="profile-section">
-            {/* Profile Header with Avatar */}
-            <div style={{ 
-              background: 'linear-gradient(135deg, #0066cc 0%, #00a3bf 100%)', 
-              borderRadius: '12px 12px 0 0', 
-              padding: '40px 32px',
-              color: 'white',
-              marginBottom: '0'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '24px', flexWrap: 'wrap' }}>
-                <div style={{ 
-                  width: '100px', 
-                  height: '100px', 
-                  borderRadius: '50%', 
-                  background: 'white',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  fontSize: '40px',
-                  fontWeight: '700',
-                  color: '#0066cc',
-                  border: '4px solid rgba(255, 255, 255, 0.3)',
-                  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.2)'
-                }}>
-                  {userProfile?.name ? userProfile.name.charAt(0).toUpperCase() : '👤'}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <h2 style={{ margin: '0 0 8px 0', fontSize: '28px', fontWeight: '700' }}>
-                    {userProfile?.name || 'User Profile'}
-                  </h2>
-                  <p style={{ margin: '0 0 4px 0', fontSize: '16px', opacity: 0.9 }}>
-                    📧 {userProfile?.email || 'No email'}
-                  </p>
-                  <p style={{ margin: 0, fontSize: '14px', opacity: 0.8 }}>
-                    📞 {userProfile?.phoneNumber || 'No phone number'}
-                  </p>
-                </div>
-                {!editingProfile && (
-                  <button 
-                    onClick={() => setEditingProfile(true)} 
-                    style={{ 
-                      padding: '12px 24px', 
-                      backgroundColor: 'white', 
-                      color: '#0066cc', 
-                      border: 'none', 
-                      borderRadius: '8px', 
-                      cursor: 'pointer',
-                      fontSize: '15px',
-                      fontWeight: '600',
-                      boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
-                      transition: 'transform 0.2s'
-                    }}
-                    onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
-                    onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
-                  >
-                    ✏️ Edit Profile
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div style={{ background: 'white', borderRadius: '0 0 12px 12px', padding: '32px', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}>
-              {editingProfile && (
-                <div style={{ 
-                  display: 'flex', 
-                  gap: '12px', 
-                  marginBottom: '24px', 
-                  padding: '16px', 
-                  background: '#fff4e6', 
-                  borderRadius: '8px',
-                  border: '1px solid #ffab00'
-                }}>
-                  <div style={{ fontSize: '20px' }}>💡</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: '600', color: '#172b4d', marginBottom: '4px' }}>
-                      Complete Your Profile
-                    </div>
-                    <div style={{ fontSize: '13px', color: '#666' }}>
-                      Adding medical information and emergency contacts helps responders provide better care during emergencies.
-                    </div>
+        <main id="main" className="ui-content" key={activeTab}>
+          {activeTab === 'profile' ? (
+            <div className="ui-stack usr-profile">
+              <section className="ui-card usr-profile__hero ui-enter">
+                <span className="ui-avatar ui-avatar--xl usr-profile__avatar">{initialsOf(userProfile?.name)}</span>
+                <div className="usr-profile__identity">
+                  <h2 className="usr-profile__name">{userProfile?.name || 'User Profile'}</h2>
+                  <div className="usr-profile__contact">
+                    <span><Icon name="mail" size={15} />{userProfile?.email || 'No email'}</span>
+                    <span><Icon name="phone" size={15} />{userProfile?.phoneNumber || 'No phone number'}</span>
                   </div>
                 </div>
-              )}
+                {!editingProfile && (
+                  <button type="button" onClick={() => setEditingProfile(true)} className="ui-btn ui-btn--secondary">
+                    <Icon name="pencil" size={15} />
+                    Edit Profile
+                  </button>
+                )}
+              </section>
 
               {!editingProfile ? (
                 <>
-                  {/* Personal Information Section */}
-                  <div style={{ marginBottom: '32px' }}>
-                    <h3 style={{ 
-                      margin: '0 0 20px 0', 
-                      fontSize: '18px', 
-                      color: '#172b4d',
-                      paddingBottom: '12px',
-                      borderBottom: '2px solid #e0e0e0'
-                    }}>
-                      👤 Personal Information
-                    </h3>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-                      <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0' }}>
-                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Full Name</label>
-                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>{userProfile?.name || 'Not set'}</p>
-                      </div>
-                      <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0' }}>
-                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Phone Number</label>
-                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>{userProfile?.phoneNumber || 'Not set'}</p>
-                      </div>
-                      <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0' }}>
-                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Date of Birth</label>
-                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>
-                          {userProfile?.dateOfBirth ? formatIstLongDate(userProfile.dateOfBirth) : 'Not set'}
-                        </p>
-                      </div>
-                      <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0', gridColumn: 'span 2' }}>
-                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Address</label>
-                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>{userProfile?.address || 'Not set'}</p>
-                      </div>
+                  <section className="ui-card ui-enter" style={{ ['--i' as string]: 1 }} aria-labelledby="personal-h">
+                    <div className="ui-card__header">
+                      <h3 id="personal-h" className="ui-card__title"><Icon name="idCard" size={17} />Personal information</h3>
                     </div>
-                  </div>
+                    <div className="ui-card__body">
+                      <dl className="ui-dl">
+                        <div className="ui-dl__item"><dt>Full name</dt><dd className={userProfile?.name ? undefined : 'is-empty'}>{userProfile?.name || 'Not set'}</dd></div>
+                        <div className="ui-dl__item"><dt>Phone number</dt><dd className={userProfile?.phoneNumber ? undefined : 'is-empty'}>{userProfile?.phoneNumber || 'Not set'}</dd></div>
+                        <div className="ui-dl__item">
+                          <dt>Date of birth</dt>
+                          <dd className={userProfile?.dateOfBirth ? undefined : 'is-empty'}>{userProfile?.dateOfBirth ? formatIstLongDate(userProfile.dateOfBirth) : 'Not set'}</dd>
+                        </div>
+                        <div className="ui-dl__item ui-dl__item--wide"><dt>Address</dt><dd className={userProfile?.address ? undefined : 'is-empty'}>{userProfile?.address || 'Not set'}</dd></div>
+                      </dl>
+                    </div>
+                  </section>
 
-                  {/* Emergency Contact Section */}
-                  <div style={{ marginBottom: '32px' }}>
-                    <h3 style={{ 
-                      margin: '0 0 20px 0', 
-                      fontSize: '18px', 
-                      color: '#172b4d',
-                      paddingBottom: '12px',
-                      borderBottom: '2px solid #e0e0e0'
-                    }}>
-                      🚨 Emergency Information
-                    </h3>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px' }}>
-                      <div style={{ 
-                        padding: '20px', 
-                        background: userProfile?.emergencyContact ? '#e3f5ff' : '#fff4e6', 
-                        borderRadius: '12px', 
-                        border: userProfile?.emergencyContact ? '1px solid #0066cc' : '1px solid #ffab00'
-                      }}>
-                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Emergency Contact</label>
-                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>
-                          {userProfile?.emergencyContact || '⚠️ Not set - Please add'}
-                        </p>
-                      </div>
-                      <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0' }}>
-                        <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Blood Group</label>
-                        <p style={{ margin: '8px 0 0', fontSize: '17px', color: '#172b4d', fontWeight: '600' }}>{medicalProfile.display.bloodGroup}</p>
-                      </div>
+                  <section className="ui-card ui-enter" style={{ ['--i' as string]: 2 }} aria-labelledby="emergency-h">
+                    <div className="ui-card__header">
+                      <h3 id="emergency-h" className="ui-card__title"><Icon name="siren" size={17} />Emergency information</h3>
                     </div>
-                  </div>
-
-                  {/* Medical History Section — free-text notes. The structured
-                      Medical Profile lives in its own editable section below. */}
-                  <div>
-                    <h3 style={{ 
-                      margin: '0 0 20px 0', 
-                      fontSize: '18px', 
-                      color: '#172b4d',
-                      paddingBottom: '12px',
-                      borderBottom: '2px solid #e0e0e0'
-                    }}>
-                      🏥 Medical Information
-                    </h3>
-                    <div style={{ padding: '20px', backgroundColor: '#f8f9fa', borderRadius: '12px', border: '1px solid #e0e0e0' }}>
-                      <label style={{ fontSize: '12px', color: '#666', textTransform: 'uppercase', fontWeight: '600', letterSpacing: '0.5px' }}>Medical History</label>
-                      <p style={{ margin: '8px 0 0', fontSize: '15px', color: '#172b4d', lineHeight: '1.6' }}>
-                        {userProfile?.medicalHistory || 'No medical history recorded'}
-                      </p>
+                    <div className="ui-card__body">
+                      <dl className="ui-dl">
+                        <div className={`ui-dl__item${userProfile?.emergencyContact ? '' : ' usr-missing'}`}>
+                          <dt>Emergency contact</dt>
+                          <dd>
+                            {userProfile?.emergencyContact || (
+                              <span className="usr-missing__text"><Icon name="alertTriangle" size={15} />Not set — please add</span>
+                            )}
+                          </dd>
+                        </div>
+                        <div className="ui-dl__item">
+                          <dt>Blood group</dt>
+                          <dd className={medicalProfile.bloodGroup ? undefined : 'is-empty'}>{medicalProfile.display.bloodGroup}</dd>
+                        </div>
+                        {/* Medical History — free-text notes. The structured
+                            Medical Profile lives in its own editable section below. */}
+                        <div className="ui-dl__item ui-dl__item--wide">
+                          <dt>Medical history</dt>
+                          <dd className={userProfile?.medicalHistory ? undefined : 'is-empty'} style={{ fontWeight: userProfile?.medicalHistory ? 500 : undefined, lineHeight: 1.6 }}>
+                            {userProfile?.medicalHistory || 'No medical history recorded'}
+                          </dd>
+                        </div>
+                      </dl>
                     </div>
-                  </div>
+                  </section>
                 </>
               ) : (
-                <>
-                  {/* Edit Form */}
-                  <div style={{ marginBottom: '32px' }}>
-                    <h3 style={{ margin: '0 0 20px 0', fontSize: '18px', color: '#172b4d' }}>
-                      👤 Personal Information
-                    </h3>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px' }}>
+                <section className="ui-card ui-enter" aria-labelledby="edit-h">
+                  <div className="ui-card__header">
+                    <h3 id="edit-h" className="ui-card__title"><Icon name="pencil" size={16} />Edit profile</h3>
+                  </div>
+                  <div className="ui-card__body ui-stack">
+                    <div className="ui-alert tone-info">
+                      <Icon name="info" size={17} />
                       <div>
-                        <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#172b4d' }}>
-                          First Name <span style={{ color: '#de350b' }}>*</span>
-                        </label>
-                        <input 
-                          type="text" 
-                          value={profileForm.firstName} 
-                          onChange={(e) => setProfileForm({...profileForm, firstName: e.target.value})} 
-                          style={{ 
-                            width: '100%', 
-                            padding: '12px 16px', 
-                            border: '2px solid #dfe1e6', 
-                            borderRadius: '8px', 
-                            fontSize: '15px', 
-                            boxSizing: 'border-box',
-                            transition: 'border-color 0.2s'
-                          }} 
-                          placeholder="Enter first name"
-                          onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-                          onBlur={(e) => e.target.style.borderColor = '#dfe1e6'}
-                        />
-                      </div>
-                      <div>
-                        <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#172b4d' }}>
-                          Last Name <span style={{ color: '#de350b' }}>*</span>
-                        </label>
-                        <input 
-                          type="text" 
-                          value={profileForm.lastName} 
-                          onChange={(e) => setProfileForm({...profileForm, lastName: e.target.value})} 
-                          style={{ 
-                            width: '100%', 
-                            padding: '12px 16px', 
-                            border: '2px solid #dfe1e6', 
-                            borderRadius: '8px', 
-                            fontSize: '15px', 
-                            boxSizing: 'border-box',
-                            transition: 'border-color 0.2s'
-                          }} 
-                          placeholder="Enter last name"
-                          onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-                          onBlur={(e) => e.target.style.borderColor = '#dfe1e6'}
-                        />
-                      </div>
-                      <div>
-                        <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#172b4d' }}>
-                          Phone Number <span style={{ color: '#de350b' }}>*</span>
-                        </label>
-                        <input 
-                          type="tel" 
-                          value={profileForm.phoneNumber} 
-                          onChange={(e) => setProfileForm({...profileForm, phoneNumber: e.target.value})} 
-                          style={{ 
-                            width: '100%', 
-                            padding: '12px 16px', 
-                            border: '2px solid #dfe1e6', 
-                            borderRadius: '8px', 
-                            fontSize: '15px', 
-                            boxSizing: 'border-box',
-                            transition: 'border-color 0.2s'
-                          }} 
-                          placeholder="+1 (555) 000-0000"
-                          onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-                          onBlur={(e) => e.target.style.borderColor = '#dfe1e6'}
-                        />
-                      </div>
-                      <div>
-                        <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#172b4d' }}>
-                          Date of Birth
-                        </label>
-                        <input 
-                          type="date" 
-                          value={profileForm.dateOfBirth} 
-                          onChange={(e) => setProfileForm({...profileForm, dateOfBirth: e.target.value})} 
-                          style={{ 
-                            width: '100%', 
-                            padding: '12px 16px', 
-                            border: '2px solid #dfe1e6', 
-                            borderRadius: '8px', 
-                            fontSize: '15px', 
-                            boxSizing: 'border-box',
-                            transition: 'border-color 0.2s'
-                          }}
-                          onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-                          onBlur={(e) => e.target.style.borderColor = '#dfe1e6'}
-                        />
-                      </div>
-                      <div style={{ gridColumn: 'span 2' }}>
-                        <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#172b4d' }}>
-                          Address
-                        </label>
-                        <input 
-                          type="text" 
-                          value={profileForm.address} 
-                          onChange={(e) => setProfileForm({...profileForm, address: e.target.value})} 
-                          style={{ 
-                            width: '100%', 
-                            padding: '12px 16px', 
-                            border: '2px solid #dfe1e6', 
-                            borderRadius: '8px', 
-                            fontSize: '15px', 
-                            boxSizing: 'border-box',
-                            transition: 'border-color 0.2s'
-                          }} 
-                          placeholder="123 Main St, City, State, ZIP"
-                          onFocus={(e) => e.target.style.borderColor = '#0066cc'}
-                          onBlur={(e) => e.target.style.borderColor = '#dfe1e6'}
-                        />
+                        <div className="ui-alert__title">Complete your profile</div>
+                        Adding medical information and emergency contacts helps responders provide better care during emergencies.
                       </div>
                     </div>
-                  </div>
 
-                  {/* Emergency Contact */}
-                  <div style={{ marginBottom: '32px' }}>
-                    <h3 style={{ margin: '0 0 20px 0', fontSize: '18px', color: '#172b4d' }}>
-                      🚨 Emergency Information
-                    </h3>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '20px' }}>
-                      <div>
-                        <label style={{ display: 'block', fontSize: '14px', fontWeight: '600', marginBottom: '8px', color: '#172b4d' }}>
-                          Emergency Contact <span style={{ color: '#de350b' }}>*</span>
-                        </label>
-                        <input 
-                          type="tel" 
-                          value={profileForm.emergencyContact} 
-                          onChange={(e) => setProfileForm({...profileForm, emergencyContact: e.target.value})} 
-                          style={{ 
-                            width: '100%', 
-                            padding: '12px 16px', 
-                            border: '2px solid #dfe1e6', 
-                            borderRadius: '8px', 
-                            fontSize: '15px', 
-                            boxSizing: 'border-box',
-                            transition: 'border-color 0.2s'
-                          }} 
-                          placeholder="Emergency contact phone number"
-                          onFocus={(e) => e.target.style.borderColor = '#de350b'}
-                          onBlur={(e) => e.target.style.borderColor = '#dfe1e6'}
-                        />
-                        <p style={{ margin: '8px 0 0', fontSize: '12px', color: '#666' }}>
-                          This person will be notified during emergencies
-                        </p>
+                    <fieldset className="usr-fieldset">
+                      <legend className="ui-eyebrow">Personal information</legend>
+                      <div className="ui-form-grid">
+                        <div className="ui-field">
+                          <label className="ui-label" htmlFor="pf-first">First name <span className="ui-label__required" aria-hidden="true">*</span></label>
+                          <input id="pf-first" className="ui-input" type="text" value={profileForm.firstName}
+                            onChange={(e) => setProfileForm({...profileForm, firstName: e.target.value})} placeholder="Enter first name" required />
+                        </div>
+                        <div className="ui-field">
+                          <label className="ui-label" htmlFor="pf-last">Last name <span className="ui-label__required" aria-hidden="true">*</span></label>
+                          <input id="pf-last" className="ui-input" type="text" value={profileForm.lastName}
+                            onChange={(e) => setProfileForm({...profileForm, lastName: e.target.value})} placeholder="Enter last name" required />
+                        </div>
+                        <div className="ui-field">
+                          <label className="ui-label" htmlFor="pf-phone">Phone number <span className="ui-label__required" aria-hidden="true">*</span></label>
+                          <input id="pf-phone" className="ui-input" type="tel" value={profileForm.phoneNumber}
+                            onChange={(e) => setProfileForm({...profileForm, phoneNumber: e.target.value})} placeholder="+91 98765 43210" required />
+                        </div>
+                        <div className="ui-field">
+                          <label className="ui-label" htmlFor="pf-dob">Date of birth</label>
+                          <input id="pf-dob" className="ui-input" type="date" value={profileForm.dateOfBirth}
+                            onChange={(e) => setProfileForm({...profileForm, dateOfBirth: e.target.value})} />
+                        </div>
+                        <div className="ui-field is-wide">
+                          <label className="ui-label" htmlFor="pf-address">Address</label>
+                          <input id="pf-address" className="ui-input" type="text" value={profileForm.address}
+                            onChange={(e) => setProfileForm({...profileForm, address: e.target.value})} placeholder="House, street, city, PIN" />
+                        </div>
                       </div>
-                    </div>
-                  </div>
+                    </fieldset>
 
-                  {/* Action Buttons */}
-                  <div style={{ 
-                    display: 'flex', 
-                    gap: '12px', 
-                    paddingTop: '24px', 
-                    borderTop: '2px solid #e0e0e0',
-                    justifyContent: 'flex-end'
-                  }}>
-                    <button 
-                      onClick={() => setEditingProfile(false)} 
-                      style={{ 
-                        padding: '12px 24px', 
-                        backgroundColor: '#f4f5f7', 
-                        color: '#172b4d', 
-                        border: '2px solid #dfe1e6', 
-                        borderRadius: '8px', 
-                        cursor: 'pointer',
-                        fontSize: '15px',
-                        fontWeight: '600',
-                        transition: 'all 0.2s'
-                      }}
-                      onMouseOver={(e) => e.currentTarget.style.backgroundColor = '#e0e0e0'}
-                      onMouseOut={(e) => e.currentTarget.style.backgroundColor = '#f4f5f7'}
-                    >
-                      Cancel
-                    </button>
-                    <button 
-                      onClick={handleUpdateProfile} 
-                      style={{ 
-                        padding: '12px 32px', 
-                        backgroundColor: '#00875a', 
-                        color: 'white', 
-                        border: 'none', 
-                        borderRadius: '8px', 
-                        cursor: 'pointer',
-                        fontSize: '15px',
-                        fontWeight: '600',
-                        boxShadow: '0 4px 12px rgba(0, 135, 90, 0.3)',
-                        transition: 'all 0.2s'
-                      }}
-                      onMouseOver={(e) => {
-                        e.currentTarget.style.backgroundColor = '#006644';
-                        e.currentTarget.style.transform = 'translateY(-2px)';
-                      }}
-                      onMouseOut={(e) => {
-                        e.currentTarget.style.backgroundColor = '#00875a';
-                        e.currentTarget.style.transform = 'translateY(0)';
-                      }}
-                    >
-                      💾 Save Changes
+                    <fieldset className="usr-fieldset">
+                      <legend className="ui-eyebrow">Emergency information</legend>
+                      <div className="ui-form-grid">
+                        <div className="ui-field">
+                          <label className="ui-label" htmlFor="pf-ec">Emergency contact <span className="ui-label__required" aria-hidden="true">*</span></label>
+                          <input id="pf-ec" className="ui-input" type="tel" value={profileForm.emergencyContact}
+                            onChange={(e) => setProfileForm({...profileForm, emergencyContact: e.target.value})}
+                            placeholder="Emergency contact phone number" aria-describedby="pf-ec-help" />
+                          <div id="pf-ec-help" className="ui-help">This person will be notified during emergencies</div>
+                        </div>
+                      </div>
+                    </fieldset>
+                  </div>
+                  <div className="ui-card__footer usr-form-actions">
+                    <button type="button" onClick={() => setEditingProfile(false)} className="ui-btn ui-btn--secondary">Cancel</button>
+                    <button type="button" onClick={handleUpdateProfile} className="ui-btn ui-btn--success">
+                      <Icon name="save" size={16} />
+                      Save changes
                     </button>
                   </div>
-                </>
+                </section>
               )}
-            </div>
-            
-            {/* Medical Profile — add, update or remove at any time. Saving here
-                updates the patient's profile record, so future triage sessions,
-                hospital pre-alerts and reports pick up the new values. */}
-            <MedicalProfileSection
-              apiBaseUrl={API_BASE_URL}
-              token={tokenStorage.getToken() || ''}
-              initialProfile={medicalProfile}
-              onSaved={(saved) => {
-                setMedicalProfile(saved);
-                setUserProfile(prev => (prev ? { ...prev, medicalProfile: saved, bloodType: saved.bloodGroup ?? undefined } : prev));
-              }}
-            />
 
-            {/* Emergency Contacts — the people automatically texted a live
-                tracking link the moment an ambulance is assigned. */}
-            <EmergencyContactsSection
-              apiBaseUrl={API_BASE_URL}
-              token={tokenStorage.getToken() || ''}
-            />
+              {/* Medical Profile — add, update or remove at any time. Saving here
+                  updates the patient's profile record, so future triage sessions,
+                  hospital pre-alerts and reports pick up the new values. */}
+              <MedicalProfileSection
+                apiBaseUrl={API_BASE_URL}
+                token={tokenStorage.getToken() || ''}
+                initialProfile={medicalProfile}
+                onSaved={(saved) => {
+                  setMedicalProfile(saved);
+                  setUserProfile(prev => (prev ? { ...prev, medicalProfile: saved, bloodType: saved.bloodGroup ?? undefined } : prev));
+                }}
+              />
 
-            {/* Notification Preferences Section */}
-            <div style={{ marginTop: '32px' }}>
+              {/* Emergency Contacts — the people automatically texted a live
+                  tracking link the moment an ambulance is assigned. */}
+              <EmergencyContactsSection
+                apiBaseUrl={API_BASE_URL}
+                token={tokenStorage.getToken() || ''}
+              />
+
+              {/* Notification Preferences Section */}
               <NotificationPreferencesSection token={tokenStorage.getToken() || ''} />
             </div>
-          </div>
-        ) : activeTab === 'locations' ? (
-          <div style={{ padding: '24px' }}>
+          ) : activeTab === 'locations' ? (
             <SavedLocationsTab token={tokenStorage.getToken() || ''} />
-          </div>
-        ) : !showBookingForm ? (
-          <>
-            {/* Emergency SOS Button */}
-            <div className="sos-container" style={{ 
-              background: 'linear-gradient(135deg, #ff1744 0%, #de350b 100%)', 
-              borderRadius: '16px', 
-              padding: '24px', 
-              marginBottom: '24px',
-              boxShadow: '0 8px 24px rgba(222, 53, 11, 0.3)',
-              border: '3px solid #ff5252'
-            }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px' }}>
-                <div>
-                  <h2 style={{ color: 'white', margin: '0 0 8px 0', fontSize: '24px', fontWeight: '700' }}>
-                    🚨 Emergency SOS
-                  </h2>
-                  <p style={{ color: 'rgba(255, 255, 255, 0.9)', margin: 0, fontSize: '14px' }}>
-                    One-tap emergency assistance • Auto-location • Immediate dispatch
-                  </p>
+          ) : !showBookingForm ? (
+            <div className="ui-stack usr-home">
+              {/* Emergency SOS */}
+              <section className="usr-sos ui-enter" aria-labelledby="sos-title">
+                <div className="usr-sos__icon" aria-hidden="true">
+                  <Icon name="siren" size={28} />
                 </div>
-                <button 
+                <div className="usr-sos__text">
+                  <h2 id="sos-title" className="usr-sos__title">Emergency SOS</h2>
+                  <p className="usr-sos__desc">One-tap emergency assistance for a life-threatening situation.</p>
+                  <ul className="usr-sos__points">
+                    <li><Icon name="locate" size={15} />Auto-location</li>
+                    <li><Icon name="zap" size={15} />Immediate dispatch</li>
+                    <li><Icon name="alertOctagon" size={15} />Critical priority</li>
+                  </ul>
+                </div>
+                <button
+                  type="button"
                   onClick={() => setShowSOSConfirm(true)}
                   disabled={sosActivating}
-                  style={{
-                    padding: '16px 32px',
-                    fontSize: '18px',
-                    fontWeight: '700',
-                    color: '#de350b',
-                    background: 'white',
-                    border: 'none',
-                    borderRadius: '12px',
-                    cursor: sosActivating ? 'not-allowed' : 'pointer',
-                    boxShadow: '0 4px 12px rgba(0, 0, 0, 0.2)',
-                    transition: 'transform 0.2s',
-                    opacity: sosActivating ? 0.7 : 1
-                  }}
-                  onMouseOver={(e) => !sosActivating && (e.currentTarget.style.transform = 'scale(1.05)')}
-                  onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+                  className="ui-btn ui-btn--emergency ui-btn--xl usr-sos__btn"
                 >
-                  {sosActivating ? '⏳ ACTIVATING...' : '🆘 ACTIVATE SOS'}
+                  {sosActivating ? <span className="ui-spinner" aria-hidden="true" /> : <Icon name="siren" size={20} />}
+                  {sosActivating ? 'Activating…' : 'Activate SOS'}
+                </button>
+              </section>
+
+              {/* Request options */}
+              <div className="usr-actions">
+                <button type="button" className="usr-action tone-danger ui-enter" style={{ ['--i' as string]: 1 }}
+                  onClick={() => { setBookingType('EMERGENCY'); setShowBookingForm(true); }}>
+                  <span className="ui-icon-tile"><Icon name="ambulance" size={22} /></span>
+                  <span className="usr-action__text">
+                    <span className="usr-action__title">Request Emergency Ambulance</span>
+                    <span className="usr-action__desc">Answer a few triage questions and we dispatch the right ambulance.</span>
+                  </span>
+                  <Icon name="chevronRight" size={18} className="usr-action__chevron" />
+                </button>
+                <button type="button" className="usr-action tone-info ui-enter" style={{ ['--i' as string]: 2 }}
+                  onClick={() => { setBookingType('SCHEDULED'); setShowBookingForm(true); }}>
+                  <span className="ui-icon-tile"><Icon name="calendarClock" size={22} /></span>
+                  <span className="usr-action__text">
+                    <span className="usr-action__title">Schedule Transport</span>
+                    <span className="usr-action__desc">Book a non-emergency transfer for a later date and time.</span>
+                  </span>
+                  <Icon name="chevronRight" size={18} className="usr-action__chevron" />
                 </button>
               </div>
-            </div>
 
-            {/* Action Buttons — improved CTA hierarchy */}
-            <div style={{ display: 'flex', gap: '14px', marginBottom: '28px', flexWrap: 'wrap' }}>
-              <button
-                onClick={() => { setBookingType('EMERGENCY'); setShowBookingForm(true); }}
-                style={{
-                  flex: 1,
-                  minWidth: '220px',
-                  padding: '15px 28px',
-                  background: 'linear-gradient(135deg, #BE123C, #9F1239)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '12px',
-                  fontSize: '16px',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '10px',
-                  boxShadow: '0 4px 14px rgba(159,18,57,0.35)',
-                  transition: 'transform 0.15s, box-shadow 0.15s',
-                }}
-                onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 8px 20px rgba(159,18,57,0.4)'; }}
-                onMouseLeave={e => { e.currentTarget.style.transform = 'translateY(0)'; e.currentTarget.style.boxShadow = '0 4px 14px rgba(159,18,57,0.35)'; }}
-              >
-                🚑 Request Emergency Ambulance
-              </button>
-              <button
-                onClick={() => { setBookingType('SCHEDULED'); setShowBookingForm(true); }}
-                style={{
-                  flex: 1,
-                  minWidth: '180px',
-                  padding: '15px 28px',
-                  background: 'white',
-                  color: '#1E40AF',
-                  border: '2px solid #BFDBFE',
-                  borderRadius: '12px',
-                  fontSize: '15px',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  gap: '10px',
-                  boxShadow: '0 2px 8px rgba(30,64,175,0.1)',
-                  transition: 'transform 0.15s, box-shadow 0.15s, background 0.15s',
-                }}
-                onMouseEnter={e => { e.currentTarget.style.background = '#EFF6FF'; e.currentTarget.style.transform = 'translateY(-2px)'; }}
-                onMouseLeave={e => { e.currentTarget.style.background = 'white'; e.currentTarget.style.transform = 'translateY(0)'; }}
-              >
-                📅 Schedule Transport
-              </button>
-            </div>
-
-            {/* Bookings Section with Sub-Tabs */}
-            <div style={{ marginTop: '8px' }}>
-              {/* Sub-tab switcher */}
-              {(() => {
-                const activeBookings = bookings.filter(b => ACTIVE_STATUSES.includes(b.status));
-                const historyBookings = bookings.filter(b => !ACTIVE_STATUSES.includes(b.status));
-                return (
-                  <>
-                    <BookingTabs
-                      tabs={[
-                        { id: 'current', label: 'Current Bookings', count: activeBookings.length },
-                        { id: 'history', label: 'Booking History', count: historyBookings.length },
-                      ]}
-                      activeTab={bookingSubTab}
-                      onChange={id => setBookingSubTab(id as 'current' | 'history')}
-                    />
-
-                    {/* Loading skeleton */}
-                    {loading ? (
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
-                        {[1,2,3].map(i => (
-                          <div key={i} style={{ background: 'white', borderRadius: '14px', overflow: 'hidden', boxShadow: '0 2px 8px rgba(0,0,0,0.05)' }}>
-                            <div style={{ height: '4px', background: '#E2E8F0' }} />
-                            <div style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                              {[60,80,40,90].map((w, j) => (
-                                <div key={j} style={{ height: '14px', borderRadius: '9999px', background: '#F1F5F9', width: `${w}%`, animation: 'pulse 1.5s infinite' }} />
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    ) : bookingSubTab === 'current' ? (
-                      activeBookings.length > 0 ? (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
-                          {activeBookings.map(booking => (
-                            <div key={booking.id} style={{ display: 'flex', flexDirection: 'column', gap: '12px', minWidth: 0 }}>
-                              <BookingCard
-                                booking={booking}
-                                onTrack={booking.dispatch ? () => startTracking(booking) : undefined}
-                                onCancel={() => handleCancelBooking(booking.id)}
-                              />
-                              {booking.dispatch && (
-                                <CaseChat
-                                  bookingId={booking.id}
-                                  currentRole="patient"
-                                  title="Chat with Driver"
-                                  active={activeTab === 'bookings' && bookingSubTab === 'current' && !showBookingForm}
-                                  connected={chat.connected}
-                                  thread={chat.threads[booking.id]}
-                                  onSend={text => chat.send(booking.id, text)}
-                                  onSendImage={file => { void chat.sendImage(booking.id, file); }}
-                                  onRetry={clientId => chat.retry(booking.id, clientId)}
-                                  apiBaseUrl={API_BASE_URL}
-                                  onVisibilityChange={visible => chat.setRoomVisible(booking.id, visible)}
-                                />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          padding: '64px 24px',
-                          background: 'white',
-                          borderRadius: '16px',
-                          border: '1.5px dashed #CBD5E1',
-                          gap: '16px',
-                          textAlign: 'center',
-                        }}>
-                          <div style={{ fontSize: '56px', lineHeight: 1 }}>🚑</div>
-                          <h3 style={{ margin: 0, fontSize: '20px', color: '#1E293B', fontWeight: 700 }}>No Active Bookings</h3>
-                          <p style={{ margin: 0, fontSize: '14px', color: '#64748B', maxWidth: '320px', lineHeight: 1.6 }}>
-                            You have no active or upcoming bookings. Use the buttons above to request emergency assistance or schedule a transport.
-                          </p>
-                        </div>
-                      )
-                    ) : (
-                      /* Booking History Tab */
-                      historyBookings.length > 0 ? (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '16px' }}>
-                          {historyBookings.map(booking => (
-                            <BookingCard
-                              key={booking.id}
-                              booking={booking}
-                              showActions={false}
-                            />
-                          ))}
-                        </div>
-                      ) : (
-                        <div style={{
-                          display: 'flex',
-                          flexDirection: 'column',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          padding: '64px 24px',
-                          background: 'white',
-                          borderRadius: '16px',
-                          border: '1.5px dashed #CBD5E1',
-                          gap: '16px',
-                          textAlign: 'center',
-                        }}>
-                          <div style={{ fontSize: '56px', lineHeight: 1 }}>📋</div>
-                          <h3 style={{ margin: 0, fontSize: '20px', color: '#1E293B', fontWeight: 700 }}>No Booking History</h3>
-                          <p style={{ margin: 0, fontSize: '14px', color: '#64748B', maxWidth: '320px', lineHeight: 1.6 }}>
-                            Your completed and cancelled bookings will appear here.
-                          </p>
-                        </div>
-                      )
-                    )}
-                  </>
-                );
-              })()}
-            </div>
-          </>
-        ) : (
-          <div className="booking-form-container">
-            <div className="form-header">
-              <h2>{bookingType === 'EMERGENCY' ? '🚨 Emergency Ambulance Request' : '📅 Schedule Transport'}</h2>
-              <button onClick={() => setShowBookingForm(false)} className="close-btn">
-                <svg viewBox="0 0 24 24" fill="none">
-                  <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z" fill="currentColor"/>
-                </svg>
-              </button>
-            </div>
-
-            <div className="booking-form">
-              <div className="location-section">
-                <h3>📍 Pickup Location</h3>
-                <div className="form-group" style={{ position: 'relative' }}>
-                  <label>Search or click on map</label>
-                  <input 
-                    type="text"
-                    value={pickupLocation}
-                    onChange={(e) => handlePickupInputChange(e.target.value)}
-                    onFocus={() => pickupSuggestions.length > 0 && setShowPickupSuggestions(true)}
-                    placeholder="Type to search for pickup location..."
-                    autoComplete="off"
+              {/* Bookings */}
+              <section className="usr-bookings ui-enter" style={{ ['--i' as string]: 3 }} aria-labelledby="bookings-h">
+                <div className="usr-bookings__head">
+                  <h2 id="bookings-h" className="ui-section-title">Your bookings</h2>
+                  <BookingTabs
+                    tabs={[
+                      { id: 'current', label: 'Current Bookings', count: activeBookings.length },
+                      { id: 'history', label: 'Booking History', count: historyBookings.length },
+                    ]}
+                    activeTab={bookingSubTab}
+                    onChange={id => setBookingSubTab(id as 'current' | 'history')}
                   />
-                  {showPickupSuggestions && pickupSuggestions.length > 0 && (
-                    <div className="autocomplete-dropdown">
-                      {pickupSuggestions.map((suggestion) => (
-                        <div
-                          key={suggestion.place_id}
-                          className="autocomplete-item"
-                          onMouseDown={(e) => {
-                            e.preventDefault();
-                            selectPickupSuggestion(suggestion);
-                          }}
-                          style={{ cursor: 'pointer' }}
-                        >
-                          📍 {suggestion.display_name}
+                </div>
+
+                {bookingSubTab === 'current' ? (
+                  activeBookings.length > 0 ? (
+                    <div className="usr-booking-grid">
+                      {activeBookings.map((booking, i) => (
+                        <div key={booking.id} className="usr-booking-stack ui-enter" style={{ ['--i' as string]: i }}>
+                          <BookingCard
+                            booking={booking}
+                            onTrack={booking.dispatch ? () => startTracking(booking) : undefined}
+                            onCancel={() => handleCancelBooking(booking.id)}
+                          />
+                          {booking.dispatch && (
+                            <CaseChat
+                              bookingId={booking.id}
+                              currentRole="patient"
+                              title="Chat with Driver"
+                              active={activeTab === 'bookings' && bookingSubTab === 'current' && !showBookingForm}
+                              connected={chat.connected}
+                              thread={chat.threads[booking.id]}
+                              onSend={text => chat.send(booking.id, text)}
+                              onSendImage={file => { void chat.sendImage(booking.id, file); }}
+                              onRetry={clientId => chat.retry(booking.id, clientId)}
+                              apiBaseUrl={API_BASE_URL}
+                              onVisibilityChange={visible => chat.setRoomVisible(booking.id, visible)}
+                            />
+                          )}
                         </div>
                       ))}
                     </div>
-                  )}
-                  <button 
-                    type="button" 
-                    className="location-btn"
-                    onClick={getCurrentLocation}
-                    disabled={gettingLocation}
-                  >
-                    📍 {gettingLocation ? 'Getting...' : 'Use Current Location'}
-                  </button>
-                </div>
-                <div className="map-container" ref={pickupMapRef} style={{ height: '300px', borderRadius: '8px', marginTop: '12px' }}></div>
-                {pickupCoords && (
-                  <div className="coords-display">
-                    ✓ Location set: {pickupLocation || `${pickupCoords.lat.toFixed(4)}, ${pickupCoords.lng.toFixed(4)}`}
-                  </div>
+                  ) : (
+                    <EmptyState icon="ambulance" title="No Active Bookings" dashed>
+                      You have no active or upcoming bookings. Use the options above to request emergency assistance or schedule a transport.
+                    </EmptyState>
+                  )
+                ) : (
+                  /* Booking History Tab */
+                  historyBookings.length > 0 ? (
+                    <div className="usr-booking-grid">
+                      {historyBookings.map((booking, i) => (
+                        <div key={booking.id} className="ui-enter" style={{ ['--i' as string]: Math.min(i, 8) }}>
+                          <BookingCard booking={booking} showActions={false} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <EmptyState icon="history" title="No Booking History" dashed>
+                      Your completed and cancelled bookings will appear here.
+                    </EmptyState>
+                  )
                 )}
-              </div>
+              </section>
+            </div>
+          ) : (
+            <section className={`ui-card usr-form ui-enter ${isEmergencyForm ? 'tone-danger' : 'tone-info'}`} aria-labelledby="form-title">
+              <header className="usr-form__header">
+                <span className="ui-icon-tile"><Icon name={isEmergencyForm ? 'siren' : 'calendarClock'} size={22} /></span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <h2 id="form-title" className="usr-form__title">{isEmergencyForm ? 'Emergency Ambulance Request' : 'Schedule Transport'}</h2>
+                  <p className="usr-form__subtitle">
+                    {isEmergencyForm
+                      ? 'Confirm the pickup point and answer the triage questions — dispatch starts as soon as triage finishes.'
+                      : 'Choose pickup, destination and time, plus any equipment the ambulance needs.'}
+                  </p>
+                </div>
+                <button type="button" onClick={() => setShowBookingForm(false)} className="ui-btn ui-btn--ghost ui-btn--icon" aria-label="Close form">
+                  <Icon name="x" />
+                </button>
+              </header>
 
-              {bookingType === 'SCHEDULED' && (
-                <div className="location-section">
-                  <h3>🏥 Dropoff Location</h3>
-                  <div className="form-group" style={{ position: 'relative' }}>
-                    <label>Search or click on map for destination</label>
-                    <input 
-                      type="text"
-                      value={dropoffLocation}
-                      onChange={(e) => handleDropoffInputChange(e.target.value)}
-                      onFocus={() => dropoffSuggestions.length > 0 && setShowDropoffSuggestions(true)}
-                      placeholder="Type to search for dropoff location..."
-                      autoComplete="off"
-                    />
-                    {showDropoffSuggestions && dropoffSuggestions.length > 0 && (
-                      <div className="autocomplete-dropdown">
-                        {dropoffSuggestions.map((suggestion) => (
-                          <div
-                            key={suggestion.place_id}
-                            className="autocomplete-item"
-                            onMouseDown={(e) => {
-                              e.preventDefault();
-                              selectDropoffSuggestion(suggestion);
-                            }}
-                            style={{ cursor: 'pointer' }}
-                          >
-                            🏥 {suggestion.display_name}
+              <div className="usr-form__body">
+                <div className="usr-location">
+                  <h3 className="usr-location__title"><span className="usr-location__pin tone-danger"><Icon name="mapPin" size={15} /></span>Pickup location</h3>
+                  <div className="ui-field">
+                    <label className="ui-label" htmlFor="pickup-search">Search or click on map</label>
+                    <div className="usr-location__row">
+                      <div className="ui-input-wrap usr-location__search">
+                        <Icon name="search" size={16} />
+                        <input
+                          id="pickup-search"
+                          className="ui-input"
+                          type="text"
+                          value={pickupLocation}
+                          onChange={(e) => handlePickupInputChange(e.target.value)}
+                          onFocus={() => pickupSuggestions.length > 0 && setShowPickupSuggestions(true)}
+                          placeholder="Type to search for pickup location…"
+                          autoComplete="off"
+                        />
+                        {showPickupSuggestions && pickupSuggestions.length > 0 && (
+                          <div className="ui-menu" role="listbox" aria-label="Pickup suggestions">
+                            {pickupSuggestions.map((suggestion) => (
+                              <button
+                                type="button"
+                                role="option"
+                                aria-selected={false}
+                                key={suggestion.place_id}
+                                className="ui-menu__item"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  selectPickupSuggestion(suggestion);
+                                }}
+                                onClick={() => selectPickupSuggestion(suggestion)}
+                              >
+                                <Icon name="mapPin" size={15} />
+                                {suggestion.display_name}
+                              </button>
+                            ))}
                           </div>
-                        ))}
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        className="ui-btn ui-btn--soft"
+                        onClick={getCurrentLocation}
+                        disabled={gettingLocation}
+                      >
+                        {gettingLocation ? <span className="ui-spinner" aria-hidden="true" /> : <Icon name="locate" size={16} />}
+                        {gettingLocation ? 'Getting…' : 'Use Current Location'}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="ui-map usr-location__map" ref={pickupMapRef} role="region" aria-label="Pickup map — click to set the pickup point"></div>
+                  {pickupCoords && (
+                    <div className="ui-alert tone-success usr-location__set" role="status">
+                      <Icon name="checkCircle" size={16} />
+                      <div><strong>Location set:</strong> {pickupLocation || `${pickupCoords.lat.toFixed(4)}, ${pickupCoords.lng.toFixed(4)}`}</div>
+                    </div>
+                  )}
+                </div>
+
+                {bookingType === 'SCHEDULED' && (
+                  <div className="usr-location">
+                    <h3 className="usr-location__title"><span className="usr-location__pin tone-info"><Icon name="hospital" size={15} /></span>Dropoff location</h3>
+                    <div className="ui-field">
+                      <label className="ui-label" htmlFor="dropoff-search">Search or click on map for destination</label>
+                      <div className="ui-input-wrap">
+                        <Icon name="search" size={16} />
+                        <input
+                          id="dropoff-search"
+                          className="ui-input"
+                          type="text"
+                          value={dropoffLocation}
+                          onChange={(e) => handleDropoffInputChange(e.target.value)}
+                          onFocus={() => dropoffSuggestions.length > 0 && setShowDropoffSuggestions(true)}
+                          placeholder="Type to search for dropoff location…"
+                          autoComplete="off"
+                        />
+                        {showDropoffSuggestions && dropoffSuggestions.length > 0 && (
+                          <div className="ui-menu" role="listbox" aria-label="Dropoff suggestions">
+                            {dropoffSuggestions.map((suggestion) => (
+                              <button
+                                type="button"
+                                role="option"
+                                aria-selected={false}
+                                key={suggestion.place_id}
+                                className="ui-menu__item"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  selectDropoffSuggestion(suggestion);
+                                }}
+                                onClick={() => selectDropoffSuggestion(suggestion)}
+                              >
+                                <Icon name="hospital" size={15} />
+                                {suggestion.display_name}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="ui-map usr-location__map" ref={dropoffMapRef} role="region" aria-label="Dropoff map — click to set the destination"></div>
+                    {dropoffCoords && (
+                      <div className="ui-alert tone-success usr-location__set" role="status">
+                        <Icon name="checkCircle" size={16} />
+                        <div><strong>Location set:</strong> {dropoffLocation || `${dropoffCoords.lat.toFixed(4)}, ${dropoffCoords.lng.toFixed(4)}`}</div>
                       </div>
                     )}
                   </div>
-                  <div className="map-container" ref={dropoffMapRef} style={{ height: '300px', borderRadius: '8px', marginTop: '12px' }}></div>
-                  {dropoffCoords && (
-                    <div className="coords-display">
-                      ✓ Location set: {dropoffLocation || `${dropoffCoords.lat.toFixed(4)}, ${dropoffCoords.lng.toFixed(4)}`}
+                )}
+
+                {bookingType === 'SCHEDULED' ? (
+                  <>
+                    <div className="ui-field usr-schedule">
+                      <label className="ui-label" htmlFor="scheduled-time"><Icon name="calendarClock" size={15} />Scheduled date &amp; time</label>
+                      <input
+                        id="scheduled-time"
+                        className="ui-input ui-input--lg"
+                        type="datetime-local"
+                        value={scheduledTime}
+                        onChange={(e) => setScheduledTime(e.target.value)}
+                        // Local time, like the picker's own value — toISOString() is UTC and allowed past times.
+                        min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)}
+                        required
+                      />
                     </div>
-                  )}
-                </div>
-              )}
 
-              {bookingType === 'SCHEDULED' ? (
-                <>
-                  <div className="form-group">
-                    <label>📅 Scheduled Date & Time</label>
-                    <input 
-                      type="datetime-local"
-                      value={scheduledTime}
-                      onChange={(e) => setScheduledTime(e.target.value)}
-                      min={new Date().toISOString().slice(0, 16)}
-                      required
-                    />
-                  </div>
+                    <fieldset className="usr-facilities">
+                      <legend className="usr-location__title"><span className="usr-location__pin tone-brand"><Icon name="medKit" size={15} /></span>Required ambulance facilities</legend>
+                      <div className="usr-facilities__grid">
+                        {([
+                          ['oxygenSupport', 'Oxygen Support', 'wind'],
+                          ['ventilator', 'Ventilator', 'activity'],
+                          ['cardiac', 'Cardiac Monitor / ECG', 'heartPulse'],
+                          ['icuEquipment', 'ICU Equipment', 'bedDouble'],
+                          ['wheelchairAccessible', 'Wheelchair Accessible', 'user'],
+                          ['advancedLifeSupport', 'Advanced Life Support (ALS)', 'shieldPlus'],
+                        ] as const).map(([key, label, icon]) => (
+                          <label key={key} className="ui-check">
+                            <input
+                              type="checkbox"
+                              checked={ambulanceFacilities[key]}
+                              onChange={(e) => setAmbulanceFacilities({...ambulanceFacilities, [key]: e.target.checked})}
+                            />
+                            <Icon name={icon} size={16} className="usr-facilities__icon" />
+                            <span>{label}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                  </>
+                ) : (
+                  <TriageChat
+                    patientName={userProfile?.name}
+                    medicalProfile={medicalProfile}
+                    ambulanceDispatched={fastTrackDispatched}
+                    onFastTrack={handleFastTrack}
+                    onComplete={handleTriageComplete}
+                    onTrack={handleTrackFromChat}
+                    onLocation={(loc) => {
+                      setPickupCoords({ lat: loc.lat, lng: loc.lng });
+                      setPickupLocation((prev) => prev || `${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`);
+                      reverseGeocode(loc.lat, loc.lng, setPickupLocation);
+                    }}
+                  />
+                )}
+              </div>
 
-                  <div className="facilities-section">
-                    <h3>🚑 Required Ambulance Facilities</h3>
-                    <div className="checkbox-group">
-                      <label>
-                        <input 
-                          type="checkbox"
-                          checked={ambulanceFacilities.oxygenSupport}
-                          onChange={(e) => setAmbulanceFacilities({...ambulanceFacilities, oxygenSupport: e.target.checked})}
-                        />
-                        <span>Oxygen Support</span>
-                      </label>
-                      
-                      <label>
-                        <input 
-                          type="checkbox"
-                          checked={ambulanceFacilities.ventilator}
-                          onChange={(e) => setAmbulanceFacilities({...ambulanceFacilities, ventilator: e.target.checked})}
-                        />
-                        <span>Ventilator</span>
-                      </label>
-                      
-                      <label>
-                        <input 
-                          type="checkbox"
-                          checked={ambulanceFacilities.cardiac}
-                          onChange={(e) => setAmbulanceFacilities({...ambulanceFacilities, cardiac: e.target.checked})}
-                        />
-                        <span>Cardiac Monitor / ECG</span>
-                      </label>
-                      
-                      <label>
-                        <input 
-                          type="checkbox"
-                          checked={ambulanceFacilities.icuEquipment}
-                          onChange={(e) => setAmbulanceFacilities({...ambulanceFacilities, icuEquipment: e.target.checked})}
-                        />
-                        <span>ICU Equipment</span>
-                      </label>
-                      
-                      <label>
-                        <input 
-                          type="checkbox"
-                          checked={ambulanceFacilities.wheelchairAccessible}
-                          onChange={(e) => setAmbulanceFacilities({...ambulanceFacilities, wheelchairAccessible: e.target.checked})}
-                        />
-                        <span>Wheelchair Accessible</span>
-                      </label>
-                      
-                      <label>
-                        <input 
-                          type="checkbox"
-                          checked={ambulanceFacilities.advancedLifeSupport}
-                          onChange={(e) => setAmbulanceFacilities({...ambulanceFacilities, advancedLifeSupport: e.target.checked})}
-                        />
-                        <span>Advanced Life Support (ALS)</span>
-                      </label>
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <TriageChat
-                  patientName={userProfile?.name}
-                  medicalProfile={medicalProfile}
-                  onFastTrack={handleFastTrack}
-                  onComplete={handleTriageComplete}
-                  onTrack={handleTrackFromChat}
-                  onLocation={(loc) => {
-                    setPickupCoords({ lat: loc.lat, lng: loc.lng });
-                    setPickupLocation((prev) => prev || `${loc.lat.toFixed(5)}, ${loc.lng.toFixed(5)}`);
-                    reverseGeocode(loc.lat, loc.lng, setPickupLocation);
-                  }}
-                />
-              )}
-
-              <div className="form-actions">
+              <footer className="usr-form__footer">
                 <button
+                  type="button"
                   onClick={() => { setShowBookingForm(false); setFastTrackDispatched(false); fastTrackBookingIdRef.current = null; }}
-                  className="cancel-btn"
+                  className="ui-btn ui-btn--secondary ui-btn--lg"
                 >
                   {fastTrackDispatched ? 'Close' : 'Cancel'}
                 </button>
                 <button
+                  type="button"
                   onClick={() => handleCreateBooking()}
-                  className="submit-btn"
-                  style={fastTrackDispatched ? { background: '#00875a' } : undefined}
+                  className={`ui-btn ui-btn--lg ${fastTrackDispatched ? 'ui-btn--success' : isEmergencyForm ? 'ui-btn--emergency' : 'ui-btn--primary'}`}
                   disabled={bookingType === 'EMERGENCY' ? (!triageCompleted && !fastTrackDispatched) : (!pickupLocation && !pickupCoords) || !dropoffLocation || !scheduledTime}
                 >
+                  <Icon name={fastTrackDispatched ? 'checkCircle' : isEmergencyForm ? 'ambulance' : 'calendarClock'} size={18} />
                   {bookingType === 'EMERGENCY'
-                    ? (fastTrackDispatched ? '✓ Ambulance Dispatched — Done' : '🚑 Request Emergency Ambulance')
-                    : '📅 Schedule Transport'}
+                    ? (fastTrackDispatched ? 'Ambulance Dispatched — Done' : 'Request Emergency Ambulance')
+                    : 'Schedule Transport'}
                 </button>
-              </div>
-            </div>
-          </div>
-        )}
-      </main>
+              </footer>
+            </section>
+          )}
+        </main>
+      </div>
 
       {/* SOS Confirmation Modal */}
       {showSOSConfirm && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0, 0, 0, 0.7)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9999,
-          padding: '20px'
-        }}>
-          <div style={{
-            background: 'white',
-            borderRadius: '16px',
-            padding: '32px',
-            maxWidth: '500px',
-            width: '100%',
-            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)'
-          }}>
-            <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-              <div style={{ fontSize: '64px', marginBottom: '16px' }}>🚨</div>
-              <h2 style={{ margin: '0 0 12px 0', fontSize: '24px', color: '#172b4d' }}>
-                Activate Emergency SOS?
-              </h2>
-              <p style={{ margin: 0, color: '#666', fontSize: '14px', lineHeight: '1.6' }}>
-                This will:<br/>
-                • Detect your current location automatically<br/>
-                • Request CRITICAL emergency ambulance<br/>
-                • Alert emergency services<br/>
-                • Notify your emergency contact: {userProfile?.emergencyContact || 'Not set'}
-              </p>
-            </div>
-            <div style={{ display: 'flex', gap: '12px' }}>
-              <button 
-                onClick={() => setShowSOSConfirm(false)}
-                disabled={sosActivating}
-                style={{
-                  flex: 1,
-                  padding: '14px',
-                  fontSize: '16px',
-                  fontWeight: '600',
-                  background: '#e0e0e0',
-                  color: '#333',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: sosActivating ? 'not-allowed' : 'pointer',
-                  opacity: sosActivating ? 0.5 : 1
-                }}
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={handleSOSEmergency}
-                disabled={sosActivating}
-                style={{
-                  flex: 1,
-                  padding: '14px',
-                  fontSize: '16px',
-                  fontWeight: '700',
-                  background: 'linear-gradient(135deg, #ff1744 0%, #de350b 100%)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '8px',
-                  cursor: sosActivating ? 'not-allowed' : 'pointer',
-                  opacity: sosActivating ? 0.7 : 1
-                }}
-              >
-                {sosActivating ? '⏳ ACTIVATING...' : '🆘 CONFIRM SOS'}
-              </button>
-            </div>
+        <Modal
+          onClose={sosActivating ? undefined : () => setShowSOSConfirm(false)}
+          closeOnBackdrop={!sosActivating}
+          labelledBy="sos-confirm-title"
+          describedBy="sos-confirm-desc"
+          role="alertdialog"
+        >
+          <div className="ui-modal__body usr-sos-modal">
+            <div className="usr-sos-modal__icon" aria-hidden="true"><Icon name="siren" size={30} /></div>
+            <h2 id="sos-confirm-title" className="usr-sos-modal__title">Activate Emergency SOS?</h2>
+            <p id="sos-confirm-desc" className="usr-sos-modal__lead">This will:</p>
+            <ul className="usr-sos-modal__list">
+              <li><Icon name="locate" size={16} />Detect your current location automatically</li>
+              <li><Icon name="siren" size={16} />Request a CRITICAL emergency ambulance</li>
+              <li><Icon name="radio" size={16} />Alert emergency services</li>
+              <li><Icon name="users" size={16} />Notify your emergency contact: <strong>{userProfile?.emergencyContact || 'Not set'}</strong></li>
+            </ul>
           </div>
-        </div>
+          <div className="ui-modal__footer">
+            <button type="button" onClick={() => setShowSOSConfirm(false)} disabled={sosActivating} className="ui-btn ui-btn--secondary ui-btn--lg" data-autofocus>
+              Cancel
+            </button>
+            <button type="button" onClick={handleSOSEmergency} disabled={sosActivating} className="ui-btn ui-btn--emergency ui-btn--lg">
+              {sosActivating ? <span className="ui-spinner" aria-hidden="true" /> : <Icon name="siren" size={18} />}
+              {sosActivating ? 'Activating…' : 'Confirm SOS'}
+            </button>
+          </div>
+        </Modal>
       )}
 
       {/* Real-time Tracking Modal */}
       {trackingBooking && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: 'rgba(0, 0, 0, 0.8)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          zIndex: 9998,
-          padding: '20px'
-        }}>
-          <div style={{
-            background: 'white',
-            borderRadius: '16px',
-            maxWidth: '900px',
-            width: '100%',
-            maxHeight: '90vh',
-            overflow: 'hidden',
-            boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
-            <div style={{
-              padding: '20px 24px',
-              borderBottom: '1px solid #e0e0e0',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              background: 'linear-gradient(135deg, #0066cc 0%, #00a3bf 100%)',
-              color: 'white'
-            }}>
-              <div>
-                <h2 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>
-                  🚑 Live Tracking - {trackingBooking.bookingType}
-                </h2>
-                <p style={{ margin: 0, fontSize: '14px', opacity: 0.9 }}>
-                  Booking #{trackingBooking.id.slice(0, 8)}
-                </p>
-              </div>
-              <button 
-                onClick={() => setTrackingBooking(null)}
-                style={{
-                  background: 'rgba(255, 255, 255, 0.2)',
-                  border: 'none',
-                  color: 'white',
-                  fontSize: '24px',
-                  width: '40px',
-                  height: '40px',
-                  borderRadius: '50%',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center'
-                }}
-              >
-                ×
-              </button>
+        <Modal onClose={() => setTrackingBooking(null)} labelledBy="track-title" size="lg" align="top" className="ui-modal--auto-height usr-track">
+          <div className="ui-modal__header">
+            <span className="ui-icon-tile"><Icon name="ambulance" size={22} /></span>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <h2 id="track-title" className="ui-modal__title">Live Tracking</h2>
+              <p className="ui-modal__subtitle">
+                Booking #{String(trackingBooking.id ?? '').slice(0, 8)} · {trackingBooking.bookingType === 'SCHEDULED' ? 'Scheduled' : 'Emergency'}
+              </p>
             </div>
+            <button type="button" onClick={() => setTrackingBooking(null)} className="ui-btn ui-btn--ghost ui-btn--icon ui-modal__close" aria-label="Close tracking">
+              <Icon name="x" />
+            </button>
+          </div>
 
-            <div style={{ 
-              padding: '20px 24px', 
-              background: '#f8f9fa',
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
-              gap: '12px'
-            }}>
-              <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Status</div>
-                <div style={{ fontSize: '16px', fontWeight: '700', color: '#00875a' }}>
-                  {getDispatchStatusLabel(trackingMetrics?.dispatchStatus || trackingBooking.status)}
-                </div>
+          <div className="ui-modal__body usr-track__body">
+            <div className="usr-track__metrics">
+              <div className="usr-track__metric">
+                <div className="usr-track__label">Status</div>
+                <StatusBadge status={trackingStatus} label={getDispatchStatusLabel(trackingStatus)} large />
               </div>
-              <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>
-                  {trackingMetrics?.etaLabel || 'ETA'}
-                </div>
-                <div style={{ fontSize: '20px', fontWeight: '700', color: '#ff5722' }}>
-                  {liveEta?.etaText || trackingMetrics?.etaText || 'Calculating...'}
-                </div>
+              <div className="usr-track__metric usr-track__metric--eta">
+                <div className="usr-track__label">{trackingMetrics?.etaLabel || 'ETA'}</div>
+                <div className="usr-track__eta">{liveEta?.etaText || trackingMetrics?.etaText || 'Calculating...'}</div>
                 {(liveEta?.expectedArrivalIso || trackingMetrics?.expectedTimeText) && (
-                  <div style={{ fontSize: '12px', color: '#666', marginTop: '4px' }}>
+                  <div className="usr-track__sub">
                     Expected by {liveEta?.expectedArrivalIso
                       ? formatIstTime(liveEta.expectedArrivalIso)
                       : trackingMetrics?.expectedTimeText}
                   </div>
                 )}
                 {liveEta?.source === 'google' && (
-                  <div style={{ fontSize: '11px', color: '#00875a', marginTop: '4px' }}>
-                    Google traffic ETA
-                  </div>
+                  <Badge tone="success" icon="activity">Google traffic ETA</Badge>
                 )}
               </div>
               {trackingBooking.dispatch?.hospital && (
-                <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Selected Hospital</div>
-                  <div style={{ fontSize: '14px', fontWeight: '700', color: '#5e35b1' }}>
-                    {trackingBooking.dispatch.hospital.name}
-                  </div>
+                <div className="usr-track__metric">
+                  <div className="usr-track__label">Selected hospital</div>
+                  <div className="usr-track__value"><Icon name="hospital" size={16} />{trackingBooking.dispatch.hospital.name}</div>
                 </div>
               )}
               {trackingMetrics && (
-                <div style={{ background: 'white', padding: '12px', borderRadius: '8px', textAlign: 'center' }}>
-                  <div style={{ fontSize: '12px', color: '#666', marginBottom: '4px' }}>Ambulance Location</div>
-                  <div style={{ fontSize: '12px', fontWeight: '600', color: '#333' }}>
+                <div className="usr-track__metric">
+                  <div className="usr-track__label">Ambulance location</div>
+                  <div className="usr-track__value ui-mono">
                     {trackingMetrics.ambulanceLat.toFixed(4)}, {trackingMetrics.ambulanceLng.toFixed(4)}
                   </div>
                 </div>
@@ -2343,27 +1975,22 @@ function Dashboard() {
             </div>
 
             {trackingBooking.dispatch && (
-              <div style={{ padding: '0 24px 16px', background: '#f8f9fa' }}>
-                <DriverIdentity
-                  driver={trackingBooking.dispatch.driver}
-                  vehicleNumber={trackingBooking.dispatch.ambulance?.vehicleNumber}
-                  accentColor="#0066cc"
-                  showCallButton
-                />
-              </div>
+              <DriverIdentity
+                driver={trackingBooking.dispatch.driver}
+                vehicleNumber={trackingBooking.dispatch.ambulance?.vehicleNumber}
+                showCallButton
+              />
             )}
 
             {/* Hand the same live view to anyone else, and see who the system
                 has already told. */}
-            <div style={{ padding: '0 24px 16px', background: '#f8f9fa' }}>
-              <TrackingShareCard
-                apiBaseUrl={API_BASE_URL}
-                token={tokenStorage.getToken() || ''}
-                bookingId={trackingBooking.id}
-              />
-            </div>
+            <TrackingShareCard
+              apiBaseUrl={API_BASE_URL}
+              token={tokenStorage.getToken() || ''}
+              bookingId={trackingBooking.id}
+            />
 
-            <div style={{ flex: 1, position: 'relative', minHeight: '400px' }}>
+            <div className="ui-card ui-card--flat">
               <LiveRouteMap
                 ambulanceLat={trackingMetrics?.ambulanceLat}
                 ambulanceLng={trackingMetrics?.ambulanceLng}
@@ -2374,25 +2001,8 @@ function Dashboard() {
                 ctaLabel="Open Route"
               />
             </div>
-
-            <div style={{ padding: '16px 24px', background: '#f8f9fa', borderTop: '1px solid #e0e0e0' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '16px', fontSize: '13px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <div style={{ width: '12px', height: '12px', background: '#0066cc', borderRadius: '50%' }}></div>
-                  <span>Ambulance</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <div style={{ width: '12px', height: '12px', background: '#de350b', borderRadius: '50%' }}></div>
-                  <span>Current Destination</span>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <div style={{ width: '20px', height: '2px', background: '#0066cc', borderTop: '2px dashed #0066cc' }}></div>
-                  <span>Live Route</span>
-                </div>
-              </div>
-            </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

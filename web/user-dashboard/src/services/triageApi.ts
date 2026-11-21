@@ -40,7 +40,30 @@ export async function converse(messages: ConverseMessage[], lang?: string): Prom
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return (await res.json()) as ConverseResult;
+    // Never trust the shape: the chat reads .length and .map on these, so one
+    // missing field from the model would crash the emergency screen.
+    const data = (await res.json()) as Partial<ConverseResult> | null;
+    if (!data || data.available !== true || typeof data.reply !== 'string' || !data.reply.trim()) {
+      throw new Error('Triage reply unavailable');
+    }
+    const strings = (value: unknown): string[] =>
+      Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.trim() !== '') : [];
+    const answers: Record<string, string> = {};
+    if (data.answers && typeof data.answers === 'object') {
+      for (const [key, value] of Object.entries(data.answers)) {
+        if (typeof value === 'string') answers[key] = value;
+      }
+    }
+    const inputType = (['yes_no', 'choice', 'pain', 'text', 'none'] as const).find(t => t === data.inputType) ?? 'text';
+    return {
+      available: true,
+      reply: data.reply,
+      answers,
+      quickReplies: strings(data.quickReplies),
+      inputType,
+      keywords: strings(data.keywords),
+      done: data.done === true,
+    };
   } catch {
     return {
       available: false,

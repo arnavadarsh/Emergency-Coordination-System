@@ -45,7 +45,7 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 const App: React.FC = () => {
   return (
     <BrowserRouter basename={(import.meta as any).env?.BASE_URL || '/'}>
-      <Toaster position="top-right" toastOptions={{ duration: 4000 }} />
+      <Toaster position="top-right" toastOptions={{ duration: 4000, className: 'ui-toast' }} />
       <Routes>
         <Route
           path="/"

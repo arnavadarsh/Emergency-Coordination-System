@@ -50,9 +50,6 @@ class ApiClient {
   }
 
   /**
-   * Login
-   */
-  /**
    * Check credentials and return the session, WITHOUT storing it.
    *
    * This app hosts the shared sign-in as well as the patient dashboard, and a
@@ -68,46 +65,6 @@ class ApiClient {
       email,
       password,
     });
-    return response.data;
-  }
-
-  /** Authenticate and keep the session on this origin. For patients. */
-  async login(email: string, password: string) {
-    const data = await this.authenticate(email, password);
-    TokenStorage.setToken(data.accessToken);
-    TokenStorage.setUser(data.user);
-    return data;
-  }
-
-  /**
-   * Get user profile
-   */
-  async getUserProfile() {
-    const response = await this.client.get(API_CONFIG.USER_PROFILE);
-    return response.data;
-  }
-
-  /**
-   * Get user bookings
-   */
-  async getUserBookings() {
-    const response = await this.client.get(API_CONFIG.USER_BOOKINGS);
-    return response.data;
-  }
-
-  /**
-   * Create booking
-   */
-  async createBooking(bookingData: any) {
-    const response = await this.client.post(API_CONFIG.CREATE_BOOKING, bookingData);
-    return response.data;
-  }
-
-  /**
-   * Get hospitals
-   */
-  async getHospitals() {
-    const response = await this.client.get(API_CONFIG.HOSPITALS);
     return response.data;
   }
 }

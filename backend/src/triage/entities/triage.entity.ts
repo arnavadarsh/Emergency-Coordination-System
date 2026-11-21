@@ -7,6 +7,9 @@ export enum EmergencyType {
   CARDIAC = 'CARDIAC',
   TRAUMA = 'TRAUMA',
   NEURO = 'NEURO',
+  RESPIRATORY = 'RESPIRATORY',
+  OBSTETRIC = 'OBSTETRIC',
+  OTHER = 'OTHER',
 }
 
 @Entity('triage_reports')

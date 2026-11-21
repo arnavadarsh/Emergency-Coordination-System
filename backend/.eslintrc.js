@@ -8,7 +8,9 @@ module.exports = {
   plugins: ['@typescript-eslint/eslint-plugin'],
   extends: [
     'plugin:@typescript-eslint/recommended',
-    'plugin:prettier/recommended',
+    // Turns off style rules that would fight Prettier. Formatting itself is not
+    // a lint error: run `npm run format` to apply it.
+    'prettier',
   ],
   root: true,
   env: {
