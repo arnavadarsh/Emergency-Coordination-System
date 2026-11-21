@@ -13,11 +13,15 @@
   background: var(--surface-2);
   border: 1px solid var(--border);
   box-shadow: 0 8px 28px rgba(23, 43, 77, 0.08), 0 1px 3px rgba(23, 43, 77, 0.04);
-  min-height: 480px;
-  /* Stay bounded to the viewport so the message list scrolls internally
-     instead of the whole panel growing taller. */
-  height: 80vh;
-  max-height: 660px;
+  /* Bounded to what is actually on screen below the sticky top bar, so the
+     message list scrolls internally and the input stays in view. dvh, because
+     on iOS Safari vh counts the area hidden behind the browser toolbars. */
+  height: calc(100vh - var(--topbar-h, 64px) - 40px);
+  height: calc(100dvh - var(--topbar-h, 64px) - 40px);
+  min-height: 460px;
+  max-height: 720px;
+  /* Leaves the top bar clear when the chat is scrolled to. */
+  scroll-margin-top: calc(var(--topbar-h, 64px) + 12px);
 }
 
 /* ── Chat Panel (Left) ─────────────────────────────────────────────────────── */
@@ -45,6 +49,7 @@
 }
 
 .triage-chat-header-icon {
+  flex-shrink: 0;
   width: 38px;
   height: 38px;
   border-radius: 10px;
@@ -55,7 +60,14 @@
   font-size: 18px;
 }
 
-.triage-header-titles { min-width: 0; }
+.triage-header-titles { min-width: 0; flex: 1 1 auto; }
+
+.triage-chat-header h3,
+.triage-chat-header p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .triage-chat-header h3 {
   margin: 0;
@@ -321,7 +333,8 @@
   border: none;
   outline: none;
   background: transparent;
-  font-size: 14px;
+  /* 16px: anything smaller makes iOS Safari zoom the page in on focus. */
+  font-size: 16px;
   color: var(--text-1);
   font-family: inherit;
   padding: 8px 4px;
@@ -484,6 +497,8 @@
   flex: 1 1 auto;
   min-height: 0; /* critical: lets this flex item scroll within the panel */
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   padding: 18px 16px 10px;
   display: flex;
   flex-direction: column;
@@ -511,6 +526,8 @@
   display: flex;
   gap: 8px;
   max-width: 85%;
+  /* A flex child of the column: without this a tall list squeezes bubbles. */
+  flex-shrink: 0;
   animation: triageSlideIn 0.35s ease-out;
 }
 
@@ -550,6 +567,8 @@
   border-radius: 16px;
   font-size: 14px;
   line-height: 1.5;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .triage-message.system .triage-message-bubble {
@@ -660,12 +679,12 @@
 
 .triage-pain-slider {
   width: 100%;
-  height: 100%;
   opacity: 0;
   cursor: pointer;
   position: absolute;
-  top: -8px;
-  height: 24px;
+  /* A finger-sized target over the thin visible track. */
+  top: -18px;
+  height: 44px;
   z-index: 2;
   -webkit-appearance: none;
   appearance: none;
@@ -752,6 +771,7 @@
 /* ── Typing Indicator ──────────────────────────────────────────────────────── */
 
 .triage-typing-indicator {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1125,9 +1145,6 @@
 @media (max-width: 800px) {
   .triage-chat-wrapper {
     flex-direction: column;
-    /* Keep it bounded on mobile too so the chat scrolls internally. */
-    height: 85vh;
-    max-height: 85vh;
   }
 
   .triage-status-panel {
@@ -1150,9 +1167,6 @@
     min-width: 0;
   }
 
-  .triage-assessment-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (max-width: 440px) {
@@ -1181,6 +1195,7 @@
   font-weight: 700;
   cursor: pointer;
   outline: none;
+  min-height: 30px;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23ffffff' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 9px center;
@@ -1339,46 +1354,39 @@
   box-shadow: 0 4px 12px rgba(0, 163, 191, 0.3);
 }
 
-/* ── Modal ── */
-.triage-result-modal-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgba(23, 43, 77, 0.55);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  animation: triageFadeIn 0.18s ease-out;
-}
+/* ── Modal ── (shared Modal shell: rendered in <body>, above the top bar) */
 .triage-result-modal {
-  position: relative;
-  width: 100%;
   max-width: 560px;
-  max-height: 88vh;
-  overflow-y: auto;
-  border-radius: 14px;
-  background: #ffffff;
-  box-shadow: 0 20px 60px rgba(23, 43, 77, 0.35);
-  animation: triageSlideIn 0.25s ease-out;
 }
 .triage-result-modal .triage-assessment-card {
   border: none;
   box-shadow: none;
-  border-radius: 14px;
+  border-radius: 0;
   animation: none;
+  /* The card scrolls; the close button stays put above it. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+.triage-result-modal .triage-assessment-header {
+  padding-right: 52px;
+}
+.triage-result-modal .triage-assessment-actions {
+  flex-wrap: wrap;
 }
 .triage-result-modal-close {
   position: absolute;
   top: 12px;
   right: 12px;
   z-index: 2;
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: 50%;
   border: none;
-  background: rgba(255, 255, 255, 0.25);
+  /* Dark enough to stay visible once the coloured header has scrolled away. */
+  background: rgba(15, 23, 42, 0.38);
   color: #ffffff;
   font-size: 15px;
   font-weight: 700;
@@ -1389,7 +1397,7 @@
   transition: background 0.15s;
 }
 .triage-result-modal-close:hover {
-  background: rgba(255, 255, 255, 0.45);
+  background: rgba(15, 23, 42, 0.6);
 }
 .triage-result-done-btn {
   flex: 1;
@@ -1430,6 +1438,18 @@
   border-radius: 12px;
   background: var(--success-soft);
   border: 1px solid var(--success-line);
+}
+/* Triage finished but no ambulance has been requested: a warning, not a success. */
+.triage-success-head.is-pending {
+  background: var(--warning-soft);
+  border-color: var(--warning);
+}
+.triage-success-head.is-pending .triage-success-titles strong,
+.triage-success-head.is-pending .triage-success-titles span {
+  color: var(--warning-text);
+}
+.triage-success-head.is-pending .triage-success-icon {
+  animation: none;
 }
 .triage-success-icon {
   font-size: 26px;
@@ -1511,13 +1531,27 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding-bottom: 10px;
+  width: 100%;
+  padding: 0 0 10px;
+  border: none;
   border-bottom: 2px solid var(--border);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   flex-shrink: 0;
+  /* A plain heading on wide screens; it only acts as a toggle on phones. */
+  cursor: default;
 }
 
-.triage-medical-rail-head h4 {
-  margin: 0;
+.triage-medical-rail-titles {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.triage-medical-rail-title {
   font-size: 12px;
   font-weight: 800;
   color: var(--text-1);
@@ -1529,6 +1563,21 @@
   font-size: 11px;
   color: var(--text-2);
   margin: 2px 0 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.triage-medical-rail-count,
+.triage-medical-rail-chevron {
+  display: none;
+}
+
+.triage-medical-rail-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
 }
 
 /* Risks worth noticing at a glance — allergies, conditions, medications. */
@@ -1569,15 +1618,282 @@
   flex-shrink: 0;
 }
 
+/* ============================================================================
+   Phones and narrow tablets
+   The rail, header, emergency bar and dock used to take the whole panel and
+   left the conversation a strip a few pixels tall. Here everything around the
+   message list is made compact so the list always keeps usable room.
+   ========================================================================== */
+
 @media (max-width: 800px) {
+  .triage-chat-wrapper {
+    /* Fill the screen under the top bar. */
+    height: calc(100vh - var(--topbar-h, 64px) - 16px);
+    height: calc(100dvh - var(--topbar-h, 64px) - 16px);
+    min-height: 420px;
+    max-height: none;
+    border-radius: 14px;
+  }
+
+  .triage-chat-panel {
+    flex: 1 1 auto;
+  }
+
+  /* Medical Profile: a one-line bar above the chat that opens on tap. */
   .triage-medical-rail {
-    /* Stack above the conversation so risks are the first thing seen. */
     order: -1;
     flex: 0 0 auto;
     width: 100%;
-    max-height: 34vh;
+    max-height: 55%;
+    padding: 0;
+    gap: 0;
     border-left: none;
     border-bottom: 1px solid var(--border);
-    box-sizing: border-box;
+    overflow: hidden;
+  }
+
+  .triage-medical-rail-head {
+    padding: 6px 14px;
+    border-bottom: none;
+    cursor: pointer;
+    min-height: 44px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* One line while closed; the patient's name shows once it is opened. */
+  .triage-medical-rail:not(.is-open) .triage-medical-rail-patient {
+    display: none;
+  }
+
+  .triage-medical-rail-count {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    background: var(--warning-soft);
+    border: 1px solid var(--warning);
+    color: var(--warning-text);
+    font-size: 11.5px;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .triage-medical-rail-chevron {
+    display: inline-block;
+    font-size: 13px;
+    color: var(--text-3);
+    transition: transform 0.18s ease;
+  }
+
+  .triage-medical-rail.is-open .triage-medical-rail-chevron {
+    transform: rotate(180deg);
+  }
+
+  .triage-medical-rail-body {
+    display: none;
+  }
+
+  .triage-medical-rail.is-open .triage-medical-rail-body {
+    display: flex;
+    padding: 2px 14px 14px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    border-top: 1px solid var(--border);
+    padding-top: 12px;
+  }
+
+  /* Header: one tight row. */
+  .triage-chat-header {
+    padding: 9px 12px;
+    gap: 9px;
+  }
+
+  .triage-chat-header-icon {
+    width: 32px;
+    height: 32px;
+    font-size: 16px;
+    border-radius: 9px;
+  }
+
+  .triage-header-controls {
+    gap: 6px;
+  }
+
+  .triage-mode-seg {
+    padding: 7px 11px;
+  }
+
+  .triage-emergency-bar {
+    padding: 7px 12px;
+    gap: 10px;
+  }
+
+  .triage-emergency-bar-text {
+    font-size: 11.5px;
+    line-height: 1.3;
+  }
+
+  .triage-emergency-call {
+    padding: 8px 13px;
+  }
+
+  .triage-fasttrack-banner {
+    padding: 7px 12px;
+    font-size: 12px;
+  }
+
+  .triage-chat-messages {
+    padding: 12px 12px 8px;
+    gap: 10px;
+    /* Never squeezed out by the dock again. */
+    min-height: 96px;
+  }
+
+  .triage-message {
+    max-width: 92%;
+  }
+
+  .triage-message-bubble {
+    padding: 10px 13px;
+  }
+
+  .triage-message-avatar {
+    width: 26px;
+    height: 26px;
+    font-size: 12px;
+  }
+
+  .triage-chat-input-area {
+    padding: 10px 12px 12px;
+  }
+
+  .triage-dock {
+    gap: 8px;
+  }
+
+  /* Quick-start chips: one swipeable row instead of a six-row stack. */
+  .triage-quickstart-group {
+    padding: 8px 0 8px 10px;
+    gap: 6px;
+  }
+
+  .triage-quickstart-chips {
+    display: flex;
+    overflow-x: auto;
+    gap: 7px;
+    padding: 1px 10px 3px 0;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .triage-quickstart-chips::-webkit-scrollbar {
+    display: none;
+  }
+
+  .triage-quickstart-chip {
+    flex: 0 0 auto;
+    padding: 9px 12px;
+    white-space: nowrap;
+  }
+
+  /* Long answer lists scroll inside the dock rather than pushing it up. */
+  .triage-quickreplies-group {
+    padding: 8px 10px;
+  }
+
+  .triage-quickreplies {
+    max-height: 132px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .triage-qr-btn {
+    padding: 10px 15px;
+  }
+
+  .triage-pain-scale {
+    gap: 8px;
+  }
+
+  .triage-pain-value {
+    font-size: 26px;
+    line-height: 1;
+  }
+
+  .triage-pain-submit {
+    align-self: stretch;
+    padding: 11px 20px;
+  }
+
+  /* While the pain scale is up it is the only thing being asked: the location
+     button would push the Confirm button and text box off a small screen. */
+  .triage-dock--pain .triage-location-btn {
+    display: none;
+  }
+
+  .triage-location-btn {
+    margin-top: 0;
+    padding: 9px 12px;
+  }
+
+  /* The keyboard hint is about a physical Enter key. */
+  .triage-dock-hint {
+    display: none;
+  }
+
+  .triage-success-actions > * {
+    flex: 1 1 100%;
+  }
+
+  .triage-assessment-body {
+    padding: 16px;
+  }
+}
+
+/* Narrow phones: the full title no longer fits beside the controls. Show the
+   short one whole — and if even that cannot fit, the controls drop to a second
+   row rather than the title being cut to a few letters. */
+@media (max-width: 520px) {
+  .triage-title-long,
+  .triage-chat-header-icon,
+  .triage-chat-header p {
+    display: none;
+  }
+
+  .triage-chat-header {
+    flex-wrap: wrap;
+    row-gap: 7px;
+  }
+
+  .triage-header-titles {
+    flex: 1 0 auto;
+  }
+
+  .triage-lang-select {
+    font-size: 16px; /* no iOS focus zoom */
+    padding: 3px 24px 3px 9px;
+  }
+}
+
+@media (max-width: 350px) {
+  .triage-emergency-bar-text {
+    font-size: 11px;
+  }
+}
+
+/* Short screens (small phones, landscape): give the conversation the space. */
+@media (max-width: 800px) and (max-height: 620px) {
+  .triage-quickstart-label,
+  .triage-quickreplies-label {
+    display: none;
+  }
+
+  .triage-chat-wrapper {
+    height: calc(100vh - var(--topbar-h, 64px) - 8px);
+    height: calc(100dvh - var(--topbar-h, 64px) - 8px);
+    min-height: 400px;
   }
 }

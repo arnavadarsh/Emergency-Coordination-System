@@ -170,7 +170,7 @@ const EmergencyContactsSection: React.FC<EmergencyContactsSectionProps> = ({ api
   return (
     <section className="ui-card ui-enter" aria-labelledby="contacts-title">
       <div className="ui-card__header">
-        <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{ minWidth: 0, flex: '1 1 260px' }}>
           <h3 id="contacts-title" className="ui-card__title"><Icon name="users" size={17} />Emergency Contacts</h3>
           <p className="ui-card__subtitle" style={{ maxWidth: 620, lineHeight: 1.5 }}>
             The moment an ambulance is assigned to you, everyone here gets a text with a private link to

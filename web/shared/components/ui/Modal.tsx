@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 
 /**
  * Accessible dialog shell.
@@ -7,6 +8,11 @@ import { useEffect, useRef, type ReactNode } from 'react';
  * dialog semantics, focus moved in on open and returned on close, Tab kept
  * inside, Escape to dismiss, and the page behind held still. Parents keep
  * deciding when it is shown — mount it to open, unmount it to close.
+ *
+ * Rendered into <body>, not where it is mounted: a `position: fixed` overlay
+ * inside an animated or transformed ancestor (every `.ui-enter` card) is
+ * positioned against that ancestor instead of the screen, and ends up clipped
+ * and underneath the top bar.
  *
  * Leave `onClose` undefined while a close would be unsafe (e.g. mid-submit);
  * Escape and the backdrop then do nothing.
@@ -102,7 +108,7 @@ export function Modal({
 
   const sizeClass = size === 'lg' ? ' ui-modal--lg' : size === 'md' ? ' ui-modal--md' : '';
 
-  return (
+  return createPortal(
     <div
       className={`ui-modal-scrim${align === 'top' ? ' ui-modal-scrim--top' : ''}`}
       onMouseDown={event => {
@@ -121,7 +127,8 @@ export function Modal({
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -78,36 +78,113 @@ const ET = {
 
 // ── Tokenisation helpers ──────────────────────────────────────────────────────
 
-const NEGATION_TOKENS = [
-  'no', 'not', "n't", 'cannot', "can't", 'cant', 'without', 'never',
-  'unable', 'isnt', "isn't", 'arent', "aren't", 'wasnt', "wasn't",
-  'stopped', 'stop', 'lost', 'loss', 'none', 'denies',
-];
+/**
+ * Words that deny what follows them: "no chest pain", "isn't bleeding",
+ * "never fainted".
+ *
+ * Deliberately not here: "can't", "won't", "unable", "stopped", "lost". Those describe
+ * an ability or a change, not an absence — "can't stand the chest pain" and
+ * "lost a lot of blood" both mean the symptom is there.
+ */
+const NEGATION_WORDS = new Set([
+  'no', 'not', 'without', 'never', 'none', 'denies', 'denied', 'negative', 'neither', 'nor',
+  'dont', 'doesnt', 'didnt', 'isnt', 'arent', 'wasnt', 'werent', 'hasnt', 'havent', 'hadnt',
+  "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't", "hasn't", "haven't", "hadn't",
+]);
+
+const isNegator = (word: string): boolean => NEGATION_WORDS.has(word);
+
+/** Where one statement ends and the next begins; a "no" does not reach across these. */
+const CLAUSE_BREAK = /[.,;:]|\b(?:and|but|however|though|although|except|also|then|because|while|just|only)\b/g;
 
 function normalize(text: string): string {
   return text
     .toLowerCase()
     .replace(/[‘’]/g, "'") // smart quotes → '
-    .replace(/[^a-z0-9'\/\.\s-]/g, ' ')
+    // Commas and semicolons are kept: they mark where a negation stops.
+    .replace(/[^a-z0-9'\/\.,;\s-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 /**
- * Is `phrase` negated in `text`? Looks for a negation token within a small
- * window of words BEFORE the phrase. e.g. "is not breathing", "can't breathe".
+ * Is the phrase starting at `index` denied? True when a negation word sits in
+ * the few words before it, within the same clause.
+ *
+ *   "no chest pain but his ankle hurts"   → chest pain is negated
+ *   "cannot move and has chest pain"      → chest pain is NOT negated
+ *   "no fever or vomiting"                → both are negated
+ *
+ * It used to look at the four words before the first occurrence, across
+ * clauses and with words like "cannot" and "lost" counted as denials — which
+ * both missed real symptoms and, worse, read "no breathing problems" as a
+ * patient who is not breathing.
  */
-function isNegated(text: string, phrase: string): boolean {
-  const idx = text.indexOf(phrase);
-  if (idx === -1) return false;
-  const before = text.slice(Math.max(0, idx - 28), idx);
-  const words = before.split(/\s+/).filter(Boolean).slice(-4);
-  return words.some((w) => NEGATION_TOKENS.includes(w));
+function negatedAt(text: string, index: number): boolean {
+  const before = text.slice(Math.max(0, index - 60), index);
+  let clauseStart = 0;
+  for (const match of before.matchAll(CLAUSE_BREAK)) {
+    // "or" lists stay inside the negation ("no fever or vomiting"), so "or" is not a break.
+    clauseStart = (match.index ?? 0) + match[0].length;
+  }
+  const words = before.slice(clauseStart).split(/\s+/).filter(Boolean).slice(-4);
+  return words.some(isNegator);
+}
+
+/** Every position at which `phrase` occurs as whole words. */
+function occurrences(text: string, phrase: string): number[] {
+  const found: number[] = [];
+  let from = 0;
+  for (;;) {
+    const index = text.indexOf(phrase, from);
+    if (index === -1) return found;
+    const startsWord = index === 0 || !/[a-z0-9]/.test(text[index - 1]);
+    if (startsWord) found.push(index);
+    from = index + phrase.length;
+  }
+}
+
+/** Position of the last mention of any phrase that is stated, not denied; -1 if none. */
+function lastAffirmed(text: string, phrases: string[]): number {
+  let last = -1;
+  for (const phrase of phrases) {
+    for (const index of occurrences(text, phrase)) {
+      if (!negatedAt(text, index)) last = Math.max(last, index);
+    }
+  }
+  return last;
+}
+
+/** Position of the last mention of any phrase that is denied; -1 if none. */
+function lastDenied(text: string, phrases: string[]): number {
+  let last = -1;
+  for (const phrase of phrases) {
+    for (const index of occurrences(text, phrase)) {
+      if (negatedAt(text, index)) last = Math.max(last, index);
+    }
+  }
+  return last;
 }
 
 function includesAny(text: string, phrases: string[]): string | null {
   for (const p of phrases) {
     if (text.includes(p)) return p;
+  }
+  return null;
+}
+
+/** The first phrase that is present and not denied ("no chest pain" does not count). */
+function affirmedAny(text: string, phrases: string[]): string | null {
+  for (const p of phrases) {
+    // Substring match, as before ("burn" also finds "sunburn"), but each hit
+    // must not be negated.
+    let from = 0;
+    for (;;) {
+      const index = text.indexOf(p, from);
+      if (index === -1) break;
+      if (!negatedAt(text, index)) return p;
+      from = index + p.length;
+    }
   }
   return null;
 }
@@ -147,7 +224,8 @@ const SYMPTOM_LEXICON: LexEntry[] = [
 
   // ── Trauma ──
   { label: 'Vehicle accident', type: 'trauma', weight: 3, phrases: ['car accident', 'car crash', 'road accident', 'motorcycle accident', 'bike accident', 'hit by a car', 'vehicle accident', 'collision', 'crashed'] },
-  { label: 'Fall', type: 'trauma', weight: 2, phrases: ['fell down', 'fell from', 'fall from height', 'fell off', 'had a fall', 'slipped and fell'] },
+  // Not bare "fell": "fell asleep" and "fell ill" are not injuries.
+  { label: 'Fall', type: 'trauma', weight: 2, phrases: ['fell down', 'fell from', 'fall from height', 'fell off', 'fell over', 'had a fall', 'took a fall', 'has fallen', 'have fallen', 'had fallen', 'slipped', 'tripped', 'she fell', 'he fell', 'i fell', 'they fell', 'mother fell', 'father fell'] },
   { label: 'Penetrating injury', type: 'trauma', weight: 4, phrases: ['stabbed', 'stab wound', 'gunshot', 'shot', 'knife wound', 'impaled'] },
   { label: 'Assault / blunt force', type: 'trauma', weight: 2, phrases: ['assault', 'beaten', 'hit on the head', 'punched', 'attacked'] },
   { label: 'Burns', type: 'trauma', weight: 3, phrases: ['burn', 'burned', 'burnt', 'scalded', 'on fire', 'electrocuted', 'electric shock', 'chemical burn'] },
@@ -197,11 +275,13 @@ function extractPain(text: string): number | null {
 
   if (includesAny(text, ['no pain', 'painless', 'no discomfort'])) return 0;
   if (includesAny(text, ['excruciating', 'unbearable', 'worst pain', 'agonizing', 'agony', '10 out of 10'])) return 10;
-  if (includesAny(text, ['severe pain', 'severe', 'intense pain', 'extreme pain', 'really bad pain', 'terrible pain'])) return 9;
+  // Bare "severe"/"mild" are not here: "severe bleeding" and "mild fever" say
+  // nothing about pain, and guessing a score skipped the pain question.
+  if (includesAny(text, ['severe pain', 'intense pain', 'extreme pain', 'really bad pain', 'terrible pain'])) return 9;
   if (includesAny(text, ['very painful', 'a lot of pain', 'lots of pain', 'really painful'])) return 8;
   if (includesAny(text, ['bad pain', 'strong pain', 'sharp pain', 'painful'])) return 7;
   if (includesAny(text, ['moderate pain', 'some pain', 'aching', 'sore'])) return 5;
-  if (includesAny(text, ['mild pain', 'slight pain', 'little pain', 'minor', 'mild'])) return 3;
+  if (includesAny(text, ['mild pain', 'slight pain', 'little pain', 'minor pain'])) return 3;
   return null;
 }
 
@@ -261,7 +341,8 @@ export function analyzeText(rawText: string): NlpExtraction {
 
   // ── 1. Symptom lexicon scan ──
   for (const entry of SYMPTOM_LEXICON) {
-    const hit = includesAny(text, entry.phrases);
+    // A symptom the caller says is absent ("no chest pain") is not a finding.
+    const hit = affirmedAny(text, entry.phrases);
     if (!hit) continue;
     pushKeyword(entry.label, entry.type ? 'emergency' : 'symptom');
     if (entry.type) typeScores[entry.type] += entry.weight ?? 1;
@@ -281,45 +362,60 @@ export function analyzeText(rawText: string): NlpExtraction {
   let conscious: boolean | null = null;
   let bleeding: boolean | null = null;
 
-  // Breathing
-  const notBreathingPhrases = ['not breathing', 'stopped breathing', 'no breathing', 'no pulse', 'not responding and not breathing'];
-  if (includesAny(text, notBreathingPhrases) ||
-      (includesAny(text, ['breathing']) && isNegated(text, 'breathing'))) {
+  // Breathing. "Not breathing" must be about breathing itself — "no breathing
+  // problems", "not breathing properly" and "no difficulty breathing" are not
+  // a patient who has stopped breathing.
+  const apnoea =
+    /\b(?:not|isn't|isnt|aren't|arent|wasn't|wasnt|stopped|no longer|no) breathing\b(?! (?:problem|problems|difficulty|difficulties|issue|issues|trouble|troubles|well|properly|normally|right|easily|fine|ok|okay))/.test(text) ||
+    /\bno pulse\b|\bwithout a pulse\b|\bnot breathing\b(?= at all)/.test(text);
+  if (apnoea) {
     breathing = false;
     redFlags.push('Patient is NOT breathing');
     pushKeyword('Not breathing', 'redflag');
-  } else if (includesAny(text, ['breathing normally', 'is breathing', 'breathing fine', 'breathing ok'])) {
+  } else if (
+    affirmedAny(text, ['breathing normally', 'is breathing', 'are breathing', 'breathing fine', 'breathing ok', 'breathing well', 'still breathing']) ||
+    /\bno (?:breathing|respiratory) (?:problem|problems|difficulty|difficulties|issue|issues|trouble)\b|\bno (?:difficulty|trouble|problem|problems) breathing\b/.test(text)
+  ) {
     breathing = true;
   }
 
-  // Consciousness
-  const unconsciousPhrases = ['unconscious', 'unresponsive', 'not responding', 'wont wake up', "won't wake up", 'passed out', 'fainted', 'blacked out', 'lost consciousness', 'not waking up', 'collapsed and'];
-  if (includesAny(text, unconsciousPhrases)) {
+  // Consciousness. Each side is the LAST thing said about it, so "she fainted
+  // but is awake now" is a conscious patient and "was awake, now unresponsive"
+  // is not.
+  const UNCONSCIOUS = ['unconscious', 'unresponsive', 'wont wake up', "won't wake up", 'passed out', 'fainted', 'blacked out', 'lost consciousness', 'not waking up', 'collapsed and'];
+  const AWAKE = ['conscious', 'awake', 'responsive', 'responding', 'alert', 'woke up', 'came to', 'come around', 'came around'];
+  // Stated unconscious ("is unconscious") or denied awake ("not responding", "isn't awake").
+  const outAt = Math.max(lastAffirmed(text, UNCONSCIOUS), lastDenied(text, AWAKE));
+  // Stated awake ("is awake") or denied unconscious ("not unconscious", "didn't faint").
+  const awakeAt = Math.max(lastAffirmed(text, AWAKE), lastDenied(text, UNCONSCIOUS));
+  if (outAt !== -1 && outAt > awakeAt) {
     conscious = false;
     redFlags.push('Patient is UNCONSCIOUS / unresponsive');
     pushKeyword('Unconscious', 'redflag');
-  } else if (includesAny(text, ['conscious', 'awake', 'responsive', 'alert and'])) {
-    if (!isNegated(text, 'conscious')) conscious = true;
-    else { conscious = false; pushKeyword('Unconscious', 'redflag'); }
+  } else if (awakeAt !== -1) {
+    conscious = true;
   }
 
   // Bleeding
-  const bleedingPhrases = ['severe bleeding', 'heavy bleeding', 'bleeding badly', 'bleeding a lot', 'lots of blood', 'gushing blood', 'cant stop the bleeding', "can't stop the bleeding", 'uncontrolled bleeding', 'hemorrhage', 'bleeding heavily', 'blood everywhere'];
-  if (includesAny(text, bleedingPhrases)) {
+  const bleedingPhrases = ['severe bleeding', 'heavy bleeding', 'bleeding badly', 'bleeding a lot', 'lots of blood', 'lot of blood', 'gushing blood', 'cant stop the bleeding', "can't stop the bleeding", 'uncontrolled bleeding', 'hemorrhage', 'haemorrhage', 'bleeding heavily', 'bleeding profusely', 'blood everywhere'];
+  // "blood" in these is not bleeding.
+  const bleedText = text.replace(/\bblood (?:sugar|pressure|group|type|test|tests|thinner|thinners)\b/g, ' ');
+  if (affirmedAny(bleedText, bleedingPhrases)) {
     bleeding = true;
     redFlags.push('Severe / uncontrolled bleeding');
     pushKeyword('Severe bleeding', 'redflag');
-  } else if (includesAny(text, ['bleeding', 'blood']) && !isNegated(text, 'bleeding')) {
+  } else if (affirmedAny(bleedText, ['bleeding', 'blood', 'bleed'])) {
     // mild/unspecified bleeding mentioned — flag but leave severity to clarifier
     pushKeyword('Bleeding', 'symptom');
     matchTerms.push('bleeding');
-  } else if (includesAny(text, ['no bleeding', 'not bleeding'])) {
+  } else if (includesAny(bleedText, ['bleeding', 'blood', 'bleed'])) {
+    // Mentioned only to deny it: "no bleeding", "isn't bleeding".
     bleeding = false;
   }
 
   // Critical respiratory/neuro red flags already scored above; surface as flags
-  if (includesAny(text, ['choking', 'airway blocked'])) redFlags.push('Possible airway obstruction (choking)');
-  if (includesAny(text, ['blue lips', 'turning blue', 'cyanosis'])) redFlags.push('Cyanosis (blue lips/fingertips) — low oxygen');
+  if (affirmedAny(text, ['choking', 'airway blocked'])) redFlags.push('Possible airway obstruction (choking)');
+  if (affirmedAny(text, ['blue lips', 'turning blue', 'cyanosis'])) redFlags.push('Cyanosis (blue lips/fingertips) — low oxygen');
 
   // ── 4. Pain & duration ──
   const painLevel = extractPain(text);

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Icon } from '@shared/components/ui/Icon';
 import { Badge, SeverityBadge, type Tone } from '@shared/components/ui/Status';
 import { adminApi, errorText, type QueueItem } from '../../services/adminApi';
+import { formatIstDateTime } from '@shared/utils/datetime';
 
 interface DispatchQueueProps {
   /** Bumped by the dashboard on live events, so the queue refetches. */
@@ -68,7 +69,14 @@ export default function DispatchQueue({ refreshKey, onManage, notify, onChanged 
                   <td data-label="Severity"><SeverityBadge severity={item.severity || 'MEDIUM'} /></td>
                   <td data-label="Pickup" className="adm-address ui-truncate" title={item.pickupAddress ?? ''}>{item.pickupAddress || 'Not given'}</td>
                   <td data-label="Waiting">
-                    <Badge tone={item.needsDecision ? 'danger' : item.waitingMinutes >= 10 ? 'warning' : 'neutral'}>{item.waitingMinutes} min</Badge>
+                    {item.scheduledTime && new Date(item.scheduledTime).getTime() > Date.now() ? (
+                      <>
+                        <Badge tone="info">Scheduled</Badge>
+                        <div className="ui-table__secondary">For {formatIstDateTime(item.scheduledTime)} — sent automatically shortly before</div>
+                      </>
+                    ) : (
+                      <Badge tone={item.needsDecision ? 'danger' : item.waitingMinutes >= 10 ? 'warning' : 'neutral'}>{item.waitingMinutes} min</Badge>
+                    )}
                     {item.needsDecision && <div className="ui-table__secondary">Past the retry window — needs a decision</div>}
                   </td>
                   <td data-label="Actions" style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>

@@ -16,6 +16,7 @@ import {
 } from '../services/nlpTriage';
 import { converse, type ConverseMessage } from '../services/triageApi';
 import MedicalProfilePanel from '@shared/components/MedicalProfilePanel';
+import { Modal } from '@shared/components/ui/Modal';
 import {
   medicalProfileAlerts,
   normalizeMedicalProfile,
@@ -55,6 +56,14 @@ interface TriageChatProps {
   medicalProfile?: MedicalProfile | null;
   /** Patient's name, shown on the Medical Profile panel header. */
   patientName?: string;
+  /**
+   * Whether an ambulance has actually been requested for this assessment.
+   * The chat only says "on its way" when this is true: dispatch can fail (no
+   * location, no network), and telling a caller help is coming when it is not
+   * is the worst thing this screen can do. Left undefined, the chat assumes
+   * the parent dispatches on its own callbacks, as before.
+   */
+  ambulanceDispatched?: boolean;
   onComplete: (result: TriageResult) => void;
   /** Fired the moment a CRITICAL life-threat is detected, so the parent can
    *  dispatch an ambulance immediately (before the full Q&A finishes). */
@@ -118,6 +127,8 @@ interface UIStrings {
   ambulanceOnWay: string;
   ambulanceOnWaySub: string;
   trackAmbulance: string;
+  notDispatched: string;
+  notDispatchedSub: string;
 }
 
 const STRINGS: Record<LangCode, UIStrings> = {
@@ -155,6 +166,8 @@ const STRINGS: Record<LangCode, UIStrings> = {
     ambulanceOnWay: 'Ambulance is on its way!',
     ambulanceOnWaySub: 'Help has been dispatched. You can track it live.',
     trackAmbulance: '📍 Track ambulance',
+    notDispatched: 'Assessment complete — ambulance not requested yet',
+    notDispatchedSub: 'Set the pickup point above, then tap "Request Emergency Ambulance" below.',
   },
   hi: {
     welcome: 'आपातकालीन ट्राइएज AI। बताइए क्या हो रहा है — क्या तकलीफ़ है, कब शुरू हुई, और कौन-कौन से लक्षण हैं। बोलने के लिए माइक दबाएँ, या टाइप करें।',
@@ -190,6 +203,8 @@ const STRINGS: Record<LangCode, UIStrings> = {
     ambulanceOnWay: 'एम्बुलेंस रास्ते में है!',
     ambulanceOnWaySub: 'मदद भेज दी गई है। आप इसे लाइव ट्रैक कर सकते हैं।',
     trackAmbulance: '📍 एम्बुलेंस ट्रैक करें',
+    notDispatched: 'आकलन पूरा — एम्बुलेंस अभी नहीं बुलाई गई',
+    notDispatchedSub: 'ऊपर पिकअप स्थान चुनें, फिर नीचे "Request Emergency Ambulance" दबाएँ।',
   },
   es: {
     welcome: 'IA de triaje de emergencias. Cuéntame qué pasa — qué ocurre, cuándo empezó y qué síntomas hay. Toca el micrófono para hablar o escribe.',
@@ -225,6 +240,8 @@ const STRINGS: Record<LangCode, UIStrings> = {
     ambulanceOnWay: '¡La ambulancia está en camino!',
     ambulanceOnWaySub: 'Se ha enviado ayuda. Puedes seguirla en vivo.',
     trackAmbulance: '📍 Seguir ambulancia',
+    notDispatched: 'Evaluación completa — aún no se ha pedido la ambulancia',
+    notDispatchedSub: 'Indica el punto de recogida arriba y toca "Request Emergency Ambulance" abajo.',
   },
   fr: {
     welcome: "IA de triage d'urgence. Dites-moi ce qui se passe — le problème, quand ça a commencé et les symptômes. Touchez le micro pour parler ou écrivez.",
@@ -260,6 +277,8 @@ const STRINGS: Record<LangCode, UIStrings> = {
     ambulanceOnWay: "L'ambulance est en route !",
     ambulanceOnWaySub: "Les secours ont été envoyés. Vous pouvez les suivre en direct.",
     trackAmbulance: "📍 Suivre l'ambulance",
+    notDispatched: "Évaluation terminée — l'ambulance n'est pas encore demandée",
+    notDispatchedSub: 'Indiquez le lieu de prise en charge ci-dessus, puis touchez « Request Emergency Ambulance » ci-dessous.',
   },
 };
 
@@ -282,9 +301,13 @@ const SEV_COLORS: Record<SeverityLevel, string> = {
   LOW: '#00875a',
 };
 
-// Local emergency dispatch number. Change for your region:
-// US/Canada 911 · EU & India (unified) 112 · India ambulance 108 · UK 999 · Australia 000.
-const EMERGENCY_NUMBER = '911';
+// Local emergency dispatch number, dialled by the "Call" button. The rest of
+// the system is set up for India (IST, +91, Indian address search), where the
+// unified emergency number is 112 — 911 is not a dependable number there.
+// Another region sets VITE_EMERGENCY_NUMBER at build time:
+// US/Canada 911 · EU 112 · India ambulance 108 · UK 999 · Australia 000.
+const EMERGENCY_NUMBER: string =
+  String((import.meta as any).env?.VITE_EMERGENCY_NUMBER || '').trim() || '112';
 
 // ── Browser speech APIs (feature-detected) ────────────────────────────────────
 const SpeechRecognitionImpl: any =
@@ -301,6 +324,7 @@ const TTS_SUPPORTED = !!synth;
 export default function TriageChat({
   medicalProfile,
   patientName,
+  ambulanceDispatched,
   onComplete,
   onFastTrack,
   onLocation,
@@ -310,6 +334,8 @@ export default function TriageChat({
   // shape, with "Not Provided" already filled in for anything unset.
   const profile = normalizeMedicalProfile(medicalProfile);
   const profileAlerts = medicalProfileAlerts(profile);
+  // Undefined means the parent does not report it: keep the old behaviour.
+  const dispatched = ambulanceDispatched !== false;
 
   const [engine, setEngine] = useState<Engine>('llm');
   const [lang, setLang] = useState<LangCode>('en');
@@ -321,6 +347,9 @@ export default function TriageChat({
   const [triageResult, setTriageResult] = useState<TriageResult | null>(null);
   const [showResult, setShowResult] = useState(false);
   const [fastTracked, setFastTracked] = useState(false);
+  // Phones only: the Medical Profile is a one-line bar that opens on tap, so it
+  // does not take the room the conversation needs. Wider screens always show it.
+  const [railOpen, setRailOpen] = useState(false);
 
   const [quickReplies, setQuickReplies] = useState<string[]>([]);
   const [inputType, setInputType] = useState<InputType>('text');
@@ -335,7 +364,7 @@ export default function TriageChat({
   const [listening, setListening] = useState(false);
   const [interim, setInterim] = useState('');
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const answersRef = useRef<Record<string, string>>({});
   const triageResultRef = useRef<TriageResult | null>(null);
   const fastTrackedRef = useRef(false);
@@ -352,8 +381,13 @@ export default function TriageChat({
   // quick-start chips and to allow live language switching of the greeting.
   const conversationStarted = messages.some((m) => m.type === 'user');
 
+  // Scrolls the message list itself. scrollIntoView() also scrolled the page,
+  // which on a phone dragged the whole screen around after every message.
   const scrollToBottom = useCallback(() => {
-    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
+    setTimeout(() => {
+      const list = messagesRef.current;
+      if (list) list.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+    }, 80);
   }, []);
 
   // ── Text-to-speech ──
@@ -364,7 +398,7 @@ export default function TriageChat({
     }
     try {
       synth.cancel();
-      const u = new SpeechSynthesisUtterance(text.replace(/[🏥🤖🚨⚙️✦⚠●🩺📍❤️🫁🩸🚗🧠😵🎙️🎤]/g, ''));
+      const u = new SpeechSynthesisUtterance(text.replace(/[\p{Extended_Pictographic}\uFE0F✦●]/gu, ''));
       u.lang = LANGS.find((l) => l.code === langRef.current)?.bcp47 || 'en-US';
       u.rate = 1.05;
       u.pitch = 1;
@@ -441,7 +475,9 @@ export default function TriageChat({
     setMessages([{ id: 'welcome', type: 'system', text: STRINGS[lang].welcome, subtext: STRINGS[lang].welcomeSub }]);
   }, [lang, conversationStarted]);
 
-  useEffect(() => { scrollToBottom(); }, [messages, isTyping, scrollToBottom]);
+  // Also when the dock changes height (new quick replies, pain scale), since
+  // that shrinks the list and would otherwise hide the newest message.
+  useEffect(() => { scrollToBottom(); }, [messages, isTyping, quickReplies, inputType, triageResult, scrollToBottom]);
 
   // ── Fast-track on CRITICAL ──
   const maybeFastTrack = useCallback((merged: Record<string, string>) => {
@@ -550,7 +586,7 @@ export default function TriageChat({
 
     if (!resp.available) {
       setEngine('local');
-      setMessages(prev => [...prev, { id: `fallback-${Date.now()}`, type: 'system', text: t.offlineNotice, transient: true }]);
+      setMessages(prev => [...prev, { id: `fallback-${Date.now()}`, type: 'system', text: STRINGS[langRef.current].offlineNotice, transient: true }]);
       runLocalDescription(text, answersRef.current);
       return;
     }
@@ -642,7 +678,7 @@ export default function TriageChat({
     const painColor = painValue <= 3 ? '#00875a' : painValue <= 6 ? '#ffab00' : painValue <= 8 ? '#ff8b00' : '#de350b';
 
     return (
-      <div className="triage-dock">
+      <div className={`triage-dock${inputType === 'pain' ? ' triage-dock--pain' : ''}`}>
         {/* Feature: one-tap quick-start chips on the welcome screen. */}
         {!conversationStarted && quickReplies.length === 0 && inputType !== 'pain' && (
           <div className="triage-quickstart-group">
@@ -692,7 +728,8 @@ export default function TriageChat({
               className={`triage-mic-btn ${listening ? 'active' : ''}`}
               onClick={toggleMic}
               title={listening ? 'Stop listening' : 'Tap to speak'}
-              aria-label="Microphone"
+              aria-label={listening ? 'Stop listening' : 'Speak your answer'}
+              type="button"
             >
               {listening ? '⏹' : '🎤'}
             </button>
@@ -700,6 +737,9 @@ export default function TriageChat({
           <input
             className="triage-inputbar-field"
             type="text"
+            enterKeyHint="send"
+            autoComplete="off"
+            aria-label={t.placeholder}
             placeholder={listening ? t.placeholderListening : quickReplies.length ? t.placeholderQuick : t.placeholder}
             value={listening ? interim || textValue : textValue}
             onChange={(e) => setTextValue(e.target.value)}
@@ -734,9 +774,9 @@ export default function TriageChat({
       {/* ── Chat Panel ── */}
       <div className="triage-chat-panel">
         <div className="triage-chat-header">
-          <div className="triage-chat-header-icon">🩺</div>
+          <div className="triage-chat-header-icon" aria-hidden="true">🩺</div>
           <div className="triage-header-titles">
-            <h3>Emergency Triage AI</h3>
+            <h3><span className="triage-title-long">Emergency </span>Triage AI</h3>
             <p>{engine === 'llm' ? t.subtitleLlm : t.subtitleLocal}</p>
           </div>
           <div className="triage-header-controls">
@@ -795,13 +835,13 @@ export default function TriageChat({
           </a>
         </div>
 
-        {fastTracked && !triageResult && (
+        {fastTracked && dispatched && !triageResult && (
           <div className="triage-fasttrack-banner">
             {t.fastTrackBanner}
           </div>
         )}
 
-        <div className="triage-chat-messages" aria-live="polite" aria-atomic="false">
+        <div className="triage-chat-messages" ref={messagesRef} aria-live="polite" aria-atomic="false">
           {messages.map((msg) => (
             <div key={msg.id} className={`triage-message ${msg.type}`}>
               <div className="triage-message-avatar">{msg.type === 'system' ? '🩺' : '👤'}</div>
@@ -830,22 +870,20 @@ export default function TriageChat({
               <span className="triage-typing-text">{t.thinking}</span>
             </div>
           )}
-
-          <div ref={messagesEndRef} />
         </div>
 
         <div className="triage-chat-input-area">
           {triageResult ? (
             <div className="triage-success-panel">
-              <div className="triage-success-head">
-                <div className="triage-success-icon">🚑</div>
+              <div className={`triage-success-head${dispatched ? '' : ' is-pending'}`} role="status">
+                <div className="triage-success-icon" aria-hidden="true">{dispatched ? '🚑' : '⚠️'}</div>
                 <div className="triage-success-titles">
-                  <strong>{t.ambulanceOnWay}</strong>
-                  <span>{t.ambulanceOnWaySub}</span>
+                  <strong>{dispatched ? t.ambulanceOnWay : t.notDispatched}</strong>
+                  <span>{dispatched ? t.ambulanceOnWaySub : t.notDispatchedSub}</span>
                 </div>
               </div>
               <div className="triage-success-actions">
-                {onTrack && (
+                {onTrack && dispatched && (
                   <button className="triage-track-btn" onClick={onTrack}>{t.trackAmbulance}</button>
                 )}
                 <button className="triage-see-result-btn" onClick={() => setShowResult(true)}>{t.seeResult}</button>
@@ -862,16 +900,27 @@ export default function TriageChat({
           conversation rather than behind a click, so allergies, conditions and
           medication are in view while the assessment is being made. Read-only —
           it is supporting information and never alters the triage outcome. */}
-      <aside className="triage-medical-rail" aria-label="Patient medical profile">
-        <div className="triage-medical-rail-head">
+      <aside className={`triage-medical-rail${railOpen ? ' is-open' : ''}`} aria-label="Patient medical profile">
+        <button
+          type="button"
+          className="triage-medical-rail-head"
+          onClick={() => setRailOpen(open => !open)}
+          aria-expanded={railOpen}
+        >
           <span aria-hidden="true" style={{ fontSize: '15px' }}>🩺</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <h4>Medical Profile</h4>
-            <p className="triage-medical-rail-patient">
+          <span className="triage-medical-rail-titles">
+            <span className="triage-medical-rail-title">Medical Profile</span>
+            <span className="triage-medical-rail-patient">
               {patientName ? `${patientName} · from patient profile` : 'From the patient profile'}
-            </p>
-          </div>
-        </div>
+            </span>
+          </span>
+          {profileAlerts.length > 0 && (
+            <span className="triage-medical-rail-count">⚠️ {profileAlerts.length}</span>
+          )}
+          <span className="triage-medical-rail-chevron" aria-hidden="true">▾</span>
+        </button>
+
+        <div className="triage-medical-rail-body">
 
         {profileAlerts.length > 0 && (
           <div className="triage-medical-alerts" role="note">
@@ -894,13 +943,13 @@ export default function TriageChat({
             ? 'Latest details saved by the patient. Update them under Profile → Medical Profile.'
             : 'Nothing recorded yet. The patient can add these under Profile → Medical Profile.'}
         </p>
+        </div>
       </aside>
 
       {/* ── Result modal (opened from the "See result" button) ── */}
       {triageResult && showResult && (
-        <div className="triage-result-modal-overlay" onClick={() => setShowResult(false)} role="dialog" aria-modal="true">
-          <div className="triage-result-modal" onClick={(e) => e.stopPropagation()}>
-            <button className="triage-result-modal-close" onClick={() => setShowResult(false)} aria-label={t.closeResult}>✕</button>
+        <Modal onClose={() => setShowResult(false)} label="Emergency assessment" size="md" className="triage-result-modal">
+            <button type="button" className="triage-result-modal-close" onClick={() => setShowResult(false)} aria-label={t.closeResult}>✕</button>
             <div className="triage-assessment-card">
               <div className={`triage-assessment-header ${severityClass(triageResult.severity)}`}>
                 <span style={{ fontSize: '14px' }}>{getSeverityEmoji(triageResult.severity)}</span>
@@ -995,13 +1044,12 @@ export default function TriageChat({
                   </div>
                 </div>
                 <div className="triage-assessment-actions">
-                  <button className="triage-restart-btn" onClick={() => { setShowResult(false); handleRestart(); }}>↻ Redo Assessment</button>
-                  <button className="triage-result-done-btn" onClick={() => setShowResult(false)}>{t.closeResult}</button>
+                  <button type="button" className="triage-restart-btn" onClick={() => { setShowResult(false); handleRestart(); }}>↻ Redo Assessment</button>
+                  <button type="button" className="triage-result-done-btn" data-autofocus onClick={() => setShowResult(false)}>{t.closeResult}</button>
                 </div>
               </div>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

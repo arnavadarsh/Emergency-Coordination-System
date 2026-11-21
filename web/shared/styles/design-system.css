@@ -130,6 +130,9 @@ body {
 
 #root {
   min-height: 100vh;
+  /* iOS Safari: 100vh is the height with the toolbars hidden, so it overshoots
+     what is on screen. dvh tracks the visible area. */
+  min-height: 100dvh;
 }
 
 button,
@@ -273,6 +276,7 @@ input[type='range'] {
 .ui-app {
   display: flex;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--bg);
 }
 
@@ -282,6 +286,7 @@ input[type='range'] {
   position: sticky;
   top: 0;
   height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -538,6 +543,14 @@ input[type='range'] {
 .ui-topbar__titles {
   min-width: 0;
   flex: 1;
+}
+
+/* A long title is cut with an ellipsis rather than running under the actions. */
+.ui-topbar__title,
+.ui-topbar__subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ui-topbar__title {
@@ -1417,6 +1430,21 @@ button.ui-kpi {
   padding: 0 10px;
 }
 
+/* iOS Safari zooms the whole page in when a focused control's text is under
+   16px, and does not zoom back out — the layout then looks cut off. */
+@media (max-width: 640px), (pointer: coarse) {
+  .ui-input,
+  .ui-select,
+  .ui-textarea,
+  .ui-input--lg,
+  .ui-select--lg,
+  .ui-input--sm,
+  .ui-select--sm,
+  .ui-input.ui-mono {
+    font-size: 16px;
+  }
+}
+
 .ui-textarea {
   height: auto;
   min-height: 84px;
@@ -1830,6 +1858,18 @@ button.ui-kpi {
   .ui-table--stack td > * {
     min-width: 0;
   }
+
+  /* A cell's second line (phone number, note) goes under the value instead of
+     being squeezed beside it and clipped. */
+  .ui-table--stack td {
+    flex-wrap: wrap;
+  }
+
+  .ui-table--stack td > .ui-table__secondary {
+    flex: 1 1 100%;
+    margin-top: -4px;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* Toolbar above a table / list */
@@ -1915,6 +1955,7 @@ button.ui-kpi {
   width: 100%;
   max-width: 520px;
   max-height: calc(100vh - 40px);
+  max-height: calc(100dvh - 40px);
   display: flex;
   flex-direction: column;
   background: var(--surface);
@@ -2025,6 +2066,9 @@ button.ui-kpi {
   .ui-modal--lg {
     max-width: none;
     max-height: 94vh;
+    /* On an iPhone 94vh is taller than the visible screen, which pushed the
+       sheet's header and close button off the top. */
+    max-height: 94dvh;
     border-radius: var(--r-xl) var(--r-xl) 0 0;
     animation-name: ui-sheet-in;
   }

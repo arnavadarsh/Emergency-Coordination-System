@@ -20,7 +20,14 @@ class TokenStorage {
 
   static getUser(): any {
     const userData = localStorage.getItem(this.USER_KEY);
-    return userData ? JSON.parse(userData) : null;
+    if (!userData) return null;
+    try {
+      return JSON.parse(userData);
+    } catch {
+      // A damaged entry must not crash every page load; treat it as signed out.
+      localStorage.removeItem(this.USER_KEY);
+      return null;
+    }
   }
 
   static getUserRole(): string | null {

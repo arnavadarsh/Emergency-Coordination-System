@@ -80,6 +80,9 @@ export interface QueueItem {
   patientName: string;
   patientPhone: string | null;
   createdAt: string;
+  bookingType?: string;
+  /** Set for a scheduled transport: when the ambulance is wanted. */
+  scheduledTime?: string | null;
   waitingMinutes: number;
   needsDecision: boolean;
 }

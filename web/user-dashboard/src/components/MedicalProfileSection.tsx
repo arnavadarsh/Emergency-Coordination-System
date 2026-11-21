@@ -99,7 +99,9 @@ const MedicalProfileSection: React.FC<MedicalProfileSectionProps> = ({
   return (
     <section className="ui-card ui-enter" aria-labelledby="medical-profile-title">
       <div className="ui-card__header">
-        <div style={{ minWidth: 0, flex: 1 }}>
+        {/* A real basis, so on a phone the button drops below the text instead
+            of squeezing it into a one-word-wide column. */}
+        <div style={{ minWidth: 0, flex: '1 1 260px' }}>
           <h3 id="medical-profile-title" className="ui-card__title">
             <Icon name="stethoscope" size={17} />
             Medical Profile <span className="ui-label__optional">(optional)</span>

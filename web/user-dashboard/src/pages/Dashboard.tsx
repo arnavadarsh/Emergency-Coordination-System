@@ -150,6 +150,12 @@ const formatExpectedTime = (etaMinutes: number) =>
 // connection was down.
 const FALLBACK_REFRESH_MS = 5 * 60_000;
 
+const NO_PICKUP_MESSAGE =
+  'We could not find your location. Set the pickup point on the map or tap "Use Current Location", then tap "Request Emergency Ambulance".';
+
+/** Thrown when there is no real pickup position to send an ambulance to. */
+class PickupUnknownError extends Error {}
+
 function Dashboard() {
   const navigate = useNavigate();
   const [bookings, setBookings] = useState<Booking[]>([]);
@@ -199,7 +205,7 @@ function Dashboard() {
     hasSevereBleeding: false,
   });
   const [triageCompleted, setTriageCompleted] = useState(false);
-  const [, setTriageResultData] = useState<TriageResult | null>(null);
+  const [triageResultData, setTriageResultData] = useState<TriageResult | null>(null);
   const [fastTrackDispatched, setFastTrackDispatched] = useState(false);
   const fastTrackBookingIdRef = useRef<string | null>(null);
 
@@ -558,14 +564,12 @@ function Dashboard() {
   // Fallback: Get location by IP address
   const getLocationByIP = async () => {
     try {
-      console.log('Trying IP-based geolocation...');
       const response = await fetch('https://ipapi.co/json/');
       const data = await response.json();
       
       if (data.latitude && data.longitude) {
         const lat = data.latitude;
         const lng = data.longitude;
-        console.log('Got IP location:', lat, lng, data.city);
         
         setPickupCoords({ lat, lng });
         setPickupLocation(`${data.city || ''}, ${data.region || ''}, ${data.country_name || ''}`);
@@ -574,6 +578,8 @@ function Dashboard() {
           pickupMapInstanceRef.current.setView([lat, lng], 14);
           pickupMarkerRef.current.setLatLng([lat, lng]);
         }
+        // An address looked up from the network is accurate to the city at best.
+        toast('This is only an approximate location. Drag the pin to exactly where the ambulance should come.', { duration: 9000 });
         return true;
       }
     } catch (err) {
@@ -583,7 +589,6 @@ function Dashboard() {
   };
 
   const getCurrentLocation = async () => {
-    console.log('getCurrentLocation called');
     setGettingLocation(true);
     
     // First try browser geolocation
@@ -594,13 +599,11 @@ function Dashboard() {
         maximumAge: 60000
       };
       
-      console.log('Requesting browser geolocation...');
       
       navigator.geolocation.getCurrentPosition(
         (position) => {
           const lat = position.coords.latitude;
           const lng = position.coords.longitude;
-          console.log('Got browser location:', lat, lng);
           
           setPickupCoords({ lat, lng });
           setPickupLocation('Getting address...');
@@ -677,7 +680,7 @@ function Dashboard() {
       
       // Set bookings
       let mappedBookings: Booking[] = [];
-      if (data.bookings && data.bookings.length > 0) {
+      if (Array.isArray(data.bookings)) {
         mappedBookings = data.bookings.map((b: any) => ({
           id: b.id,
           userId: b.userId,
@@ -861,92 +864,72 @@ function Dashboard() {
     };
   }, []);
 
-  // ── Fast-track: dispatch immediately when triage detects a CRITICAL life-threat ──
-  const handleFastTrack = async (result: TriageResult) => {
-    if (fastTrackDispatched) return;
-    setFastTrackDispatched(true);
-    try {
-      // Resolve pickup — prefer what the user already set, else detect, else default.
-      let lat = pickupCoords?.lat;
-      let lng = pickupCoords?.lng;
-      let address = pickupLocation;
-      if (lat == null || lng == null) {
-        try {
-          const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
-            navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }),
-          );
-          lat = pos.coords.latitude;
-          lng = pos.coords.longitude;
-          address = address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-        } catch {
-          lat = 28.6139;
-          lng = 77.2090;
-          address = address || 'Location being detected';
-        }
-      }
-
-      const token = tokenStorage.getToken();
-      const bookingData = {
-        pickupLocation: address || 'Current Location',
-        pickupAddress: address || 'Current Location',
-        pickupLatitude: lat,
-        pickupLongitude: lng,
-        bookingType: 'EMERGENCY',
-        severity: 'CRITICAL',
-        description: result.chiefComplaint,
-        triageData: {
-          chiefComplaint: result.chiefComplaint,
-          severity: 'CRITICAL',
-          isBreathing: result.isBreathing,
-          isConscious: result.isConscious,
-          hasChestPain: result.hasChestPain,
-          hasSevereBleeding: result.hasSevereBleeding,
-        },
-      };
-      const response = await axios.post(`${API_BASE_URL}/bookings`, bookingData, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      fastTrackBookingIdRef.current = response.data?.id || response.data?.booking?.id || null;
-      toast.success('🚨 CRITICAL detected — ambulance dispatch initiated!', { duration: 6000 });
-      await fetchDashboardData();
-    } catch (err: any) {
-      // Let the user retry via the normal button if auto-dispatch failed.
-      setFastTrackDispatched(false);
-      console.error('Fast-track dispatch failed:', err);
-      toast.error('Auto-dispatch failed — tap "Request Emergency Ambulance" to retry.');
+  /**
+   * Where the ambulance should come: the point already set on the form, else
+   * this device's GPS, else the typed address looked up on the map.
+   *
+   * Returns null when none of those gives a real position. It used to fall
+   * back to a fixed point in central Delhi, which sent the ambulance there
+   * while telling the caller help was on its way — no dispatch is better than
+   * one to the wrong place, because the caller is then asked for the location.
+   */
+  const resolvePickup = async (): Promise<{ lat: number; lng: number; address: string } | null> => {
+    if (pickupCoords) {
+      return { ...pickupCoords, address: pickupLocation || `${pickupCoords.lat.toFixed(5)}, ${pickupCoords.lng.toFixed(5)}` };
     }
+
+    if (navigator.geolocation) {
+      try {
+        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 8000, maximumAge: 30000 }),
+        );
+        const lat = pos.coords.latitude;
+        const lng = pos.coords.longitude;
+        setPickupCoords({ lat, lng });
+        if (!pickupLocation) reverseGeocode(lat, lng, setPickupLocation);
+        return { lat, lng, address: pickupLocation || `${lat.toFixed(5)}, ${lng.toFixed(5)}` };
+      } catch {
+        // Denied, unavailable or timed out — try the typed address next.
+      }
+    }
+
+    const typed = pickupLocation.trim();
+    if (typed.length >= 3) {
+      try {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(typed)}&countrycodes=in&limit=1`,
+          { headers: { 'Accept-Language': 'en' } },
+        );
+        const [match] = (await response.json()) as PlaceSuggestion[];
+        const lat = match ? parseFloat(match.lat) : NaN;
+        const lng = match ? parseFloat(match.lon) : NaN;
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          setPickupCoords({ lat, lng });
+          return { lat, lng, address: typed };
+        }
+      } catch {
+        // No network for the lookup — fall through to "unknown".
+      }
+    }
+
+    return null;
   };
 
   /**
-   * Resolve a pickup location (shared GPS → device GPS → default) and create an
-   * EMERGENCY booking. Returns the created booking. Used to dispatch the
-   * ambulance the moment triage finishes, so the in-chat "ambulance is on its
-   * way" confirmation is accurate.
+   * Create an EMERGENCY booking from a triage result. Used to dispatch the
+   * moment triage finds a life-threat, and again when triage finishes, so the
+   * in-chat "ambulance is on its way" confirmation is accurate.
    */
   const createEmergencyBooking = async (result: TriageResult, severity: string): Promise<Booking | null> => {
-    let lat = pickupCoords?.lat;
-    let lng = pickupCoords?.lng;
-    let address = pickupLocation;
-    if (lat == null || lng == null) {
-      try {
-        const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
-          navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }),
-        );
-        lat = pos.coords.latitude;
-        lng = pos.coords.longitude;
-        address = address || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
-      } catch {
-        lat = 28.6139;
-        lng = 77.2090;
-        address = address || 'Location being detected';
-      }
-    }
+    const pickup = await resolvePickup();
+    if (!pickup) throw new PickupUnknownError(NO_PICKUP_MESSAGE);
+
     const token = tokenStorage.getToken();
     const bookingData = {
-      pickupLocation: address || 'Current Location',
-      pickupAddress: address || 'Current Location',
-      pickupLatitude: lat,
-      pickupLongitude: lng,
+      pickupLocation: pickup.address,
+      pickupAddress: pickup.address,
+      pickupLatitude: pickup.lat,
+      pickupLongitude: pickup.lng,
       bookingType: 'EMERGENCY',
       severity,
       description: result.chiefComplaint,
@@ -957,12 +940,43 @@ function Dashboard() {
         isConscious: result.isConscious,
         hasChestPain: result.hasChestPain,
         hasSevereBleeding: result.hasSevereBleeding,
+        emergencyType: result.emergencyType,
+        painLevel: result.painLevel,
+        isPregnant: result.isPregnant,
       },
     };
     const response = await axios.post(`${API_BASE_URL}/bookings`, bookingData, {
       headers: { Authorization: `Bearer ${token}` },
     });
     return (response.data?.booking || response.data) as Booking;
+  };
+
+  // ── Fast-track: dispatch immediately when triage detects a CRITICAL life-threat ──
+  // A ref as well as state: triage can finish while this request is still in
+  // flight, and must not send a second ambulance.
+  const dispatchInFlightRef = useRef(false);
+  const handleFastTrack = async (result: TriageResult) => {
+    if (fastTrackDispatched || dispatchInFlightRef.current || fastTrackBookingIdRef.current) return;
+    dispatchInFlightRef.current = true;
+    try {
+      const booking = await createEmergencyBooking(result, 'CRITICAL');
+      fastTrackBookingIdRef.current = booking?.id ?? null;
+      setFastTrackDispatched(true);
+      toast.success('🚨 CRITICAL detected — ambulance dispatch initiated!', { duration: 6000 });
+      await fetchDashboardData();
+    } catch (err: any) {
+      // Left undispatched, so finishing triage (or the button) tries again.
+      setFastTrackDispatched(false);
+      console.error('Fast-track dispatch failed:', err);
+      toast.error(
+        err instanceof PickupUnknownError
+          ? NO_PICKUP_MESSAGE
+          : 'Auto-dispatch failed — tap "Request Emergency Ambulance" to retry.',
+        { duration: 10000 },
+      );
+    } finally {
+      dispatchInFlightRef.current = false;
+    }
   };
 
   /** "Track ambulance" from the chat success screen → open live tracking. */
@@ -1003,12 +1017,24 @@ function Dashboard() {
         return;
       }
 
+      // A real position, never a guess: see resolvePickup.
+      const pickup = await resolvePickup();
+      if (!pickup) {
+        toast.error(
+          bookingType === 'SCHEDULED'
+            ? 'We could not find that pickup address. Choose it from the suggestions or click the map.'
+            : NO_PICKUP_MESSAGE,
+          { duration: 9000 },
+        );
+        return;
+      }
+
       const token = tokenStorage.getToken();
       const bookingData: any = {
-        pickupLocation: pickupLocation || 'Current Location',
-        pickupAddress: pickupLocation || 'Current Location',
-        pickupLatitude: pickupCoords?.lat || 28.6139,
-        pickupLongitude: pickupCoords?.lng || 77.2090,
+        pickupLocation: pickup.address,
+        pickupAddress: pickup.address,
+        pickupLatitude: pickup.lat,
+        pickupLongitude: pickup.lng,
         bookingType,
       };
 
@@ -1017,24 +1043,24 @@ function Dashboard() {
         bookingData.destinationAddress = dropoffLocation;
         bookingData.destinationLatitude = dropoffCoords?.lat;
         bookingData.destinationLongitude = dropoffCoords?.lng;
-        bookingData.scheduledTime = scheduledTime;
+        // The picker gives local wall-clock time with no zone; send an exact instant.
+        bookingData.scheduledTime = new Date(scheduledTime).toISOString();
         bookingData.ambulanceFacilities = ambulanceFacilities;
       } else {
         const td = triageOverride || triageData;
-        bookingData.triageData = td;
+        // The hospital's alert and hospital matching need the kind of emergency, not just its severity.
+        bookingData.triageData = triageResultData
+          ? { ...td, emergencyType: triageResultData.emergencyType, painLevel: triageResultData.painLevel, isPregnant: triageResultData.isPregnant }
+          : td;
         bookingData.severity = td.severity;
         bookingData.description = td.chiefComplaint;
       }
 
-      console.log('Creating booking with data:', bookingData);
-
-      const response = await axios.post(
+      await axios.post(
         `${API_BASE_URL}/bookings`,
         bookingData,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-
-      console.log('Booking created successfully:', response.data);
 
       // Reset form
       setShowBookingForm(false);
@@ -1122,21 +1148,16 @@ function Dashboard() {
         { headers: { Authorization: `Bearer ${token}` } }
       );
 
-      // Call emergency services (simulate)
-      console.log('📞 Emergency services alerted!');
-      
-      // Notify emergency contact
-      if (userProfile?.emergencyContact) {
-        console.log(`📲 Notifying emergency contact: ${userProfile.emergencyContact}`);
-      }
-
-      await fetchDashboardData();
+      const fresh = await fetchDashboardData();
       setShowSOSConfirm(false);
-      toast.success('🚨 SOS activated! Ambulance dispatched — stay calm, help is on the way!', { duration: 6000 });
+      toast.success('🚨 SOS activated! Ambulance requested — stay calm, help is on the way!', { duration: 6000 });
 
-      // Start tracking the new booking
-      const newBooking = response.data;
-      setTrackingBooking(newBooking);
+      // Open tracking on the booking as the dashboard knows it (with its
+      // ambulance, hospital and numeric coordinates) — the raw API row has none
+      // of those and left the tracking view half empty.
+      const newId = response.data?.id || response.data?.booking?.id;
+      const newBooking = fresh.find(b => b.id === newId);
+      if (newBooking) setTrackingBooking(newBooking);
 
     } catch (err) {
       console.error('SOS Emergency failed:', err);
@@ -1190,7 +1211,8 @@ function Dashboard() {
     // other case, dispatch now so the chat's "ambulance is on its way"
     // confirmation + Track button are accurate. The booking form stays open
     // showing that success screen until the user taps Track.
-    if (!fastTrackDispatched && !fastTrackBookingIdRef.current) {
+    if (!fastTrackDispatched && !fastTrackBookingIdRef.current && !dispatchInFlightRef.current) {
+      dispatchInFlightRef.current = true;
       try {
         const booking = await createEmergencyBooking(result, mappedSeverity);
         fastTrackBookingIdRef.current = booking?.id ?? null;
@@ -1198,7 +1220,14 @@ function Dashboard() {
         await fetchDashboardData();
       } catch (err) {
         console.error('Auto-dispatch on triage complete failed:', err);
-        toast.error('Could not dispatch automatically — tap "Request Emergency Ambulance".');
+        toast.error(
+          err instanceof PickupUnknownError
+            ? NO_PICKUP_MESSAGE
+            : 'Could not dispatch automatically — tap "Request Emergency Ambulance".',
+          { duration: 10000 },
+        );
+      } finally {
+        dispatchInFlightRef.current = false;
       }
     } else {
       await fetchDashboardData();
@@ -1789,7 +1818,8 @@ function Dashboard() {
                         type="datetime-local"
                         value={scheduledTime}
                         onChange={(e) => setScheduledTime(e.target.value)}
-                        min={new Date().toISOString().slice(0, 16)}
+                        // Local time, like the picker's own value — toISOString() is UTC and allowed past times.
+                        min={new Date(Date.now() - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)}
                         required
                       />
                     </div>
@@ -1822,6 +1852,7 @@ function Dashboard() {
                   <TriageChat
                     patientName={userProfile?.name}
                     medicalProfile={medicalProfile}
+                    ambulanceDispatched={fastTrackDispatched}
                     onFastTrack={handleFastTrack}
                     onComplete={handleTriageComplete}
                     onTrack={handleTrackFromChat}

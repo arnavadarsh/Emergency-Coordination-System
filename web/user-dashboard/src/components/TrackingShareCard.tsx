@@ -116,7 +116,8 @@ const TrackingShareCard: React.FC<TrackingShareCardProps> = ({ apiBaseUrl, token
       {/* The link itself, visible and selectable. A copy button alone gives no
           way to tell a good link from a mangled one when a paste goes wrong. */}
       <div className="usr-share__link">
-        <div className="ui-input-wrap" style={{ flex: 1, minWidth: 0 }}>
+        {/* Takes a full row on a phone, so the link is readable, not four letters wide. */}
+        <div className="ui-input-wrap" style={{ flex: '1 1 240px', minWidth: 0 }}>
           <Icon name="link" size={15} />
           <input
             readOnly

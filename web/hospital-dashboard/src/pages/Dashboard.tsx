@@ -236,16 +236,12 @@ const Dashboard = () => {
     let connectedBefore = false;
 
     socket.on('connect', () => {
-      console.log('[PreArrival] Socket connected, id=', socket.id);
       // Catch up on anything that happened while the connection was down.
       if (connectedBefore) scheduleRefresh();
       connectedBefore = true;
       // Re-join hospital room on every (re)connect so we never miss alerts after a reconnect
       if (hospitalIdRef.current) {
-        console.log('[PreArrival] Joining hospital room on connect, hospitalId=', hospitalIdRef.current);
         socket.emit('join_hospital', { hospitalId: hospitalIdRef.current });
-      } else {
-        console.log('[PreArrival] Connected but hospitalId not known yet — will join when fetchDashboardData completes');
       }
     });
 
@@ -258,7 +254,6 @@ const Dashboard = () => {
     });
 
     socket.on('pre_arrival_alert', (alert: PreArrivalAlert) => {
-      console.log('[PreArrival] Received pre_arrival_alert:', JSON.stringify(alert, null, 2));
       setPreArrivalAlerts(prev => {
         const existingIndex = prev.findIndex(a => a.dispatchId === alert.dispatchId);
         if (existingIndex !== -1) {
@@ -273,7 +268,6 @@ const Dashboard = () => {
 
     // Update status on existing alerts when dispatch progresses
     socket.on('dispatch_status_updated', (data: { dispatchId: string; status: string }) => {
-      console.log('[PreArrival] dispatch_status_updated received:', data);
       setPreArrivalAlerts(prev =>
         prev.map(a => a.dispatchId === data.dispatchId ? { ...a, status: data.status } : a)
       );
@@ -299,19 +293,16 @@ const Dashboard = () => {
     });
 
     socket.on('hospital_reroute_search_started', (payload: any) => {
-      console.log('[Reroute] hospital_reroute_search_started:', payload);
       if (payload?.message) notify({ tone: 'warning', title: 'Rerouting', text: payload.message, sticky: true });
       fetchDashboardData();
     });
 
     socket.on('dispatch_diverted', (payload: any) => {
-      console.log('[Reroute] dispatch_diverted:', payload);
       setPreArrivalAlerts(prev => prev.filter(a => a.dispatchId !== payload?.dispatchId));
       fetchDashboardData();
     });
 
-    socket.on('hospital_reroute_escalated', (payload: any) => {
-      console.warn('[Reroute] hospital_reroute_escalated:', payload);
+    socket.on('hospital_reroute_escalated', () => {
       notify({
         tone: 'danger',
         title: 'Escalated to admin',
@@ -329,7 +320,6 @@ const Dashboard = () => {
   // fetchDashboardData completes after socket is already connected)
   useEffect(() => {
     if (!hospitalInfo.id || !socketRef.current) return;
-    console.log('[PreArrival] Emitting join_hospital, hospitalId=', hospitalInfo.id, 'connected=', socketRef.current.connected);
     socketRef.current.emit('join_hospital', { hospitalId: hospitalInfo.id });
   }, [hospitalInfo.id]);
 

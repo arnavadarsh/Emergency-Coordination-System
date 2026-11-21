@@ -838,6 +838,23 @@
 
   .usr-form__footer .ui-btn {
     flex: 1 1 100%;
+    /* A long label wraps on a narrow phone instead of overflowing the card. */
+    min-width: 0;
+    height: auto;
+    min-height: var(--btn-h);
+    padding-top: 8px;
+    padding-bottom: 8px;
+    white-space: normal;
+  }
+
+  /* Less gutter on a phone: the map and the triage chat need the width. */
+  .usr-form__body {
+    padding: 14px 10px;
+    gap: 14px;
+  }
+
+  .usr-share__link > .ui-btn {
+    flex: 1 1 auto;
   }
 
   .usr-location {
