@@ -7,6 +7,7 @@ import { tokenStorage } from '../utils/tokenStorage';
 import ActiveCaseCard from '../components/ActiveCaseCard';
 import CaseChat from '../components/CaseChat';
 import { useCaseChats } from '../hooks/useCaseChats';
+import { useLocationSharing } from '../utils/useLocationSharing';
 import { formatIstDateTime, formatIstFull } from '@shared/utils/datetime';
 import { normalizeMedicalProfile, type MedicalProfile } from '@shared/types/medicalProfile';
 import { API_BASE_URL, SOCKET_URL } from '../config/api';
@@ -105,6 +106,12 @@ function Dashboard() {
     apiBaseUrl: API_BASE_URL,
     getToken: () => tokenStorage.getToken(),
   });
+
+  // Live GPS: reported for as long as this dashboard is open and an ambulance is linked.
+  const sharing = useLocationSharing(driverProfile?.ambulanceId || null, Boolean(activeDispatch));
+  // The device's own fix is fresher than the copy that came back from the server.
+  const ambulanceLat = sharing.latitude ?? driverProfile?.ambulance?.currentLatitude;
+  const ambulanceLng = sharing.longitude ?? driverProfile?.ambulance?.currentLongitude;
 
   const fetchData = async () => {
     try {
@@ -264,6 +271,21 @@ function Dashboard() {
       {isAvailable ? 'Available' : 'On dispatch'}
     </span>
   );
+  const SHARING_LABELS: Record<typeof sharing.status, { text: string; tone: string; help: string } | null> = {
+    off: null,
+    starting: { text: 'Finding location…', tone: 'tone-neutral', help: 'Waiting for this device to report its position.' },
+    sharing: { text: 'Sharing location', tone: 'tone-success', help: 'Your position is being sent to dispatch, the patient and the hospital.' },
+    denied: { text: 'Location blocked', tone: 'tone-danger', help: 'Allow location access for this site in your browser, then reload. Without it, dispatch and the patient cannot see where you are.' },
+    unsupported: { text: 'No location on this device', tone: 'tone-danger', help: 'This browser cannot report a position.' },
+    error: { text: 'Location not updating', tone: 'tone-warning', help: 'The position could not be read or sent. It retries automatically.' },
+  };
+  const sharingLabel = SHARING_LABELS[sharing.status];
+  const locationBadge = sharingLabel && (
+    <span className={`ui-badge ui-badge--lg ${sharingLabel.tone}`} title={sharingLabel.help} role="status">
+      <Icon name="locate" size={14} />
+      {sharingLabel.text}
+    </span>
+  );
   const goToCase = activeDispatch && ['AT_PICKUP','EN_ROUTE_HOSPITAL','AT_HOSPITAL'].includes(activeDispatch.status);
 
   return (
@@ -340,7 +362,7 @@ function Dashboard() {
 
       {/* ── Main ────────────────────────────────── */}
       <div className="ui-main">
-        <header className="ui-topbar">
+        <header className="ui-topbar ui-topbar--wrap">
           <button type="button" className="ui-btn ui-btn--secondary ui-btn--icon ui-menu-btn" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
             <Icon name="menu" />
           </button>
@@ -348,7 +370,7 @@ function Dashboard() {
             <h1 className="ui-topbar__title">{TITLES[activeTab].title}</h1>
             <div className="ui-topbar__subtitle">{TITLES[activeTab].subtitle}</div>
           </div>
-          <div className="ui-topbar__actions">{availability}</div>
+          <div className="ui-topbar__actions">{locationBadge}{availability}</div>
         </header>
 
         <main id="main" className="ui-content ui-content--narrow" key={activeTab}>
@@ -367,7 +389,7 @@ function Dashboard() {
 
                 {['ASSIGNED','DISPATCHED','EN_ROUTE_PICKUP','EN_ROUTE'].includes(activeDispatch.status) && (
                   <section className="ui-card ui-enter" style={{ ['--i' as string]: 1 }}>
-                    <Suspense fallback={null}><DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
+                    <Suspense fallback={null}><DriverRouteMap ambulanceLat={ambulanceLat} ambulanceLng={ambulanceLng}
                       targetLat={activeDispatch.booking.pickupLatitude} targetLng={activeDispatch.booking.pickupLongitude}
                       targetLabel={activeDispatch.booking.pickupLocation} title="Route to patient" ctaLabel="Open in Maps" /></Suspense>
                   </section>
@@ -375,7 +397,7 @@ function Dashboard() {
 
                 {goToCase && (
                   <section className="ui-card ui-enter" style={{ ['--i' as string]: 1 }}>
-                    <Suspense fallback={null}><DriverRouteMap ambulanceLat={driverProfile?.ambulance?.currentLatitude} ambulanceLng={driverProfile?.ambulance?.currentLongitude}
+                    <Suspense fallback={null}><DriverRouteMap ambulanceLat={ambulanceLat} ambulanceLng={ambulanceLng}
                       targetLat={activeDispatch.booking.destinationLatitude} targetLng={activeDispatch.booking.destinationLongitude}
                       targetLabel={activeDispatch.booking.selectedHospitalName||activeDispatch.booking.dropoffLocation}
                       title="Route to hospital" ctaLabel="Open in Maps" /></Suspense>
