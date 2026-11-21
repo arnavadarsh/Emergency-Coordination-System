@@ -1,4 +1,4 @@
-import { IsNumber, IsString, IsOptional, IsEnum, IsObject } from 'class-validator';
+import { IsNumber, IsString, IsOptional, IsEnum, IsObject, IsIn, IsISO8601, Min, Max } from 'class-validator';
 import { SeverityLevel } from '../../common/enums';
 
 /**
@@ -6,10 +6,14 @@ import { SeverityLevel } from '../../common/enums';
  */
 export class CreateBookingDto {
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsOptional()
   pickupLatitude?: number;
 
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsOptional()
   pickupLongitude?: number;
 
@@ -22,10 +26,14 @@ export class CreateBookingDto {
   pickupLocation?: string;
 
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsOptional()
   destinationLatitude?: number;
 
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsOptional()
   destinationLongitude?: number;
 
@@ -45,9 +53,19 @@ export class CreateBookingDto {
   @IsOptional()
   description?: string;
 
-  @IsString()
+  @IsIn(['EMERGENCY', 'SCHEDULED'])
   @IsOptional()
   bookingType?: string;
+
+  /** Required for a SCHEDULED booking: when the ambulance is wanted, ISO-8601. */
+  @IsISO8601()
+  @IsOptional()
+  scheduledTime?: string;
+
+  /** Equipment asked for on a SCHEDULED booking, e.g. { oxygenSupport: true }. */
+  @IsObject()
+  @IsOptional()
+  ambulanceFacilities?: Record<string, boolean>;
 
   @IsObject()
   @IsOptional()

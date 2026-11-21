@@ -10,6 +10,18 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole, SeverityLevel } from '../common/enums';
 import { CreateBookingDto as CreateLegacyBookingDto } from './dto/create-booking.dto';
 import { CaseAccessService } from '../access/case-access.service';
+import { EmergencyType } from '../triage/entities/triage.entity';
+
+/** The triage engine's category names, as stored on a triage report. */
+const EMERGENCY_TYPE_BY_CATEGORY: Record<string, EmergencyType> = {
+  cardiac: EmergencyType.CARDIAC,
+  stroke: EmergencyType.NEURO,
+  neurological: EmergencyType.NEURO,
+  trauma: EmergencyType.TRAUMA,
+  respiratory: EmergencyType.RESPIRATORY,
+  obstetric: EmergencyType.OBSTETRIC,
+  other: EmergencyType.OTHER,
+};
 
 @Controller('bookings')
 export class BookingsController {
@@ -65,27 +77,32 @@ export class BookingsController {
     const pickupAddress = createBookingDto.pickupAddress || createBookingDto.pickupLocation;
     const destinationAddress = createBookingDto.destinationAddress || createBookingDto.dropoffLocation;
     
-    if (!pickupAddress && !createBookingDto.pickupLatitude) {
-      throw new BadRequestException('Pickup location is required');
+    // The pickup point decides which ambulance goes and where it drives, so it
+    // has to be a real position. A booking with only an address used to be
+    // given a fixed point in central Delhi — and an ambulance was sent there.
+    const pickupLatitude = createBookingDto.pickupLatitude;
+    const pickupLongitude = createBookingDto.pickupLongitude;
+    if (
+      typeof pickupLatitude !== 'number' || typeof pickupLongitude !== 'number' ||
+      !Number.isFinite(pickupLatitude) || !Number.isFinite(pickupLongitude)
+    ) {
+      throw new BadRequestException('Pickup coordinates are required: set the pickup point on the map or share your location');
     }
     
-    // Use default coordinates if not provided (could be replaced with geocoding service)
-    // Default to a central location if only address is provided
-    const pickupLatitude = createBookingDto.pickupLatitude || 28.6139; // Default Delhi coords
-    const pickupLongitude = createBookingDto.pickupLongitude || 77.2090;
-    
-    // Determine severity from triage data if provided
-    let severity = createBookingDto.severity || SeverityLevel.MEDIUM;
-    if (createBookingDto.triageData) {
-      // Auto-determine severity based on triage data
-      if (!createBookingDto.triageData.isBreathing || !createBookingDto.triageData.isConscious) {
-        severity = SeverityLevel.CRITICAL;
-      } else if (createBookingDto.triageData.hasChestPain || createBookingDto.triageData.hasSevereBleeding) {
-        severity = SeverityLevel.HIGH;
-      } else if (createBookingDto.triageData.severity) {
-        severity = createBookingDto.triageData.severity;
-      }
+    // A scheduled transport needs a time, and one that has not already gone.
+    const isScheduled = createBookingDto.bookingType === 'SCHEDULED';
+    const scheduledTime = isScheduled && createBookingDto.scheduledTime ? new Date(createBookingDto.scheduledTime) : null;
+    if (isScheduled && !scheduledTime) {
+      throw new BadRequestException('A scheduled booking needs a date and time');
     }
+    if (scheduledTime && scheduledTime.getTime() < Date.now() - 5 * 60_000) {
+      throw new BadRequestException('The scheduled time has already passed');
+    }
+    const facilities = Object.entries(createBookingDto.ambulanceFacilities ?? {})
+      .filter(([, wanted]) => wanted === true)
+      .map(([name]) => name.replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase());
+
+    const severity = this.resolveSeverity(createBookingDto.severity, createBookingDto.triageData);
     
     return this.bookingsService.create(user.id, {
       pickupLatitude,
@@ -95,8 +112,72 @@ export class BookingsController {
       destinationLongitude: createBookingDto.destinationLongitude,
       destinationAddress,
       severity,
-      description: createBookingDto.triageData?.chiefComplaint || createBookingDto.description,
+      description:
+        [
+          createBookingDto.triageData?.chiefComplaint || createBookingDto.description,
+          isScheduled && facilities.length > 0 ? `Requested: ${facilities.join(', ')}` : null,
+        ].filter(Boolean).join(' · ') || undefined,
+      bookingType: isScheduled ? 'SCHEDULED' : 'EMERGENCY',
+      scheduledTime,
+      triage: isScheduled ? undefined : this.toTriageInput(createBookingDto.triageData),
     });
+  }
+
+  /**
+   * The severity a booking is dispatched at: the highest of what the caller
+   * asked for and what the triage findings themselves demand.
+   *
+   * The findings can only raise it. They used to replace it, so a CRITICAL
+   * request that mentioned chest pain was stored as HIGH; and a missing
+   * breathing/consciousness answer counted as "no", making it CRITICAL.
+   */
+  private resolveSeverity(requested: SeverityLevel | undefined, triageData: any): SeverityLevel {
+    const order = [SeverityLevel.LOW, SeverityLevel.MEDIUM, SeverityLevel.HIGH, SeverityLevel.CRITICAL];
+    const valid = (value: unknown): SeverityLevel | null =>
+      order.includes(value as SeverityLevel) ? (value as SeverityLevel) : null;
+
+    const candidates: SeverityLevel[] = [];
+    const asked = valid(requested);
+    if (asked) candidates.push(asked);
+
+    if (triageData && typeof triageData === 'object') {
+      const fromTriage = valid(triageData.severity);
+      if (fromTriage) candidates.push(fromTriage);
+      // Only an explicit "no" is a red flag — the same rule as toTriageInput.
+      if (triageData.isBreathing === false || triageData.isConscious === false) {
+        candidates.push(SeverityLevel.CRITICAL);
+      } else if (triageData.hasChestPain === true || triageData.hasSevereBleeding === true) {
+        candidates.push(SeverityLevel.HIGH);
+      }
+    }
+
+    if (candidates.length === 0) return SeverityLevel.MEDIUM;
+    return candidates.reduce((worst, next) => (order.indexOf(next) > order.indexOf(worst) ? next : worst));
+  }
+
+  /**
+   * The triage findings sent with a booking, in the shape a triage report
+   * stores. Without this the hospital's pre-arrival alert and the hospital
+   * ranking knew only the severity, not what kind of emergency it was.
+   */
+  private toTriageInput(triageData: any) {
+    if (!triageData || typeof triageData !== 'object') return undefined;
+
+    const category = String(triageData.emergencyType ?? '').toLowerCase();
+    const emergencyType =
+      EMERGENCY_TYPE_BY_CATEGORY[category] ??
+      (triageData.hasChestPain ? EmergencyType.CARDIAC : EmergencyType.OTHER);
+    const painLevel = Number(triageData.painLevel);
+
+    return {
+      emergencyType,
+      // Unknown counts as "breathing"/"conscious": only an explicit false is a red flag.
+      breathing: triageData.isBreathing !== false,
+      conscious: triageData.isConscious !== false,
+      bleeding: triageData.hasSevereBleeding === true,
+      painLevel: Number.isFinite(painLevel) ? Math.max(0, Math.min(10, Math.round(painLevel))) : 0,
+      pregnancy: triageData.isPregnant === true,
+    };
   }
 
   @Patch(':id')

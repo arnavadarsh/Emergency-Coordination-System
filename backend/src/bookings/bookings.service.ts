@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, ForbiddenException, ConflictException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Brackets, Repository, DataSource } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Booking } from './entities/booking.entity';
 import { Dispatch } from '../dispatch/entities/dispatch.entity';
@@ -22,6 +22,14 @@ import { TravelTimeService } from '../common/travel-time/travel-time.service';
 import { CaseAccessService } from '../access/case-access.service';
 import { SystemSettingsService } from '../settings/system-settings.service';
 import { canonicalDispatchStatus } from '../dispatch/dispatch-status';
+import { haversineKm } from '../common/geo';
+
+/**
+ * How long before its requested time a scheduled booking is given an
+ * ambulance — long enough for the unit to drive there, short enough not to
+ * hold a unit idle that an emergency could use.
+ */
+export const SCHEDULED_DISPATCH_LEAD_MINUTES = 20;
 
 /**
  * Bookings Service
@@ -363,7 +371,22 @@ export class BookingsService {
     severity?: SeverityLevel;
     description?: string;
     bookingType?: string;
+    scheduledTime?: Date | null;
+    triage?: Pick<TriageReport, 'emergencyType' | 'breathing' | 'bleeding' | 'conscious' | 'painLevel' | 'pregnancy'>;
   }): Promise<Booking> {
+    // Saved first so the booking can point at it. A triage report that fails
+    // to save must not stop an ambulance being sent.
+    let triageReport: TriageReport | null = null;
+    if (data.triage) {
+      try {
+        triageReport = await this.dataSource.getRepository(TriageReport).save(
+          Object.assign(new TriageReport(), data.triage),
+        );
+      } catch (error: any) {
+        this.logger.warn(`[create] Could not save the triage report, booking continues without it: ${error?.message ?? error}`);
+      }
+    }
+
     const booking = this.bookingRepository.create({
       userId,
       pickupLatitude: data.pickupLatitude,
@@ -376,6 +399,8 @@ export class BookingsService {
       description: data.description,
       status: BookingStatus.CREATED,
       bookingType: data.bookingType || 'EMERGENCY',
+      scheduledTime: data.scheduledTime ?? null,
+      ...(triageReport ? { triageReport } : {}),
     });
     const savedBooking = await this.bookingRepository.save(booking);
     this.realtimeGateway.emitToAdmins('booking_created', {
@@ -387,8 +412,13 @@ export class BookingsService {
 
     // Auto-dispatch: Find nearest available ambulance. With auto-dispatch
     // switched off by an admin, the booking waits in the admin queue instead.
-    if (this.settings.get('autoDispatchEnabled')) {
-      await this.tryDispatch(savedBooking);
+    // A scheduled transport still some way off waits for the retry worker,
+    // which dispatches it shortly before it is due — sending a unit now would
+    // take it away from emergencies for no reason.
+    const dueAt = savedBooking.scheduledTime ? new Date(savedBooking.scheduledTime).getTime() : 0;
+    const notDueYet = dueAt - Date.now() > SCHEDULED_DISPATCH_LEAD_MINUTES * 60_000;
+    if (this.settings.get('autoDispatchEnabled') && !notDueYet) {
+      await this.tryDispatch(savedBooking, triageReport);
     }
 
     return savedBooking;
@@ -398,6 +428,10 @@ export class BookingsService {
    * Bookings still waiting for an ambulance: open, never dispatched, and recent
    * enough that sending one now still makes sense. Oldest first; the retry
    * worker re-orders by severity.
+   *
+   * A scheduled booking counts from its requested time, not from when it was
+   * made: it is not waiting until it is nearly due, and it must not be dropped
+   * as "too old" for having been booked days ahead.
    */
   async findWaitingForAmbulance(maxAgeMinutes: number, limit: number): Promise<Booking[]> {
     const since = new Date(Date.now() - maxAgeMinutes * 60_000);
@@ -406,7 +440,12 @@ export class BookingsService {
       .leftJoin(Dispatch, 'dispatch', 'dispatch.bookingId = booking.id')
       .leftJoinAndSelect('booking.triageReport', 'triage')
       .where('booking.status IN (:...statuses)', { statuses: [BookingStatus.PENDING, BookingStatus.CREATED] })
-      .andWhere('booking.createdAt >= :since', { since })
+      .andWhere(new Brackets(due => {
+        due
+          .where('booking.scheduledTime IS NULL AND booking.createdAt >= :since')
+          .orWhere('booking.scheduledTime IS NOT NULL AND booking.scheduledTime <= :dueBy AND booking.scheduledTime >= :since');
+      }))
+      .setParameters({ since, dueBy: new Date(Date.now() + SCHEDULED_DISPATCH_LEAD_MINUTES * 60_000) })
       .andWhere('dispatch.id IS NULL')
       .orderBy('booking.createdAt', 'ASC')
       .limit(limit)
@@ -464,7 +503,7 @@ export class BookingsService {
       .map(ambulance => ({
         ambulance,
         distance: ambulance.currentLatitude != null && ambulance.currentLongitude != null
-          ? this.calculateDistance(
+          ? haversineKm(
               Number(booking.pickupLatitude),
               Number(booking.pickupLongitude),
               Number(ambulance.currentLatitude),
@@ -879,25 +918,6 @@ export class BookingsService {
     } catch (err) {
       this.logger.error(`[autoDispatch] Could not open tracking for booking ${booking.id}`, err.stack);
     }
-  }
-
-  /**
-   * Calculate distance between two points using Haversine formula
-   */
-  private calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const R = 6371; // Earth's radius in km
-    const dLat = this.toRad(lat2 - lat1);
-    const dLon = this.toRad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(this.toRad(lat1)) * Math.cos(this.toRad(lat2)) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  }
-
-  private toRad(deg: number): number {
-    return deg * (Math.PI / 180);
   }
 
   /**

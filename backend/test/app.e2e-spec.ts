@@ -191,6 +191,81 @@ describe('ECS API (e2e)', () => {
     });
   });
 
+  describe('triage and scheduled bookings', () => {
+    it('keeps the triage findings with a booking made from the patient app', async () => {
+      const booking = await http()
+        .post('/api/bookings')
+        .set('Authorization', `Bearer ${patient}`)
+        .send({
+          pickupLatitude: 28.6, pickupLongitude: 77.2, pickupAddress: 'Home', severity: 'HIGH',
+          triageData: { chiefComplaint: 'Cannot breathe', emergencyType: 'respiratory', isBreathing: false, isConscious: true, painLevel: 7 },
+        })
+        .expect(201);
+      const report = await http().get(`/api/bookings/${booking.body.id}/report`).set('Authorization', `Bearer ${admin}`).expect(200);
+      expect(report.body.triage).toMatchObject({ emergencyType: 'RESPIRATORY', breathing: false, conscious: true, painLevel: 7 });
+      // Not breathing outranks the severity the client sent.
+      expect(report.body.emergency.severity).toBe('CRITICAL');
+      await http().patch(`/api/bookings/${booking.body.id}/cancel`).set('Authorization', `Bearer ${patient}`).expect(200);
+    });
+
+    it('refuses a booking with no real pickup position, rather than guessing one', async () => {
+      const post = (body: Record<string, unknown>) =>
+        http().post('/api/bookings').set('Authorization', `Bearer ${patient}`).send(body);
+      await post({ pickupAddress: 'Somewhere in Delhi', severity: 'HIGH' }).expect(400);
+      await post({ pickupLatitude: 28.6, pickupAddress: 'Half a position' }).expect(400);
+      await post({ pickupLatitude: 128.6, pickupLongitude: 77.2, pickupAddress: 'Off the map' }).expect(400);
+    });
+
+    it('lets triage findings raise the severity but never lower it', async () => {
+      const severityOf = async (body: Record<string, unknown>) => {
+        const booking = await http()
+          .post('/api/bookings')
+          .set('Authorization', `Bearer ${patient}`)
+          .send({ pickupLatitude: 28.6, pickupLongitude: 77.2, pickupAddress: 'Home', ...body })
+          .expect(201);
+        const report = await http().get(`/api/bookings/${booking.body.id}/report`).set('Authorization', `Bearer ${admin}`).expect(200);
+        await http().patch(`/api/bookings/${booking.body.id}/cancel`).set('Authorization', `Bearer ${patient}`).expect(200);
+        return report.body.emergency.severity;
+      };
+      // Chest pain alone means HIGH; it must not pull a CRITICAL request down to HIGH.
+      expect(await severityOf({ severity: 'CRITICAL', triageData: { severity: 'CRITICAL', isBreathing: true, isConscious: true, hasChestPain: true } })).toBe('CRITICAL');
+      // An unanswered breathing question is not "not breathing".
+      expect(await severityOf({ severity: 'LOW', triageData: { chiefComplaint: 'Sprained ankle' } })).toBe('LOW');
+      expect(await severityOf({ severity: 'LOW', triageData: { hasSevereBleeding: true } })).toBe('HIGH');
+    });
+
+    it('holds a scheduled booking instead of sending an ambulance straight away', async () => {
+      const auth = { Authorization: `Bearer ${admin}` };
+      const scheduled = (extra: Record<string, unknown>) =>
+        http()
+          .post('/api/bookings')
+          .set('Authorization', `Bearer ${patient}`)
+          .send({ pickupLatitude: 28.6, pickupLongitude: 77.2, pickupAddress: 'Home', bookingType: 'SCHEDULED', ...extra });
+
+      await scheduled({}).expect(400);
+      await scheduled({ scheduledTime: new Date(Date.now() - 3600_000).toISOString() }).expect(400);
+
+      const when = new Date(Date.now() + 3 * 3600_000).toISOString();
+      const booking = await scheduled({ scheduledTime: when, ambulanceFacilities: { oxygenSupport: true, ventilator: false } }).expect(201);
+      expect(booking.body.bookingType).toBe('SCHEDULED');
+      expect(booking.body.description).toContain('oxygen support');
+
+      const queue = await http().get('/api/admin/bookings/queue').set(auth).expect(200);
+      const queued = queue.body.items.find((b: { id: string }) => b.id === booking.body.id);
+      expect(new Date(queued.scheduledTime).toISOString()).toBe(when);
+      // A unit was free, and it was still left alone.
+      expect(queue.body.availableAmbulances).toBeGreaterThan(0);
+      const dispatches = await http().get('/api/dispatch').set(auth).expect(200);
+      expect(dispatches.body.some((d: { bookingId: string }) => d.bookingId === booking.body.id)).toBe(false);
+
+      // "Dispatch waiting bookings now" must not send it early either.
+      await http().post('/api/admin/system/dispatch-retry').set(auth).expect(200);
+      const after = await http().get('/api/dispatch').set(auth).expect(200);
+      expect(after.body.some((d: { bookingId: string }) => d.bookingId === booking.body.id)).toBe(false);
+      await http().patch(`/api/bookings/${booking.body.id}/cancel`).set('Authorization', `Bearer ${patient}`).expect(200);
+    });
+  });
+
   describe('abuse protection', () => {
     // Runs last: afterwards this address cannot sign in for a minute.
     it('rate-limits password guessing per address', async () => {

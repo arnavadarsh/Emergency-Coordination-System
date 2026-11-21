@@ -67,7 +67,9 @@ export class AdminOperationsService {
 
     const items = waiting
       .map(booking => {
-        const waitingMinutes = Math.max(0, Math.round((Date.now() - new Date(booking.createdAt).getTime()) / 60000));
+        // A scheduled transport has only been waiting since the time it was wanted.
+        const waitingSince = booking.scheduledTime ?? booking.createdAt;
+        const waitingMinutes = Math.max(0, Math.round((Date.now() - new Date(waitingSince).getTime()) / 60000));
         return {
           id: booking.id,
           status: booking.status,
@@ -76,6 +78,8 @@ export class AdminOperationsService {
           patientName: this.patientName(booking.user),
           patientPhone: booking.user?.phoneNumber ?? null,
           createdAt: booking.createdAt,
+          bookingType: booking.bookingType,
+          scheduledTime: booking.scheduledTime ?? null,
           waitingMinutes,
           // Past this age the retry worker no longer sends anyone by itself.
           needsDecision: waitingMinutes >= maxAge,

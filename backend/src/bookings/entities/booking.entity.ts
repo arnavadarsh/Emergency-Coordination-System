@@ -82,6 +82,10 @@ export class Booking {
   @Column({ type: 'text', nullable: true, name: 'destination_address' })
   destinationAddress: string;
 
+  /** When a SCHEDULED transport is wanted. Null for an emergency, which is wanted now. */
+  @Column({ type: timestampColumnType(), nullable: true, name: 'scheduled_time' })
+  scheduledTime: Date | null;
+
   @Column({ type: timestampColumnType(), nullable: true, name: 'completed_at' })
   completedAt: Date;
 

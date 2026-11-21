@@ -9,11 +9,11 @@ import { Ambulance } from '../ambulances/entities/ambulance.entity';
 import { User } from '../users/entities/user.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
 import { DriverIdentityService } from '../users/driver-identity.service';
+import { TravelTimeService } from '../common/travel-time/travel-time.service';
 import { MedicalProfileService } from '../users/medical-profile.service';
 import { BookingStatus, UserRole } from '../common/enums';
 import { isSqlite } from '../config/env';
 
-const EARTH_RADIUS_KM = 6371;
 
 @Injectable()
 export class DashboardService {
@@ -34,11 +34,8 @@ export class DashboardService {
     private auditRepository: Repository<AuditLog>,
     private readonly driverIdentityService: DriverIdentityService,
     private readonly medicalProfileService: MedicalProfileService,
+    private readonly travelTime: TravelTimeService,
   ) {}
-
-  private toRadians(degrees: number): number {
-    return (degrees * Math.PI) / 180;
-  }
 
   /** Patient's display name, falling back to the email local part. */
   private patientDisplayName(patient?: User | null): string {
@@ -47,83 +44,28 @@ export class DashboardService {
     return fullName || patient.email?.split('@')[0] || 'Patient';
   }
 
-  private calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
-    const dLat = this.toRadians(lat2 - lat1);
-    const dLon = this.toRadians(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(this.toRadians(lat1)) * Math.cos(this.toRadians(lat2)) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return EARTH_RADIUS_KM * c;
-  }
-
-  private buildFallbackEta(originLat: number, originLng: number, destinationLat: number, destinationLng: number) {
-    const distanceKm = this.calculateDistanceKm(originLat, originLng, destinationLat, destinationLng);
-    const assumedCitySpeedKmh = 35;
-    const etaMinutes = Math.max(1, Math.round((distanceKm / assumedCitySpeedKmh) * 60));
-    const expectedAt = new Date(Date.now() + etaMinutes * 60 * 1000);
+  /**
+   * Live ETA between two points, for the tracking views.
+   *
+   * Goes through TravelTimeService like every other ETA in the system, so it
+   * shares the cache, the request ceilings and the cooldown. It used to call
+   * Google directly on every poll from every open tracking screen, with no
+   * limit on what that could cost.
+   */
+  async getLiveEta(originLat: number, originLng: number, destinationLat: number, destinationLng: number) {
+    const estimate = await this.travelTime.estimateOne(
+      { latitude: originLat, longitude: originLng },
+      { latitude: destinationLat, longitude: destinationLng },
+    );
 
     return {
-      source: 'fallback',
-      etaMinutes,
-      etaText: `${etaMinutes} min`,
-      expectedArrivalIso: expectedAt.toISOString(),
-      distanceKm: Number(distanceKm.toFixed(2)),
+      source: estimate.source === 'google' ? 'google' : 'fallback',
+      etaMinutes: estimate.minutes,
+      etaText: `${estimate.minutes} min`,
+      expectedArrivalIso: new Date(Date.now() + estimate.minutes * 60_000).toISOString(),
+      distanceKm: estimate.distanceKm,
+      distanceText: `${estimate.distanceKm} km`,
     };
-  }
-
-  async getLiveEta(originLat: number, originLng: number, destinationLat: number, destinationLng: number) {
-    const apiKey = process.env.GOOGLE_MAPS_API_KEY;
-    if (!apiKey) {
-      return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
-    }
-
-    const origins = `${originLat},${originLng}`;
-    const destinations = `${destinationLat},${destinationLng}`;
-    const params = new URLSearchParams({
-      origins,
-      destinations,
-      mode: 'driving',
-      departure_time: 'now',
-      traffic_model: 'best_guess',
-      key: apiKey,
-    });
-
-    try {
-      const response = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?${params.toString()}`);
-      if (!response.ok) {
-        return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
-      }
-
-      const data: any = await response.json();
-      const element = data?.rows?.[0]?.elements?.[0];
-      const durationInTraffic = element?.duration_in_traffic;
-      const duration = element?.duration;
-      const distance = element?.distance;
-
-      if (data?.status !== 'OK' || !element || element.status !== 'OK' || (!durationInTraffic && !duration)) {
-        return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
-      }
-
-      const durationValueSec = Number(durationInTraffic?.value ?? duration?.value);
-      if (!Number.isFinite(durationValueSec) || durationValueSec <= 0) {
-        return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
-      }
-
-      const etaMinutes = Math.max(1, Math.round(durationValueSec / 60));
-      const expectedAt = new Date(Date.now() + etaMinutes * 60 * 1000);
-
-      return {
-        source: 'google',
-        etaMinutes,
-        etaText: durationInTraffic?.text || duration?.text || `${etaMinutes} min`,
-        expectedArrivalIso: expectedAt.toISOString(),
-        distanceText: distance?.text,
-      };
-    } catch {
-      return this.buildFallbackEta(originLat, originLng, destinationLat, destinationLng);
-    }
   }
 
   /**
@@ -161,6 +103,7 @@ export class DashboardService {
       this.dispatchRepository
         .createQueryBuilder('dispatch')
         .innerJoinAndSelect('dispatch.booking', 'booking')
+        .leftJoinAndSelect('booking.triageReport', 'triage')
         .leftJoinAndSelect('dispatch.ambulance', 'ambulance')
         .where('dispatch.hospitalId = :hospitalId', { hospitalId: hospital.id })
         .andWhere('booking.status IN (:...liveStatuses)', { liveStatuses })
@@ -214,8 +157,15 @@ export class DashboardService {
           longitude: d.ambulance?.currentLongitude ?? null,
         },
         patientSeverity: d.booking?.severity ?? 'MEDIUM',
-        emergencyType: null,
-        triage: null,
+        // Same findings the live alert carried, so a page reload loses nothing.
+        emergencyType: d.booking?.triageReport?.emergencyType ?? null,
+        triage: d.booking?.triageReport ? {
+          breathing: d.booking.triageReport.breathing,
+          bleeding: d.booking.triageReport.bleeding,
+          conscious: d.booking.triageReport.conscious,
+          painLevel: d.booking.triageReport.painLevel,
+          pregnancy: d.booking.triageReport.pregnancy,
+        } : null,
         medicalProfile: this.medicalProfileService.fromMap(alertMedicalProfiles, d.booking?.userId),
         etaMinutes: d.estimatedPickupTime ?? null,
         status: d.status,
@@ -641,7 +591,7 @@ export class DashboardService {
           destinationLongitude: d.booking.destinationLongitude || d.hospital?.longitude,
           selectedHospitalName: d.booking.destinationAddress || d.hospital?.name || 'Hospital',
           selectedHospitalAddress: d.hospital?.address || d.booking.destinationAddress || 'Address unavailable',
-          bookingType: d.booking.severity === 'CRITICAL' || d.booking.severity === 'HIGH' ? 'EMERGENCY' : 'SCHEDULED',
+          bookingType: d.booking.bookingType || 'EMERGENCY',
           severity: d.booking.severity,
           status: d.booking.status,
           createdAt: d.booking.createdAt,
@@ -701,7 +651,8 @@ export class DashboardService {
         dropoffLocation: b.destinationAddress,
         destinationLatitude: b.destinationLatitude || dispatch?.hospital?.latitude,
         destinationLongitude: b.destinationLongitude || dispatch?.hospital?.longitude,
-        bookingType: b.severity === 'CRITICAL' || b.severity === 'HIGH' ? 'EMERGENCY' : 'SCHEDULED',
+        bookingType: b.bookingType || 'EMERGENCY',
+        scheduledTime: b.scheduledTime ?? null,
         severity: b.severity,
         status: b.status,
         createdAt: b.createdAt,
